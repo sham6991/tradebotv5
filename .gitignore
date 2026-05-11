@@ -1,0 +1,48 @@
+# Python caches and local runtime files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Local secrets and broker authentication
+.env
+.env.*
+*.pem
+*.key
+*.token
+*token*
+*secret*
+zerodha_auth*.json
+zerodha_credentials*.json
+kite*.json
+
+# Trading outputs and generated reports
+results/
+*.db
+*.sqlite
+*.sqlite3
+*.xlsx
+*.xls
+*.csv
+*.log
+
+# Local state files created by live/paper sessions
+*_open_position.json
+*_pending_entry.json
+*_kill_switch.json
+*_audit.json
+
+# IDE and OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+

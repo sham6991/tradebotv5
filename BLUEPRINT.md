@@ -1,13 +1,13 @@
 # Algo Options Lab Blueprint
 
-Date: 2026-05-10
+Date: 2026-05-11
 
-This file is the current project blueprint and baseline reference. Future feature work should be made from a cloned/snapshotted copy of the project or a clearly separated working version, then documented back here only after the change is accepted.
+This file is the current project blueprint and baseline reference. The project is now under Git version control and backed up to a private GitHub repository.
 
 ## Future Change Rule
 
 - Treat this blueprint as the stable baseline.
-- Before major changes, create a copy/snapshot of the current project folder or use version control.
+- Before major changes, create a Git commit and work from a branch or clearly separated working version.
 - Do not overwrite working trading logic without keeping the previous working version available.
 - After every accepted change, update this blueprint with:
   - what changed
@@ -21,6 +21,7 @@ This file is the current project blueprint and baseline reference. Future featur
 - `ui.py` is the active UI.
 - `execution_v2.py` is the active live/paper trading engine.
 - `execution.py` is old/inactive for the UI and should not be used for new live-flow changes unless intentionally migrated.
+- `event_replay.py` powers the read-only Session Replay mode.
 
 ## Current Trading Flow
 
@@ -50,9 +51,21 @@ This file is the current project blueprint and baseline reference. Future featur
 
 ## Backtest Behavior
 
+- Backtesting uses the same `TradingEngine.find_trade()` decision path as live/paper for:
+  - NIFTY trend
+  - CE/PE selection
+  - option timestamp alignment
+  - Buy Score / Buy Entry gate
+  - entry offset
+  - target and stoploss calculation
 - NIFTY, CE, and PE are trimmed to their common datetime range.
 - NIFTY EMA/RSI is recomputed after trimming to avoid previous-day carryover distortion.
 - Option data is enriched with formula columns automatically.
+- Backtest order handling is simulated from candle high/low:
+  - target if candle high reaches target
+  - stoploss if candle low reaches stoploss
+  - otherwise time exit
+  - order status is `PAPER`
 - Reports are exported to Excel:
   - main trade file
   - CE trades
@@ -77,6 +90,25 @@ This file is the current project blueprint and baseline reference. Future featur
 - Live exits can react to live option tick price for target/stoploss.
 - Paper mode uses manual balance.
 - Real-money mode fetches Zerodha available margin and uses that as the starting balance.
+- Paper mode and live mode use the same live session engine, candle builder, signal engine, risk controls, and event/audit path. Live mode adds broker order placement and broker-state reconciliation.
+
+## Session Replay Behavior
+
+- Session Replay is the third main UI workspace beside Backtest and Live Desk.
+- It is read-only and must never connect to Zerodha or modify session databases.
+- It loads previous SQLite session databases from `results/`.
+- It shows:
+  - summary counts
+  - timeline rows
+  - critical/warning highlights
+  - partial-fill/partial-exit highlights
+  - rejected/failed order highlights
+  - kill switch and reconciliation events
+  - selected event/order payload JSON
+- It can export replay reports to text or JSON.
+- CLI usage:
+  - `python event_replay.py results\your_session.db`
+  - `python event_replay.py results\your_session.db --format json --output results\session_replay.json`
 
 ## Live Order Rules
 
@@ -147,6 +179,14 @@ Runtime safety modules:
 - Open positions are persisted to JSON and SQLite state.
 - Pending limit entries are persisted to JSON and SQLite state.
 - Kill switch state is persisted for the active session.
+- Structured order lifecycle events are written into the existing SQLite `events` table through `event_logger.py`.
+- Session close writes a JSON audit report when a live/paper session database exists.
+- Alert hooks surface high-risk events without changing trading decisions:
+  - kill switch activation
+  - startup reconciliation errors
+  - partial entry fills
+  - partial exit fills
+  - unknown broker state after order timeout/error
 
 ## Important Files
 
@@ -187,15 +227,38 @@ Runtime safety modules:
   - SQLite audit/state persistence
 - `reporting.py`
   - Excel export and datetime formatting
+- `event_logger.py`
+  - structured event payload model
+- `event_replay.py`
+  - read-only session replay timeline and reports
+- `session_audit.py`
+  - end-of-session audit JSON
+- `preflight.py`
+  - live/paper startup validation
+- `ui_replay.py`
+  - Session Replay UI workspace
 
 ## Verification Baseline
 
 Last known checks performed:
 
-- Python compile checks passed for changed active modules.
+- Python compile checks passed for the full project:
+  - `python -m compileall -q .`
 - Unit test suite passes:
   - `python -m unittest discover -s tests`
-  - latest result: 25 tests OK.
+  - latest result: 80 tests OK, 1 skipped.
+- The skipped test is the gated 10-million tick candle-builder stress test:
+  - `RUN_CANDLE_BUILDER_STRESS=1`
+- A direct decision-engine smoke check confirmed:
+  - bullish NIFTY selects CE
+  - bearish NIFTY selects PE
+  - Buy Score gate remains active
+- A direct backtest-core smoke check confirmed:
+  - CE trade
+  - Buy Entry `BUY`
+  - Buy Score `85.0`
+  - target exit
+  - order status `PAPER`
 - Current unit coverage includes:
   - Zerodha order manager mock lifecycle.
   - risk guard daily/profit/loss/square-off/kill-switch behavior.
@@ -205,20 +268,80 @@ Last known checks performed:
   - partial-fill order-history persistence/migration.
   - partial pending-entry lifecycle.
   - partial exit kill-switch protection.
+  - structured event payload shape and lifecycle event logging.
+  - event replay summaries/highlights.
+  - session audit summaries.
+  - buffered Excel writer.
+  - async SQLite store wrapper.
+  - optimized candle builder behavior.
+  - incremental live indicator/scoring updates.
+  - timestamp index maps.
+  - live UI update throttling.
+  - live candle memory trimming.
+  - order idempotency.
+  - alert hooks.
+  - Session Replay UI helper behavior.
 
 ## Recommended Next Major Upgrade
 
-After this baseline, the next large change should be done in a cloned/snapshotted copy:
+After this baseline, the next work should be done from Git commits/branches:
 
-- Add structured event logs for high-risk order state transitions:
-  - kill switch activation
-  - startup reconciliation warning/error
-  - partial entry
-  - partial exit
-  - order placed/open/complete/rejected/cancelled
-- Add automated regression tests for backtest vs live decision parity.
-- Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
-- Add strategy replay mode from saved candles.
+1. Add GitHub CI:
+   - run `python -m unittest discover -s tests` on every push.
+   - optional compile sweep with `python -m compileall -q .`.
+2. Add strategy regression fixtures:
+   - bullish NIFTY selects CE.
+   - bearish NIFTY selects PE.
+   - sideways NIFTY gives no trade.
+   - Buy Score below threshold blocks entry.
+   - target exit.
+   - stoploss exit.
+   - time exit.
+3. Add config/profile versioning:
+   - store settings hash/version per session.
+   - include it in events, audits, and replay reports.
+4. Add backtest vs live/paper parity reporting:
+   - compare what the strategy would have done from saved candles against what the live/paper session actually did.
+5. Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
+
+## GitHub Repository Checkpoint - 2026-05-11
+
+- Private GitHub repository:
+  - `https://github.com/sham6991/tradebotV3`
+- Local branch:
+  - `main`
+- Initial private snapshot commit:
+  - `c894639 Initial private TradeBotV3 snapshot`
+- `.gitignore` protects:
+  - `results/`
+  - `*.db`
+  - `*.xlsx`
+  - `*.csv`
+  - `__pycache__/`
+  - virtual environments
+  - token/secret-like local files
+- Current tracked source snapshot intentionally excludes generated trading reports and broker/session secrets.
+
+## Accepted Upgrade Log - 2026-05-11
+
+- Added structured event model through `event_logger.py`.
+- Migrated high-risk lifecycle events to structured event payloads.
+- Added alert hooks for high-risk live events.
+- Optimized `candle_builder.py` for high-volume tick aggregation.
+- Added candle builder validation, out-of-order protection, volume reset handling, snapshots, flushing, and bounded active keys.
+- Added incremental live candle/indicator/scoring append path.
+- Added timestamp index maps for faster NIFTY-to-option alignment.
+- Added buffered Excel writer.
+- Added async SQLite write wrapper.
+- Added live UI throttling and health snapshot fields.
+- Added live candle memory trimming when safe.
+- Added session audit JSON.
+- Added event replay engine and CLI.
+- Added Session Replay as a third UI workspace.
+- Added preflight validation.
+- Added order idempotency.
+- Added broker error classification for timeout/unknown-state handling.
+- Verified core CE/PE, Buy Score, backtest, order, and risk paths remain intact.
 
 ## Reliability Upgrade Log - 2026-05-10
 

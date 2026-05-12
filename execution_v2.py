@@ -55,7 +55,6 @@ class LivePaperSession:
         self.options = option_dfs
         self.token_map = {int(k): v for k, v in token_map.items()}
         self.settings = settings
-        self.settings_profile = apply_settings_profile(self.settings)
         self.save_path = save_path
         self.on_trade = on_trade
         self.on_order_update = on_order_update
@@ -77,6 +76,7 @@ class LivePaperSession:
                 self._initial_margin_error = ""
         else:
             self._initial_margin_error = ""
+        self.settings_profile = apply_settings_profile(self.settings)
         self.lots = int(settings["lot_size"])
         self.max_trades = int(settings["max_trades"])
         self.trade_count = 0

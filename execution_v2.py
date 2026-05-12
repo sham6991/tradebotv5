@@ -4,6 +4,7 @@ import queue
 import threading
 import time
 from datetime import datetime, timedelta
+from typing import Any
 
 import pandas as pd
 
@@ -954,7 +955,12 @@ class LivePaperSession:
 
     def _check_live_exit(self, i):
         position = self.open_position
+        if not position:
+            return
         if self._check_protective_exit_orders(i):
+            return
+        position = self.open_position
+        if not position:
             return
         option = self.options[position["option_index"]]
         if i >= len(option):
@@ -1542,16 +1548,16 @@ class LivePaperSession:
 
     def _record_order_status_change(
         self,
-        order_id,
+        order_id: Any,
         status,
         signal,
         reason,
         entry_order_id="",
-        exit_order_id="",
-        quantity="",
-        lot_size="",
-        entry="",
-        exit_price="",
+        exit_order_id: Any = "",
+        quantity: Any = "",
+        lot_size: Any = "",
+        entry: Any = "",
+        exit_price: Any = "",
     ):
         if not order_id or not status or status == "UNKNOWN":
             return
@@ -1839,12 +1845,12 @@ class LivePaperSession:
         level,
         message,
         order_id="",
-        trade_no="",
+        trade_no: Any = "",
         status="",
         side="",
         instrument="",
-        quantity=None,
-        payload=None,
+        quantity: Any = None,
+        payload: Any = None,
     ):
         return self.event_logger.log(
             event_type,
@@ -1960,18 +1966,18 @@ class LivePaperSession:
     def _emit_order_event(
         self,
         signal,
-        trade_no,
+        trade_no: Any,
         side,
         status,
         order_id="",
         order_type="MARKET",
-        quantity="",
-        entry_price="",
-        exit_price="",
-        limit_price="",
-        trigger_price="",
-        target_price="",
-        stoploss_price="",
+        quantity: Any = "",
+        entry_price: Any = "",
+        exit_price: Any = "",
+        limit_price: Any = "",
+        trigger_price: Any = "",
+        target_price: Any = "",
+        stoploss_price: Any = "",
         exit_reason="",
         remarks="",
         parent_order_id="",
@@ -2169,11 +2175,7 @@ class LivePaperSession:
                 "active_keys": len(self.candle_builder.current),
             },
             "excel_writer": excel_health,
-            "store": {
-                "enabled": bool(self.store),
-                "path": self.store.path if self.store else "",
-                **(self.store.health() if self.store and hasattr(self.store, "health") else {"async": False}),
-            },
+            "store": self._store_health(),
             "ui": {
                 "emitted_updates": self.emitted_ui_updates,
                 "suppressed_updates": self.suppressed_ui_updates,
@@ -2229,8 +2231,7 @@ class LivePaperSession:
                 total_trades=self.trade_count,
                 ended=True,
             )
-            if hasattr(self.store, "close"):
-                self.store.close(timeout=10)
+            self.store.close(timeout=10)
             self._write_session_audit_report()
         if self.excel_writer:
             self.excel_writer.close(timeout=10)
@@ -2247,6 +2248,16 @@ class LivePaperSession:
         except Exception as exc:
             self._log_event("ERROR", "Session audit report failed", {"error": str(exc)})
             return None
+
+    def _store_health(self):
+        store = self.store
+        if not store:
+            return {"enabled": False, "path": "", "async": False}
+        return {
+            "enabled": True,
+            "path": store.path,
+            **store.health(),
+        }
 
 
 class Executor:
@@ -2329,8 +2340,11 @@ class Executor:
     def _connect_market_feed(self):
         if not self.feed_should_run:
             return None
+        zerodha = self.zerodha
+        if not zerodha:
+            raise ValueError("Connect Zerodha first.")
         self.feed_status = "connecting"
-        self.active_ticker = self.zerodha.start_ticker(
+        self.active_ticker = zerodha.start_ticker(
             self.feed_tokens,
             on_ticks=self._enqueue_ticks,
             on_connect=self._handle_feed_connect,
@@ -2439,7 +2453,8 @@ class Executor:
 
     def _start_tick_dispatcher(self, on_ticks):
         self._stop_tick_dispatcher()
-        self.tick_queue = queue.Queue(maxsize=self.tick_queue_size)
+        tick_queue = queue.Queue(maxsize=self.tick_queue_size)
+        self.tick_queue = tick_queue
         self.tick_stop.clear()
         self.dropped_tick_batches = 0
         self.processed_tick_count = 0
@@ -2451,9 +2466,9 @@ class Executor:
         self.last_dispatcher_error = ""
 
         def worker():
-            while not self.tick_stop.is_set() or not self.tick_queue.empty():
+            while not self.tick_stop.is_set() or not tick_queue.empty():
                 try:
-                    ticks = self.tick_queue.get(timeout=0.2)
+                    ticks = tick_queue.get(timeout=0.2)
                 except queue.Empty:
                     continue
                 try:
@@ -2465,7 +2480,7 @@ class Executor:
                         self.dispatcher_error_count += 1
                         self.last_dispatcher_error = str(exc)
                 finally:
-                    self.tick_queue.task_done()
+                    tick_queue.task_done()
 
         self.tick_worker = threading.Thread(
             target=worker,
@@ -2483,25 +2498,26 @@ class Executor:
         self.tick_queue = None
 
     def _enqueue_ticks(self, ticks):
-        if not ticks or self.tick_queue is None:
+        tick_queue = self.tick_queue
+        if not ticks or tick_queue is None:
             return
         batch = list(ticks)
         self.received_tick_count += len(batch)
         self.last_tick_received_at = time.time()
         try:
-            self.tick_queue.put_nowait(batch)
+            tick_queue.put_nowait(batch)
             return
         except queue.Full:
             self.dropped_tick_batches += 1
 
         try:
-            self.tick_queue.get_nowait()
-            self.tick_queue.task_done()
+            tick_queue.get_nowait()
+            tick_queue.task_done()
         except queue.Empty:
             pass
 
         try:
-            self.tick_queue.put_nowait(batch)
+            tick_queue.put_nowait(batch)
         except queue.Full:
             self.dropped_tick_batches += 1
 

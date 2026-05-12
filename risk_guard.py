@@ -1,8 +1,9 @@
 from datetime import datetime
+from typing import Any
 
 
 class LiveRiskGuard:
-    def __init__(self, settings, starting_balance=0, now_provider=None):
+    def __init__(self, settings, starting_balance: Any = 0.0, now_provider=None):
         self.settings = settings or {}
         self.daily_start_balance = float(starting_balance or 0)
         self.consecutive_losses = 0
@@ -23,13 +24,13 @@ class LiveRiskGuard:
         if self.kill_switch_active:
             self.blocked_reason = f"KILL SWITCH ACTIVE: {self.kill_switch_reason or 'Restored session state'}"
 
-    def record_trade_result(self, pnl):
+    def record_trade_result(self, pnl: Any):
         if float(pnl or 0) < 0:
             self.consecutive_losses += 1
         else:
             self.consecutive_losses = 0
 
-    def is_blocked(self, current_balance):
+    def is_blocked(self, current_balance: Any):
         if self.kill_switch_active:
             self.blocked_reason = f"KILL SWITCH ACTIVE: {self.kill_switch_reason or 'Trading disabled'}"
             return True, self.blocked_reason

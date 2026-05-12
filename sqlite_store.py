@@ -298,6 +298,12 @@ class TradingStore:
         with self._connect() as conn:
             conn.execute("DELETE FROM state WHERE key = ?", (key,))
 
+    def close(self, timeout=10):
+        return True
+
+    def health(self):
+        return {"async": False}
+
     def _json(self, value):
         return json.dumps(value or {}, default=str)
 

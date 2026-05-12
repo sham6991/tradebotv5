@@ -425,12 +425,12 @@ def calculate_scores(df, i, min_buy_score=60):
 def build_scoring_row(
     df,
     i,
-    bullish_threshold=5,
-    bearish_threshold=-5,
-    rsi_bull=55,
-    rsi_bear=45,
+    bullish_threshold: float = 5,
+    bearish_threshold: float = -5,
+    rsi_bull: float = 55,
+    rsi_bear: float = 45,
     data_kind="nifty",
-    min_buy_score=60,
+    min_buy_score: float = 60,
 ):
     if data_kind == "nifty":
         # For Nifty, only trend and indicators

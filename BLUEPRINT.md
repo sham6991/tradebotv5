@@ -310,6 +310,26 @@ After this baseline, the next work should be done from Git commits/branches:
 
 ## Accepted Upgrade Log - 2026-05-12
 
+- Cleaned Pylance diagnostics in `execution_v2.py` and related helper surfaces without changing trading behavior.
+- Static-analysis cleanup covered:
+  - flexible numeric/string event fields now have explicit broad type annotations.
+  - live-position and tick-queue optional state has clearer guards/local references.
+  - sync and async SQLite stores now expose a common `health()`/`close()` surface.
+  - numeric threshold helper signatures accept floats where runtime already allowed them.
+- Files affected:
+  - `execution_v2.py`
+  - `event_logger.py`
+  - `risk_guard.py`
+  - `strategy.py`
+  - `sqlite_store.py`
+  - `BLUEPRINT.md`
+- Behavior changed:
+  - No trading behavior changed; cleanup reduces IDE/Pylance false-positive diagnostics and keeps existing runtime paths intact.
+- Tests/smoke checks done:
+  - `python -m py_compile execution_v2.py event_logger.py risk_guard.py strategy.py sqlite_store.py` passed.
+  - `python -m unittest tests.test_strategy_regression tests.test_config_profile tests.test_event_logger tests.test_ui_update_throttle tests.test_async_sqlite_store` passed: 24 tests OK.
+  - `python -m unittest discover -s tests` passed: 90 tests OK, 1 skipped.
+
 - Added config/profile versioning through `config_profile.py`.
 - Settings profile versioning now:
   - builds a deterministic sanitized settings hash.

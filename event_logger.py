@@ -1,3 +1,5 @@
+from typing import Any
+
 ORDER_PLACED = "ORDER_PLACED"
 ORDER_OPEN = "ORDER_OPEN"
 ORDER_PARTIAL_FILL = "ORDER_PARTIAL_FILL"
@@ -35,12 +37,12 @@ def normalize_event(
     message,
     session_id="",
     order_id="",
-    trade_no="",
+    trade_no: Any = "",
     status="",
     side="",
     instrument="",
-    quantity=None,
-    payload=None,
+    quantity: Any = None,
+    payload: Any = None,
     source="",
 ):
     event_type = str(event_type or "").strip().upper()
@@ -77,12 +79,12 @@ class StructuredEventLogger:
         level,
         message,
         order_id="",
-        trade_no="",
+        trade_no: Any = "",
         status="",
         side="",
         instrument="",
-        quantity=None,
-        payload=None,
+        quantity: Any = None,
+        payload: Any = None,
     ):
         event = normalize_event(
             event_type,

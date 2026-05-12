@@ -2,11 +2,17 @@ import os
 from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
+from typing import TYPE_CHECKING
 
 from backtest import run_backtest
 from engine import parse_option_metadata_from_text
 from reporting import timestamped_file
 from ui_theme import PALETTE
+
+if TYPE_CHECKING:
+    from ui_shared import SharedUIMixin as _BacktestViewBase
+else:
+    _BacktestViewBase = object
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULT_FOLDER = os.path.join(BASE_DIR, "results")
@@ -17,7 +23,7 @@ SAMPLE_CE_PATH = r"c:\Users\ravku\Documents\Market\Testing\CE\CE070526.csv"
 SAMPLE_PE_PATH = r"c:\Users\ravku\Documents\Market\Testing\PE\PE070526.csv"
 
 
-class BacktestViewMixin:
+class BacktestViewMixin(_BacktestViewBase):
     def _backtest_symbol(self, symbol_entry, path_entry, fallback):
         symbol = symbol_entry.get().strip()
         default_symbol = fallback.replace(" ", "_")

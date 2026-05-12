@@ -9,6 +9,7 @@ from tick_storm_benchmark import build_history, build_option
 class BenchmarkEngine:
     def __init__(self):
         self.used = False
+        self.cooldown_until = -1
         self.last_skip_reason = ""
 
     def find_trade(self, nifty, options, i, settings):
@@ -37,7 +38,7 @@ class BenchmarkEngine:
             "score_row": {"Buy Score": 100, "Buy Entry": "BUY"},
         }
 
-    def mark_trade_complete(self, _exit_index):
+    def mark_trade_complete(self, exit_index):
         return
 
 

@@ -4,7 +4,7 @@ import queue
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 import pandas as pd
 
@@ -38,6 +38,15 @@ from strategy import append_option_formula_row, build_scoring_row, ensure_option
 from zerodha_client import ZerodhaClient
 
 
+class SessionEngine(Protocol):
+    cooldown_until: int
+    last_skip_reason: str
+
+    def find_trade(self, nifty, options, i, settings) -> Any: ...
+
+    def mark_trade_complete(self, exit_index) -> None: ...
+
+
 class LivePaperSession:
     def __init__(
         self,
@@ -63,7 +72,7 @@ class LivePaperSession:
         self.mode = mode
         self.zerodha = zerodha
         self.orders = ZerodhaOrderManager(zerodha=zerodha, mode=mode, default_lot_size=LOT_SIZE)
-        self.engine = TradingEngine(settings["cooldown"])
+        self.engine: SessionEngine = TradingEngine(settings["cooldown"])
         self.balance = float(settings.get("balance", 0))
         if self.mode == "LIVE" and self.zerodha:
             try:

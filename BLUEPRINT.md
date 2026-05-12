@@ -316,7 +316,9 @@ After this baseline, the next work should be done from Git commits/branches:
   - live-position and tick-queue optional state has clearer guards/local references.
   - sync and async SQLite stores now expose a common `health()`/`close()` surface.
   - numeric threshold helper signatures accept floats where runtime already allowed them.
+  - engine/strategy threshold and option metadata helpers expose the float/nullable types already accepted at runtime.
 - Files affected:
+  - `engine.py`
   - `execution_v2.py`
   - `event_logger.py`
   - `risk_guard.py`
@@ -327,6 +329,8 @@ After this baseline, the next work should be done from Git commits/branches:
   - No trading behavior changed; cleanup reduces IDE/Pylance false-positive diagnostics and keeps existing runtime paths intact.
 - Tests/smoke checks done:
   - `python -m py_compile execution_v2.py event_logger.py risk_guard.py strategy.py sqlite_store.py` passed.
+  - `python -m py_compile engine.py strategy.py` passed.
+  - `python -m unittest tests.test_strategy_regression tests.test_datetime_index_maps` passed: 10 tests OK.
   - `python -m unittest tests.test_strategy_regression tests.test_config_profile tests.test_event_logger tests.test_ui_update_throttle tests.test_async_sqlite_store` passed: 24 tests OK.
   - `python -m unittest discover -s tests` passed: 90 tests OK, 1 skipped.
 

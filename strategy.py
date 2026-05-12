@@ -2,7 +2,13 @@
 # MARKET TREND
 # ==================================================
 
-def market_trend(nifty_row, bullish_threshold=5, bearish_threshold=-5, rsi_bull=55, rsi_bear=45):
+def market_trend(
+    nifty_row,
+    bullish_threshold: float = 5,
+    bearish_threshold: float = -5,
+    rsi_bull: float = 55,
+    rsi_bear: float = 45,
+):
 
     ema_diff = nifty_row["EMA20"] - nifty_row["EMA50"]
     rsi = float(nifty_row.get("RSI", 0) or 0)

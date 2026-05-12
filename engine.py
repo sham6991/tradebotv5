@@ -1,4 +1,5 @@
 from bisect import bisect_right
+from typing import Any
 
 from strategy import (
     build_scoring_row,
@@ -63,7 +64,7 @@ def parse_option_metadata_from_text(text):
     return metadata
 
 
-def option_metadata(option_df, instrument=""):
+def option_metadata(option_df, instrument: Any = ""):
     symbol = str(option_df.attrs.get("tradingsymbol") or instrument or option_df.attrs.get("instrument") or "")
     strike = option_df.attrs.get("strike", "")
     expiry = option_df.attrs.get("expiry", "")
@@ -287,7 +288,7 @@ class TradingEngine:
         next_open = float(option_df.iloc[option_i + 1].get("open", option_df.iloc[option_i + 1]["close"]))
         entry_offset = float(settings.get("entry_offset", -2))
         entry_price = max(next_open + entry_offset, 0)
-        metadata = option_metadata(option_df, instrument)
+        metadata = option_metadata(option_df, instrument or "")
         self.last_skip_reason = "entry_created"
         return {
             "option": option_df,

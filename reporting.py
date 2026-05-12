@@ -234,6 +234,9 @@ def ensure_risk_engine_schema(path):
                 ended_at TEXT,
                 strategy_name TEXT,
                 strategy_version TEXT,
+                settings_hash TEXT,
+                settings_version TEXT,
+                settings_schema_version INTEGER,
                 data_start_date TEXT,
                 data_end_date TEXT,
                 initial_capital REAL,
@@ -254,6 +257,9 @@ def ensure_risk_engine_schema(path):
                 ended_at TEXT,
                 strategy_name TEXT,
                 strategy_version TEXT,
+                settings_hash TEXT,
+                settings_version TEXT,
+                settings_schema_version INTEGER,
                 initial_balance REAL,
                 final_balance REAL,
                 net_pnl REAL,
@@ -271,6 +277,9 @@ def ensure_risk_engine_schema(path):
                 ended_at TEXT,
                 strategy_name TEXT,
                 strategy_version TEXT,
+                settings_hash TEXT,
+                settings_version TEXT,
+                settings_schema_version INTEGER,
                 initial_balance REAL,
                 final_balance REAL,
                 net_pnl REAL,
@@ -287,6 +296,9 @@ def ensure_risk_engine_schema(path):
                 mode TEXT,
                 strategy_name TEXT,
                 strategy_version TEXT,
+                settings_hash TEXT,
+                settings_version TEXT,
+                settings_schema_version INTEGER,
                 total_trades INTEGER,
                 winning_trades INTEGER,
                 losing_trades INTEGER,
@@ -306,6 +318,12 @@ def ensure_risk_engine_schema(path):
             )
             """
         )
+        for table_name in ("backtest_runs", "paper_sessions", "live_sessions", "daily_performance"):
+            _ensure_sqlite_columns(cursor, table_name, {
+                "settings_hash": "TEXT",
+                "settings_version": "TEXT",
+                "settings_schema_version": "INTEGER",
+            })
 
 
 def validate_risk_engine_sqlite(path):
@@ -323,19 +341,22 @@ def validate_risk_engine_sqlite(path):
         ],
         "backtest_runs": [
             "run_id", "started_at", "ended_at", "strategy_name",
-            "strategy_version", "data_start_date", "data_end_date",
+            "strategy_version", "settings_hash", "settings_version",
+            "settings_schema_version", "data_start_date", "data_end_date",
             "initial_capital", "final_capital", "total_trades",
             "net_pnl", "max_drawdown", "notes"
         ],
         "paper_sessions": [
             "session_id", "started_at", "ended_at", "strategy_name",
-            "strategy_version", "initial_balance", "final_balance",
-            "net_pnl", "total_trades", "notes"
+            "strategy_version", "settings_hash", "settings_version",
+            "settings_schema_version", "initial_balance",
+            "final_balance", "net_pnl", "total_trades", "notes"
         ],
         "live_sessions": [
             "session_id", "started_at", "ended_at", "strategy_name",
-            "strategy_version", "initial_balance", "final_balance",
-            "net_pnl", "total_trades", "notes"
+            "strategy_version", "settings_hash", "settings_version",
+            "settings_schema_version", "initial_balance",
+            "final_balance", "net_pnl", "total_trades", "notes"
         ]
     }
 
@@ -359,6 +380,14 @@ def validate_risk_engine_sqlite(path):
                 return False
 
     return True
+
+
+def _ensure_sqlite_columns(cursor, table_name, columns):
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    existing = {row[1] for row in cursor.fetchall()}
+    for column, definition in columns.items():
+        if column not in existing:
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column} {definition}")
 
 
 def write_sqlite(path, rows_or_df, table_name="trades"):

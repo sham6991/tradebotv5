@@ -9,6 +9,7 @@ from datetime import datetime
 import pandas as pd
 
 from reporting import ensure_risk_engine_schema, format_datetime_value
+from config_profile import add_profile_to_payload, apply_settings_profile
 
 
 class TradingStore:
@@ -16,6 +17,7 @@ class TradingStore:
         self.path = path
         self.mode = mode
         self.settings = settings or {}
+        self.settings_profile = apply_settings_profile(self.settings)
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
@@ -158,6 +160,7 @@ class TradingStore:
                 conn.execute(f"ALTER TABLE order_history ADD COLUMN {column} {definition}")
 
     def log_event(self, level, message, payload=None):
+        payload = self._with_settings_profile(payload)
         with self._connect() as conn:
             conn.execute(
                 "INSERT INTO events(created_at, level, message, payload) VALUES (?, ?, ?, ?)",
@@ -189,6 +192,7 @@ class TradingStore:
             "ended_at": None,
             "strategy_name": self.settings.get("strategy_name", "tradebotV3_livepaper"),
             "strategy_version": self.settings.get("strategy_version", "1.0"),
+            **self.settings_profile,
             "initial_balance": initial_balance,
             "final_balance": initial_balance,
             "net_pnl": 0,
@@ -238,6 +242,7 @@ class TradingStore:
             )
 
     def log_order_history(self, event):
+        event = self._with_settings_profile(event)
         row = {
             "session_id": self.settings.get("session_id", ""),
             "session_trade_no": self._int_or_none(event.get("Session Trade No")),
@@ -344,6 +349,9 @@ class TradingStore:
             "market_regime_at_exit": trade.get("Market Regime", ""),
             "risk_profile_id": None,
         }
+
+    def _with_settings_profile(self, payload):
+        return add_profile_to_payload(payload or {}, self.settings)
 
     def _float_or_none(self, value):
         if value in ("", None):

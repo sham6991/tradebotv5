@@ -22,6 +22,7 @@ def build_session_replay(db_path, session_id="", include_order_history=True):
     return {
         "db_path": db_path,
         "session_id": session_id,
+        "settings_profile": load_settings_profile(db_path, session_id, timeline),
         "summary": summarize_timeline(timeline),
         "highlights": replay_highlights(timeline),
         "timeline": timeline,
@@ -136,6 +137,8 @@ def format_replay_report(report, include_payload=False):
         "SESSION REPLAY",
         f"Database: {report.get('db_path', '')}",
         f"Session: {report.get('session_id', '') or 'ALL'}",
+        f"Settings version: {report.get('settings_profile', {}).get('settings_version', '') or 'n/a'}",
+        f"Settings hash: {report.get('settings_profile', {}).get('settings_hash', '') or 'n/a'}",
         (
             "Window: "
             f"{summary.get('first_timestamp', '') or 'n/a'}"
@@ -190,6 +193,9 @@ def _event_items(db_path, session_id):
             "side": payload.get("side", ""),
             "instrument": payload.get("instrument", ""),
             "quantity": payload.get("quantity", None),
+            "settings_hash": payload.get("settings_hash", ""),
+            "settings_version": payload.get("settings_version", ""),
+            "settings_schema_version": payload.get("settings_schema_version", ""),
             "payload": payload,
         })
     return items
@@ -244,6 +250,9 @@ def _order_history_items(db_path, session_id):
             "parent_order_id": parent_order_id,
             "related_trade_id": related_trade_id,
             "error_reason": error_reason,
+            "settings_hash": _json(data).get("settings_hash", ""),
+            "settings_version": _json(data).get("settings_version", ""),
+            "settings_schema_version": _json(data).get("settings_schema_version", ""),
             "payload": _json(data),
         }
         for (
@@ -282,6 +291,49 @@ def _table_exists(conn, table_name):
         (table_name,),
     ).fetchone()
     return row is not None
+
+
+def load_settings_profile(db_path, session_id="", timeline=None):
+    if db_path and os.path.exists(db_path):
+        with closing(sqlite3.connect(db_path)) as conn:
+            for table_name, mode in (("live_sessions", "LIVE"), ("paper_sessions", "PAPER")):
+                if not _table_exists(conn, table_name):
+                    continue
+                columns = {
+                    row[1]
+                    for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                }
+                needed = {"settings_hash", "settings_version", "settings_schema_version"}
+                if not needed.issubset(columns):
+                    continue
+                row = conn.execute(
+                    f"""
+                    SELECT strategy_name, strategy_version, settings_hash,
+                           settings_version, settings_schema_version
+                    FROM {table_name}
+                    WHERE (? = '' OR session_id = ?)
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (session_id, session_id),
+                ).fetchone()
+                if row:
+                    return {
+                        "mode": mode,
+                        "strategy_name": row[0],
+                        "strategy_version": row[1],
+                        "settings_hash": row[2],
+                        "settings_version": row[3],
+                        "settings_schema_version": row[4],
+                    }
+    for item in timeline or []:
+        if item.get("settings_hash"):
+            return {
+                "settings_hash": item.get("settings_hash", ""),
+                "settings_version": item.get("settings_version", ""),
+                "settings_schema_version": item.get("settings_schema_version", ""),
+            }
+    return {}
 
 
 def _json(text):

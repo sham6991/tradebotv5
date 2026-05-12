@@ -9,6 +9,7 @@ def build_session_audit(db_path, session_id=""):
     events = _load_events(db_path, session_id)
     order_rows = _load_order_history(db_path, session_id)
     trade_rows = _load_trade_audit(db_path)
+    settings_profile = _load_settings_profile(db_path, session_id, events, order_rows)
 
     event_counts = {}
     for event in events:
@@ -30,6 +31,7 @@ def build_session_audit(db_path, session_id=""):
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "db_path": db_path,
         "session_id": session_id,
+        "settings_profile": settings_profile,
         "event_counts": event_counts,
         "order_action_counts": action_counts,
         "order_status_counts": status_counts,
@@ -115,6 +117,65 @@ def _load_trade_audit(db_path):
     with closing(sqlite3.connect(db_path)) as conn:
         rows = conn.execute("SELECT trade_no, data FROM trade_audit ORDER BY id").fetchall()
     return [{"trade_no": trade_no, "data": _json(data)} for trade_no, data in rows]
+
+
+def _load_settings_profile(db_path, session_id, events, order_rows):
+    if db_path and os.path.exists(db_path):
+        with closing(sqlite3.connect(db_path)) as conn:
+            for table_name, mode in (("live_sessions", "LIVE"), ("paper_sessions", "PAPER")):
+                if not _table_exists(conn, table_name):
+                    continue
+                columns = {
+                    row[1]
+                    for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+                }
+                needed = {"settings_hash", "settings_version", "settings_schema_version"}
+                if not needed.issubset(columns):
+                    continue
+                row = conn.execute(
+                    f"""
+                    SELECT strategy_name, strategy_version, settings_hash,
+                           settings_version, settings_schema_version
+                    FROM {table_name}
+                    WHERE (? = '' OR session_id = ?)
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (session_id, session_id),
+                ).fetchone()
+                if row:
+                    return {
+                        "mode": mode,
+                        "strategy_name": row[0],
+                        "strategy_version": row[1],
+                        "settings_hash": row[2],
+                        "settings_version": row[3],
+                        "settings_schema_version": row[4],
+                    }
+    for item in [*events, *order_rows]:
+        profile = _profile_from_item(item)
+        if profile:
+            return profile
+    return {}
+
+
+def _profile_from_item(item):
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else item
+    if not isinstance(payload, dict) or not payload.get("settings_hash"):
+        return {}
+    return {
+        "settings_hash": payload.get("settings_hash", ""),
+        "settings_version": payload.get("settings_version", ""),
+        "settings_schema_version": payload.get("settings_schema_version", ""),
+    }
+
+
+def _table_exists(conn, table_name):
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
 
 
 def _json(text):

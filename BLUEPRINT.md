@@ -286,12 +286,9 @@ Last known checks performed:
 
 After this baseline, the next work should be done from Git commits/branches:
 
-1. Add config/profile versioning:
-   - store settings hash/version per session.
-   - include it in events, audits, and replay reports.
-2. Add backtest vs live/paper parity reporting:
+1. Add backtest vs live/paper parity reporting:
    - compare what the strategy would have done from saved candles against what the live/paper session actually did.
-3. Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
+2. Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
 
 ## GitHub Repository Checkpoint - 2026-05-11
 
@@ -312,6 +309,33 @@ After this baseline, the next work should be done from Git commits/branches:
 - Current tracked source snapshot intentionally excludes generated trading reports and broker/session secrets.
 
 ## Accepted Upgrade Log - 2026-05-12
+
+- Added config/profile versioning through `config_profile.py`.
+- Settings profile versioning now:
+  - builds a deterministic sanitized settings hash.
+  - ignores session IDs and secret/token-like fields.
+  - stores `settings_hash`, `settings_version`, and `settings_schema_version` in live/paper session rows.
+  - adds settings profile fields to event and order-history payloads.
+  - exposes settings profile metadata in session audits and replay reports.
+- Files affected:
+  - `config_profile.py`
+  - `execution_v2.py`
+  - `sqlite_store.py`
+  - `reporting.py`
+  - `session_audit.py`
+  - `event_replay.py`
+  - `tests/test_config_profile.py`
+  - `tests/test_sqlite_store_order_history.py`
+  - `tests/test_session_audit.py`
+  - `tests/test_event_replay.py`
+  - `BLUEPRINT.md`
+- Behavior changed:
+  - Live/paper session databases now carry a reproducible settings profile version for audit and replay comparison.
+  - Trading decisions are unchanged.
+- Tests/smoke checks done:
+  - `python -m unittest tests.test_config_profile tests.test_sqlite_store_order_history tests.test_session_audit tests.test_event_replay` passed: 10 tests OK.
+  - `python -m compileall -q .` passed.
+  - `python -m unittest discover -s tests` passed: 90 tests OK, 1 skipped.
 
 - Added strategy regression fixtures in `tests/test_strategy_regression.py`.
 - Strategy regressions cover:

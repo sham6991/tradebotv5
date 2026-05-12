@@ -13,7 +13,8 @@ class EventReplayTests(unittest.TestCase):
     def test_load_session_timeline_combines_events_and_order_history(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = os.path.join(temp_dir, "session.db")
-            store = TradingStore(db_path, mode="LIVE", settings={"session_id": "S1"})
+            store = TradingStore(db_path, mode="LIVE", settings={"session_id": "S1", "lot_size": 75})
+            store.start_session("LIVE", "S1", 100000)
             logger = StructuredEventLogger(store, session_id="S1", source="test")
             logger.log(
                 ORDER_OPEN,
@@ -81,9 +82,11 @@ class EventReplayTests(unittest.TestCase):
             self.assertEqual(len(replay["highlights"]["partial_events"]), 1)
             self.assertEqual(len(replay["highlights"]["critical_events"]), 1)
             self.assertEqual(len(replay["highlights"]["rejected_or_failed_orders"]), 1)
+            self.assertTrue(replay["settings_profile"]["settings_hash"])
 
             report_lines = format_replay_report(replay)
             self.assertIn("SESSION REPLAY", report_lines[0])
+            self.assertTrue(any("Settings version: settings-v1-" in line for line in report_lines))
             self.assertTrue(any("Critical events: 1" in line for line in report_lines))
             self.assertTrue(any("Rejected/failed orders: 1" in line for line in report_lines))
 

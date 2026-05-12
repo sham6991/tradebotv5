@@ -9,6 +9,7 @@ import pandas as pd
 
 from candle_builder import CandleBuilder
 from config import LOT_SIZE
+from config_profile import apply_settings_profile
 from engine import TradingEngine, append_datetime_index_key, attach_datetime_index_map, timestamp_key
 from event_logger import (
     ENTRY_FILLED,
@@ -54,6 +55,7 @@ class LivePaperSession:
         self.options = option_dfs
         self.token_map = {int(k): v for k, v in token_map.items()}
         self.settings = settings
+        self.settings_profile = apply_settings_profile(self.settings)
         self.save_path = save_path
         self.on_trade = on_trade
         self.on_order_update = on_order_update

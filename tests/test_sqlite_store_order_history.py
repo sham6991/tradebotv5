@@ -72,6 +72,36 @@ class TradingStoreOrderHistoryTests(unittest.TestCase):
             self.assertIn("cancelled_quantity", columns)
             self.assertIn("is_partial_fill", columns)
 
+    def test_session_events_and_order_history_include_settings_profile(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = os.path.join(temp_dir, "session.db")
+            store = TradingStore(
+                db_path,
+                mode="LIVE",
+                settings={"session_id": "S1", "balance": 100000, "lot_size": 75},
+            )
+            store.start_session("LIVE", "S1", 100000)
+            store.log_event("INFO", "profiled event", {"event_type": "TEST"})
+            store.log_order_history({
+                "Session Trade No": 1,
+                "Timestamp": "2026-05-10 10:00:00",
+                "Action": "BUY",
+                "Order Status": "OPEN",
+            })
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                session_row = conn.execute(
+                    "SELECT settings_hash, settings_version, settings_schema_version FROM live_sessions"
+                ).fetchone()
+                event_payload = conn.execute("SELECT payload FROM events").fetchone()[0]
+                order_payload = conn.execute("SELECT data FROM order_history").fetchone()[0]
+
+            self.assertTrue(session_row[0])
+            self.assertTrue(session_row[1].startswith("settings-v1-"))
+            self.assertEqual(session_row[2], 1)
+            self.assertIn(session_row[0], event_payload)
+            self.assertIn(session_row[0], order_payload)
+
 
 if __name__ == "__main__":
     unittest.main()

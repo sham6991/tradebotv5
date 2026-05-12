@@ -12,7 +12,8 @@ class SessionAuditTests(unittest.TestCase):
     def test_build_session_audit_summarizes_events_and_order_history(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
             db_path = os.path.join(temp_dir, "session.db")
-            store = TradingStore(db_path, mode="LIVE", settings={"session_id": "S1"})
+            store = TradingStore(db_path, mode="LIVE", settings={"session_id": "S1", "lot_size": 75})
+            store.start_session("LIVE", "S1", 100000)
             logger = StructuredEventLogger(store, session_id="S1", source="test")
             logger.log(
                 KILL_SWITCH_ACTIVATED,
@@ -40,6 +41,8 @@ class SessionAuditTests(unittest.TestCase):
             self.assertEqual(audit["event_counts"][KILL_SWITCH_ACTIVATED], 1)
             self.assertEqual(audit["order_action_counts"]["BUY"], 1)
             self.assertEqual(audit["order_status_counts"]["OPEN"], 1)
+            self.assertTrue(audit["settings_profile"]["settings_hash"])
+            self.assertTrue(audit["settings_profile"]["settings_version"].startswith("settings-v1-"))
 
     def test_write_session_audit_writes_json_file(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

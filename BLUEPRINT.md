@@ -286,23 +286,12 @@ Last known checks performed:
 
 After this baseline, the next work should be done from Git commits/branches:
 
-1. Add GitHub CI:
-   - run `python -m unittest discover -s tests` on every push.
-   - optional compile sweep with `python -m compileall -q .`.
-2. Add strategy regression fixtures:
-   - bullish NIFTY selects CE.
-   - bearish NIFTY selects PE.
-   - sideways NIFTY gives no trade.
-   - Buy Score below threshold blocks entry.
-   - target exit.
-   - stoploss exit.
-   - time exit.
-3. Add config/profile versioning:
+1. Add config/profile versioning:
    - store settings hash/version per session.
    - include it in events, audits, and replay reports.
-4. Add backtest vs live/paper parity reporting:
+2. Add backtest vs live/paper parity reporting:
    - compare what the strategy would have done from saved candles against what the live/paper session actually did.
-5. Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
+3. Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
 
 ## GitHub Repository Checkpoint - 2026-05-11
 
@@ -321,6 +310,39 @@ After this baseline, the next work should be done from Git commits/branches:
   - virtual environments
   - token/secret-like local files
 - Current tracked source snapshot intentionally excludes generated trading reports and broker/session secrets.
+
+## Accepted Upgrade Log - 2026-05-12
+
+- Added strategy regression fixtures in `tests/test_strategy_regression.py`.
+- Strategy regressions cover:
+  - bullish NIFTY selects CE.
+  - bearish NIFTY selects PE.
+  - sideways NIFTY gives no trade.
+  - Buy Score below threshold blocks entry.
+  - target exit.
+  - stoploss exit.
+  - time exit.
+- Files affected:
+  - `tests/test_strategy_regression.py`
+  - `BLUEPRINT.md`
+- Behavior changed:
+  - No trading behavior changed; core strategy and backtest paths now have explicit regression coverage.
+- Tests/smoke checks done:
+  - `python -m unittest tests.test_strategy_regression` passed: 7 tests OK.
+  - `python -m compileall -q .` passed.
+  - `python -m unittest discover -s tests` passed: 87 tests OK, 1 skipped.
+
+- Added GitHub Actions CI workflow in `.github/workflows/ci.yml`.
+- CI runs on push and pull request events.
+- CI installs `requirements.txt`, runs `python -m compileall -q .`, and runs `python -m unittest discover -s tests`.
+- Files affected:
+  - `.github/workflows/ci.yml`
+  - `BLUEPRINT.md`
+- Behavior changed:
+  - GitHub will automatically verify compile checks and unit tests for pushed branches and pull requests.
+- Tests/smoke checks done:
+  - `python -m compileall -q .` passed.
+  - `python -m unittest discover -s tests` passed: 80 tests OK, 1 skipped.
 
 ## Accepted Upgrade Log - 2026-05-11
 

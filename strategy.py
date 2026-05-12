@@ -405,7 +405,7 @@ def append_option_formula_row(df):
     return df
 
 
-def calculate_scores(df, i, min_buy_score=60):
+def calculate_scores(df, i, min_buy_score: float = 60):
     if i == 0:
         return {
             "Buy Score": 0,

@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 from backtest import run_backtest
 from engine import parse_option_metadata_from_text
@@ -51,7 +51,10 @@ class BacktestViewMixin(_BacktestViewBase):
         self._section_title(form, "Dataset And Contract Metadata", "Strike, expiry, and type can be auto-detected from option filenames.")
         self.backtest_nifty = self._file_field(form, "NIFTY CSV", 2)
         labels = ["CALL 1", "PUT 1"]
-        self.backtest_options = [self._option_field(form, label, i + 4, with_metadata=True) for i, label in enumerate(labels)]
+        self.backtest_options = [
+            cast(tuple[tk.Entry, tk.Entry, tk.Entry, tk.Entry], self._option_field(form, label, i + 4, with_metadata=True))
+            for i, label in enumerate(labels)
+        ]
         tk.Label(form, text="Tradingsymbol", bg=PALETTE["surface"], fg=PALETTE["muted"], font=("Segoe UI", 9, "bold")).grid(row=3, column=3)
         tk.Label(form, text="Strike", bg=PALETTE["surface"], fg=PALETTE["muted"], font=("Segoe UI", 9, "bold")).grid(row=3, column=4)
         tk.Label(form, text="Expiry", bg=PALETTE["surface"], fg=PALETTE["muted"], font=("Segoe UI", 9, "bold")).grid(row=3, column=5)

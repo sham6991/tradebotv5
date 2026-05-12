@@ -286,9 +286,30 @@ Last known checks performed:
 
 After this baseline, the next work should be done from Git commits/branches:
 
-1. Add backtest vs live/paper parity reporting:
+1. Live-trial latency review before optimization:
+   - do not change live decision-path performance code before a real live/paper trial.
+   - after trial, measure completed-candle decision latency again.
+   - profile the path by slices:
+     - candle append.
+     - NIFTY indicator update.
+     - option formula/scoring update.
+     - datetime alignment.
+     - strategy decision.
+     - entry validation/order handling.
+     - log/audit/UI update emission.
+   - optimize only mechanical overhead if needed, without changing:
+     - CE/PE selection.
+     - Buy Score / Buy Entry behavior.
+     - entry price / entry offset behavior.
+     - target, stoploss, and time-exit behavior.
+     - trade rows, order-history payloads, audit/replay output shape.
+   - acceptance checks:
+     - existing unit suite stays green.
+     - strategy regression fixtures stay identical.
+     - before/after benchmark proves improvement.
+2. Add backtest vs live/paper parity reporting:
    - compare what the strategy would have done from saved candles against what the live/paper session actually did.
-2. Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
+3. Add fuller startup reconciliation auto-repair only after report-only behavior is trusted.
 
 ## GitHub Repository Checkpoint - 2026-05-11
 

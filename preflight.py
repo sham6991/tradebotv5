@@ -64,6 +64,8 @@ def _validate_settings(settings, checks):
     _float_setting(settings, "bearish_threshold", checks)
     _float_setting(settings, "rsi_bull", checks)
     _float_setting(settings, "rsi_bear", checks)
+    _float_setting(settings, "rsi_reversal_bullish", checks, default=70)
+    _float_setting(settings, "rsi_reversal_bearish", checks, default=20)
 
     interval = str(settings.get("chart_interval", "")).strip().lower()
     if not interval:
@@ -156,9 +158,9 @@ def _range_float(settings, key, checks, minimum, maximum):
         _add(checks, "ERROR", f"INVALID_{key.upper()}", f"{key} must be between {minimum} and {maximum}.", {"value": value})
 
 
-def _float_setting(settings, key, checks):
+def _float_setting(settings, key, checks, default=None):
     try:
-        return float(settings.get(key))
+        return float(settings.get(key, default))
     except (TypeError, ValueError):
         _add(checks, "ERROR", f"INVALID_{key.upper()}", f"{key} must be numeric.")
         return None

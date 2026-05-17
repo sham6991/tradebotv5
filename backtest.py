@@ -78,7 +78,18 @@ def run_backtest(nifty, options, settings, save_path):
         bearish_threshold = float(settings.get("bearish_threshold", -15))
         rsi_bull = float(settings.get("rsi_bull", 55))
         rsi_bear = float(settings.get("rsi_bear", 45))
-        score = build_scoring_row(nifty, i, bullish_threshold, bearish_threshold, rsi_bull, rsi_bear)
+        rsi_reversal_bullish = float(settings.get("rsi_reversal_bullish", 70))
+        rsi_reversal_bearish = float(settings.get("rsi_reversal_bearish", 20))
+        score = build_scoring_row(
+            nifty,
+            i,
+            bullish_threshold,
+            bearish_threshold,
+            rsi_bull,
+            rsi_bear,
+            rsi_reversal_bullish,
+            rsi_reversal_bearish,
+        )
         candle_rows.append({
             "Datetime": export_time(nifty_row),
             "Open": nifty_row.get("open", ""),

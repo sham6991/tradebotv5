@@ -25,6 +25,8 @@ DEFAULT_SETTINGS = {
     "bearish_threshold": "-15",
     "rsi_bull": "55",
     "rsi_bear": "45",
+    "rsi_reversal_bullish": "70",
+    "rsi_reversal_bearish": "20",
     "min_buy_score": "60",
     "max_daily_loss": "0",
     "max_daily_profit": "0",
@@ -49,6 +51,8 @@ SETTING_LABELS = {
     "bearish_threshold": "Bearish Threshold",
     "rsi_bull": "RSI Bull",
     "rsi_bear": "RSI Bear",
+    "rsi_reversal_bullish": "RSI Reversal Bullish",
+    "rsi_reversal_bearish": "RSI Reversal Bearish",
     "min_buy_score": "Min Buy Score",
     "max_daily_loss": "Max Daily Loss",
     "max_daily_profit": "Max Daily Profit",
@@ -59,6 +63,24 @@ SETTING_LABELS = {
 
 
 class SharedUIMixin:
+    root: tk.Tk
+    status_text: tk.StringVar
+
+    def _cancel_dashboard_refresh(self) -> None: ...
+    def show_backtest(self) -> None: ...
+    def show_live_selector(self) -> None: ...
+    def show_session_replay(self) -> None: ...
+    def load_expiry_choices(self, type_entry: ttk.Combobox, strike_entry: tk.Entry, expiry_entry: ttk.Combobox) -> None: ...
+    def show_expiry_calendar(self, expiry_entry: ttk.Combobox) -> None: ...
+    def fetch_option_row_safe(
+        self,
+        type_entry: ttk.Combobox,
+        strike_entry: tk.Entry,
+        expiry_entry: ttk.Combobox,
+        symbol_entry: tk.Entry,
+        token_entry: tk.Entry,
+    ) -> None: ...
+
     def run(self):
         self.root.mainloop()
 
@@ -154,7 +176,7 @@ class SharedUIMixin:
         except tk.TclError:
             pass
 
-    def make_button(self, parent, text, command, bg="#0f766e", width=20):
+    def make_button(self, parent, text, command, bg: str = "#0f766e", width=20):
         button = tk.Button(
             parent,
             text=text,
@@ -176,7 +198,7 @@ class SharedUIMixin:
         button.bind("<Leave>", lambda _event: button.configure(bg=bg))
         return button
 
-    def _hover_color(self, color):
+    def _hover_color(self, color: str) -> str:
         return {
             PALETTE["primary"]: "#1d4ed8",
             PALETTE["success"]: "#047857",
@@ -267,14 +289,13 @@ class SharedUIMixin:
             entry.insert(0, file)
             self.set_status(f"Selected {os.path.basename(file)}")
 
-    def _field(self, frame, text, default, row, column=1, width=18, show=None):
+    def _field(self, frame, text, default, row, column=1, width=18, show: str | None = None):
         tk.Label(frame, text=text, bg=frame["bg"], fg=PALETTE["muted"], font=("Segoe UI", 9)).grid(
             row=row, column=column - 1, pady=3, padx=6, sticky="e"
         )
         entry = tk.Entry(
             frame,
             width=width,
-            show=show,
             relief="solid",
             bd=1,
             bg=PALETTE["surface_alt"],
@@ -284,6 +305,8 @@ class SharedUIMixin:
             highlightbackground=PALETTE["border"],
             highlightcolor=PALETTE["primary"],
         )
+        if show is not None:
+            entry["show"] = show
         entry.insert(0, default)
         entry.grid(row=row, column=column, pady=3, padx=6, sticky="w")
         return entry
@@ -424,12 +447,14 @@ class SharedUIMixin:
             "bearish_threshold": self._field(frame, "Bearish Threshold", "-15", start_row + 5, column=1),
             "rsi_bull": self._field(frame, "RSI Bull", "55", start_row + 5, column=4),
             "rsi_bear": self._field(frame, "RSI Bear", "45", start_row + 6, column=1),
-            "min_buy_score": self._field(frame, "Min Buy Score", "60", start_row + 6, column=4),
-            "max_daily_loss": self._field(frame, "Max Daily Loss", "0", start_row + 7, column=1),
-            "max_daily_profit": self._field(frame, "Max Daily Profit", "0", start_row + 7, column=4),
-            "max_consecutive_losses": self._field(frame, "Max Loss Streak", "0", start_row + 8, column=1),
-            "square_off_time": self._field(frame, "Square Off Time", "15:20", start_row + 8, column=4),
-            "order_product": self._order_product_field(frame, "Order Product", "NRML", start_row + 9, column=1),
+            "rsi_reversal_bullish": self._field(frame, "RSI Reversal Bullish", "70", start_row + 6, column=4),
+            "rsi_reversal_bearish": self._field(frame, "RSI Reversal Bearish", "20", start_row + 7, column=1),
+            "min_buy_score": self._field(frame, "Min Buy Score", "60", start_row + 7, column=4),
+            "max_daily_loss": self._field(frame, "Max Daily Loss", "0", start_row + 8, column=1),
+            "max_daily_profit": self._field(frame, "Max Daily Profit", "0", start_row + 8, column=4),
+            "max_consecutive_losses": self._field(frame, "Max Loss Streak", "0", start_row + 9, column=1),
+            "square_off_time": self._field(frame, "Square Off Time", "15:20", start_row + 9, column=4),
+            "order_product": self._order_product_field(frame, "Order Product", "NRML", start_row + 10, column=1),
         }
         return fields
 
@@ -451,7 +476,7 @@ class SharedUIMixin:
             "real": {**DEFAULT_SETTINGS, **real_profile},
         }
 
-    def _profile_name_for_attr(self, attr_name):
+    def _profile_name_for_attr(self, attr_name: str) -> str:
         return {
             "backtest_settings_values": "backtest",
             "paper_settings_values": "paper",
@@ -494,6 +519,8 @@ class SharedUIMixin:
             "bearish_threshold": float(values["bearish_threshold"]),
             "rsi_bull": float(values["rsi_bull"]),
             "rsi_bear": float(values["rsi_bear"]),
+            "rsi_reversal_bullish": float(values.get("rsi_reversal_bullish", DEFAULT_SETTINGS["rsi_reversal_bullish"])),
+            "rsi_reversal_bearish": float(values.get("rsi_reversal_bearish", DEFAULT_SETTINGS["rsi_reversal_bearish"])),
             "min_buy_score": float(values["min_buy_score"]),
             "max_daily_loss": float(values["max_daily_loss"]),
             "max_daily_profit": float(values["max_daily_profit"]),
@@ -507,8 +534,8 @@ class SharedUIMixin:
 
         popup = tk.Toplevel(self.root)
         popup.title(title)
-        popup.geometry("720x500")
-        popup.minsize(660, 460)
+        popup.geometry("720x560")
+        popup.minsize(660, 520)
         popup.configure(bg=PALETTE["bg"])
         popup.transient(self.root)
         popup.grab_set()
@@ -520,7 +547,7 @@ class SharedUIMixin:
         self._populate_settings_fields(fields, current_values)
 
         actions = tk.Frame(body, bg=PALETTE["surface"])
-        actions.grid(row=13, column=0, columnspan=4, pady=(16, 0), sticky="w")
+        actions.grid(row=14, column=0, columnspan=4, pady=(16, 0), sticky="w")
 
         def save():
             try:
@@ -567,6 +594,7 @@ class SharedUIMixin:
             f"Target {values.get('profit_points')}",
             f"SL {values.get('safety_points')}",
             f"RSI {values.get('rsi_bull')}/{values.get('rsi_bear')}",
+            f"RSI reversal {values.get('rsi_reversal_bullish', DEFAULT_SETTINGS['rsi_reversal_bullish'])}/{values.get('rsi_reversal_bearish', DEFAULT_SETTINGS['rsi_reversal_bearish'])}",
             f"Score {values.get('min_buy_score')}",
             f"Square-off {values.get('square_off_time')}",
             f"Product {self._normalise_order_product(values.get('order_product', 'NRML'))}",
@@ -588,6 +616,8 @@ class SharedUIMixin:
             "bearish_threshold": float(fields["bearish_threshold"].get()),
             "rsi_bull": float(fields["rsi_bull"].get()),
             "rsi_bear": float(fields["rsi_bear"].get()),
+            "rsi_reversal_bullish": float(fields["rsi_reversal_bullish"].get()),
+            "rsi_reversal_bearish": float(fields["rsi_reversal_bearish"].get()),
             "min_buy_score": float(fields["min_buy_score"].get()),
             "max_daily_loss": float(fields["max_daily_loss"].get()),
             "max_daily_profit": float(fields["max_daily_profit"].get()),

@@ -4,10 +4,15 @@ import threading
 import time
 from collections import deque
 from datetime import datetime
+from typing import TYPE_CHECKING, Any
 import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 from reporting import timestamped_file
+
+if TYPE_CHECKING:
+    from execution_v2 import Executor
+    LiveOptionRow = tuple[ttk.Combobox, tk.Entry, ttk.Combobox, tk.Entry, tk.Entry]
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 RESULT_FOLDER = os.path.join(BASE_DIR, "results")
@@ -15,6 +20,50 @@ os.makedirs(RESULT_FOLDER, exist_ok=True)
 
 
 class LiveRuntimeMixin:
+    if TYPE_CHECKING:
+        root: tk.Tk
+        executor: "Executor"
+        live_mode: str
+        pnl_label: tk.Label
+        feed_label: tk.Label
+        live_settings_summary: tk.StringVar
+        history_interval: ttk.Combobox
+        history_days: tk.Entry
+        nifty_token: tk.Entry
+        dashboard_refresh_after_id: str | None
+        dashboard_refresh_interval_ms: int
+        margin_refresh_interval_ms: int
+        last_margin_refresh_at: float
+        margin_refresh_in_progress: bool
+        tick_render_scheduled: bool
+        tick_render_interval_ms: int
+        max_tick_lines_per_render: int
+        tick_buffer: dict[str, list[str]]
+        pending_tick_lines: dict[str, deque[str]]
+        latest_tick_by_bucket: dict[str, str]
+        tick_outputs: dict[str, Any]
+        current_token_map: dict[int, str]
+        live_options: list["LiveOptionRow"]
+        live_log_active_rows: dict[str, Any]
+        live_order_history_rows: list[dict[str, Any]]
+        live_trade_snapshot: dict[str, Any]
+        log_trade_table: ttk.Treeview
+        live_trade_table: ttk.Treeview
+        order_history_table: ttk.Treeview
+        real_settings_values: dict[str, str]
+
+        def _card(self, parent: tk.Misc, padx: int = 16, pady: int = 14) -> tk.Frame: ...
+        def _ensure_settings_values(self, attr_name: str) -> dict[str, str]: ...
+        def _save_settings_profile(self, attr_name: str, values: dict[str, str]) -> None: ...
+        def _settings_summary_text(self, values: dict[str, str], mode: str = "") -> str: ...
+        def _settings_from_values(self, values: dict[str, str]) -> Any: ...
+        def _normalise_interval(self, value: Any) -> str: ...
+        def _default_settings_values(self) -> dict[str, str]: ...
+        def _set_field_value(self, field: tk.Entry | ttk.Combobox, value: Any) -> None: ...
+        def _sync_zerodha_client_for_mode(self, mode: str | None = None) -> None: ...
+        def open_zerodha_auth_wizard(self, auto_started: bool = False) -> None: ...
+        def set_status(self, text: str) -> None: ...
+
     LOG_TRADE_COLUMNS = (
         "Trade ID",
         "Time",
@@ -240,7 +289,8 @@ class LiveRuntimeMixin:
         self._schedule_dashboard_refresh()
 
     def _maybe_refresh_real_margin_async(self):
-        if self.live_mode != "LIVE" or not self.executor.zerodha:
+        zerodha: Any = self.executor.zerodha
+        if self.live_mode != "LIVE" or not zerodha:
             return
         now = time.monotonic()
         if now - self.last_margin_refresh_at < self.margin_refresh_interval_ms / 1000:
@@ -253,7 +303,7 @@ class LiveRuntimeMixin:
 
         def worker():
             try:
-                margin = self.executor.zerodha.available_margin()
+                margin = zerodha.available_margin()
                 error = None
             except Exception as exc:
                 margin = None
@@ -274,7 +324,7 @@ class LiveRuntimeMixin:
     def _apply_real_margin(self, margin, status_prefix="Zerodha available margin fetched"):
         values = dict(self._ensure_settings_values("real_settings_values"))
         values["balance"] = f"{float(margin):.2f}"
-        values["zerodha_margin_fetched"] = True
+        values["zerodha_margin_fetched"] = "true"
         self.real_settings_values = values
         self._save_settings_profile("real_settings_values", values)
         if hasattr(self, "live_settings_summary"):
@@ -288,10 +338,11 @@ class LiveRuntimeMixin:
         self.set_status(f"{status_prefix}: {float(margin):.2f}")
 
     def _refresh_real_margin(self, show_errors=False):
-        if self.live_mode != "LIVE" or not self.executor.zerodha:
+        zerodha: Any = self.executor.zerodha
+        if self.live_mode != "LIVE" or not zerodha:
             return None
         try:
-            margin = self.executor.zerodha.available_margin()
+            margin = zerodha.available_margin()
         except Exception as exc:
             if show_errors:
                 messagebox.showerror("ZERODHA MARGIN ERROR", str(exc))
@@ -375,11 +426,12 @@ class LiveRuntimeMixin:
             messagebox.showerror("INSTRUMENT ERROR", str(exc))
 
     def _resolve_live_instruments(self):
-        if not self.executor.zerodha:
+        zerodha: Any = self.executor.zerodha
+        if not zerodha:
             raise ValueError("Connect Zerodha first.")
 
         if not self.nifty_token.get().strip():
-            self.nifty_token.insert(0, str(self.executor.zerodha.get_nifty50_token()))
+            self.nifty_token.insert(0, str(zerodha.get_nifty50_token()))
 
         for index, (type_entry, strike_entry, expiry_entry, symbol_entry, token_entry) in enumerate(self.live_options):
             symbol = symbol_entry.get().strip()
@@ -393,7 +445,10 @@ class LiveRuntimeMixin:
     def fetch_nifty_token(self):
         try:
             self._ensure_zerodha_connected()
-            token = self.executor.zerodha.get_nifty50_token()
+            zerodha: Any = self.executor.zerodha
+            if not zerodha:
+                raise ValueError("Connect Zerodha first.")
+            token = zerodha.get_nifty50_token()
             self.nifty_token.delete(0, tk.END)
             self.nifty_token.insert(0, str(token))
             self.set_status("NIFTY token fetched")

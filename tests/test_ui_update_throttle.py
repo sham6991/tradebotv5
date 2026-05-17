@@ -77,6 +77,8 @@ class UiUpdateThrottleTests(unittest.TestCase):
         self.assertFalse(snapshot["open_position"])
         self.assertFalse(snapshot["pending_entry"])
         self.assertIn("invalid_ticks", snapshot["candle_builder"])
+        self.assertIn("latency", snapshot)
+        self.assertIn("recent_events", snapshot["latency"])
         self.assertIn("queue_size", snapshot["excel_writer"])
         self.assertIn("enabled", snapshot["store"])
 

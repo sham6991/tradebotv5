@@ -16,6 +16,8 @@ from event_logger import (
     ORDER_PARTIAL_FILL,
     ORDER_REJECTED,
     PROTECTIVE_ORDER_PLACED,
+    PROTECTIVE_ORDER_VERIFICATION_FAILED,
+    PROTECTIVE_ORDER_VERIFICATION_PASSED,
     StructuredEventLogger,
     normalize_event,
 )
@@ -205,6 +207,67 @@ class EventLoggerTests(unittest.TestCase):
             self.assertEqual(event["payload"]["entry_order_id"], "E1")
             self.assertEqual(event["payload"]["limit_price"], 120)
             self.assertEqual(event["payload"]["order_kind"], "SELL LIMIT")
+
+    def test_protective_order_verification_logs_passed_event(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = os.path.join(temp_dir, "session.db")
+            store = TradingStore(db_path, mode="LIVE", settings={"session_id": "S1"})
+            session, option = session_with_store(store)
+            session.mode = "LIVE"
+            session.zerodha = object()
+            position = {
+                "trade_no": 1,
+                "signal": signal(option),
+                "entry_price": 100,
+                "target": 120,
+                "stoploss": 90,
+                "quantity": 25,
+                "entry_order_id": "E1",
+                "target_order_id": "T1",
+                "stoploss_order_id": "S1",
+            }
+            session.last_order_status_by_id.update({"T1": "OPEN", "S1": "TRIGGER PENDING"})
+
+            self.assertTrue(session._verify_protective_orders(position))
+
+            verification_events = [
+                payload for payload in event_payloads(db_path)
+                if payload.get("event_type") == PROTECTIVE_ORDER_VERIFICATION_PASSED
+            ]
+            self.assertEqual(len(verification_events), 1)
+            event = verification_events[0]
+            self.assertEqual(event["status"], "PASSED")
+            self.assertEqual(event["payload"]["target_order_id"], "T1")
+            self.assertEqual(event["payload"]["stoploss_order_id"], "S1")
+
+    def test_protective_order_verification_logs_failed_event(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = os.path.join(temp_dir, "session.db")
+            store = TradingStore(db_path, mode="LIVE", settings={"session_id": "S1"})
+            session, option = session_with_store(store)
+            session.mode = "LIVE"
+            session.zerodha = object()
+            position = {
+                "trade_no": 1,
+                "signal": signal(option),
+                "entry_price": 100,
+                "target": 120,
+                "stoploss": 90,
+                "quantity": 25,
+                "entry_order_id": "E1",
+                "target_order_id": "",
+                "stoploss_order_id": "S1",
+            }
+            session.last_order_status_by_id["S1"] = "TRIGGER PENDING"
+
+            self.assertFalse(session._verify_protective_orders(position))
+
+            verification_events = [
+                payload for payload in event_payloads(db_path)
+                if payload.get("event_type") == PROTECTIVE_ORDER_VERIFICATION_FAILED
+            ]
+            self.assertEqual(len(verification_events), 1)
+            self.assertIn("target order id missing", verification_events[0]["payload"]["findings"])
 
     def test_pending_entry_order_records_buy_history_event(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

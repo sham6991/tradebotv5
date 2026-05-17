@@ -15,12 +15,15 @@ from engine import TradingEngine, append_datetime_index_key, attach_datetime_ind
 from event_logger import (
     ENTRY_FILLED,
     KILL_SWITCH_ACTIVATED,
+    LIVE_LATENCY_MEASURED,
     ORDER_CANCELLED,
     ORDER_COMPLETE,
     ORDER_OPEN,
     ORDER_PARTIAL_FILL,
     ORDER_REJECTED,
     PARTIAL_EXIT_DETECTED,
+    PROTECTIVE_ORDER_VERIFICATION_FAILED,
+    PROTECTIVE_ORDER_VERIFICATION_PASSED,
     PROTECTIVE_ORDER_PLACED,
     RECONCILIATION_ERROR,
     RECONCILIATION_WARNING,
@@ -104,6 +107,10 @@ class LivePaperSession:
         self.duplicate_order_suppressed = 0
         self.active_orders = {}
         self.order_history = []
+        self.latency_events = []
+        self.protective_verification_events = []
+        self.last_tick_batch_latency = {}
+        self.last_candle_processing_latency = {}
         self.latest_live_trade = {}
         self.latest_ltp_by_option = {}
         self.session_closed = False
@@ -121,6 +128,7 @@ class LivePaperSession:
         self.risk_guard = LiveRiskGuard(self.settings, starting_balance=self.balance)
         self.daily_start_balance = self.risk_guard.daily_start_balance
         self.consecutive_losses = self.risk_guard.consecutive_losses
+        self.stoploss_trades = self.risk_guard.stoploss_trades
         self.trading_blocked_reason = self.risk_guard.blocked_reason
         self.candle_log_path = (save_path or "").replace(".xlsx", "_candles.xlsx") if save_path else None
         self.audit_report_path = (save_path or "").replace(".xlsx", "_audit.json") if save_path else None
@@ -178,6 +186,7 @@ class LivePaperSession:
     def _sync_risk_state_from_guard(self):
         self.daily_start_balance = self.risk_guard.daily_start_balance
         self.consecutive_losses = self.risk_guard.consecutive_losses
+        self.stoploss_trades = self.risk_guard.stoploss_trades
         self.trading_blocked_reason = self.risk_guard.blocked_reason
 
     def activate_kill_switch(self, reason="Manual kill switch"):
@@ -328,6 +337,7 @@ class LivePaperSession:
     def on_ticks(self, ticks):
         if not ticks:
             return
+        batch_started = time.perf_counter()
         with self.state_lock:
             completed_any = False
             latest_tick_time = None
@@ -360,8 +370,20 @@ class LivePaperSession:
             if self.open_position and self._square_off_time_reached():
                 self.square_off_open_position("AUTO SQUARE OFF")
             if completed_any:
+                candle_processing_started = time.perf_counter()
                 self._process_completed_candles()
+                self.last_candle_processing_latency = {
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "duration_seconds": self._elapsed_seconds(candle_processing_started),
+                    "last_candle_index": self.last_candle_index,
+                }
                 self._trim_live_candles_if_safe()
+            self.last_tick_batch_latency = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "ticks": len(ticks),
+                "duration_seconds": self._elapsed_seconds(batch_started),
+                "completed_candles": bool(completed_any),
+            }
 
     def _append_completed_candle(self, name, row):
         if name == "NIFTY":
@@ -440,6 +462,7 @@ class LivePaperSession:
         return self.lots * contract_lot_size, contract_lot_size
 
     def _place_order(self, side, signal, qty, order_type="MARKET", price=None, trigger_price=None):
+        order_started = time.perf_counter()
         tradingsymbol = signal.get("tradingsymbol") or signal.get("instrument")
         product = self._order_product()
         idempotency_key = self._order_idempotency_key(
@@ -487,6 +510,22 @@ class LivePaperSession:
                 "status": result["status"],
                 "order_id": result["order_id"],
             }
+        duration_seconds = self._elapsed_seconds(order_started)
+        self._record_latency_event(
+            "order_request",
+            duration_seconds,
+            {
+                "side": side,
+                "order_type": order_type,
+                "product": product,
+                "tradingsymbol": tradingsymbol,
+                "quantity": qty,
+                "status": result.get("status", ""),
+                "order_id": result.get("order_id", ""),
+                "error_class": result.get("error_class", ""),
+            },
+            log_event=True,
+        )
         if result["log_status"]:
             self._log_order(result["order_id"], side, result["log_status"], result["log_data"])
         if result["error"]:
@@ -572,9 +611,23 @@ class LivePaperSession:
     def _try_entry(self, i):
         if self.order_transition_in_progress or self.open_position or self.pending_entry:
             return
+        decision_started = time.perf_counter()
         signal = self.engine.find_trade(self.nifty, self.options, i, self.settings)
+        decision_seconds = self._elapsed_seconds(decision_started)
         if signal is None:
             return
+        self._record_latency_event(
+            "signal_generated",
+            decision_seconds,
+            {
+                "nifty_index": i,
+                "option_type": signal.get("type", ""),
+                "instrument": signal.get("instrument", ""),
+                "entry_index": signal.get("entry_index", ""),
+                "signal_index": signal.get("signal_index", ""),
+            },
+            log_event=True,
+        )
         validation_error = self._validate_entry(signal, i)
         if validation_error:
             self._record_rejected_entry(signal, i, validation_error)
@@ -814,6 +867,7 @@ class LivePaperSession:
         return True
 
     def _open_position_from_fill(self, signal, lot_size, entry_order_id, entry_price, filled_qty):
+        protection_started = time.perf_counter()
         target = self._round_price(entry_price + float(self.settings["profit_points"]))
         stoploss = self._round_price(max(entry_price - float(self.settings["safety_points"]), self._price_tick()))
         self.active_orders = {}
@@ -864,13 +918,27 @@ class LivePaperSession:
             limit_price=signal.get("entry", "") if signal.get("entry_offset", 0) else "",
             target_price=target,
             stoploss_price=stoploss,
-            remarks="BUY filled",
+            remarks=signal.get("entry_remark") or "BUY filled",
         )
         self._refresh_live_trade_snapshot()
         self._place_protective_exit_orders()
+        self._record_latency_event(
+            "entry_fill_to_protection_complete",
+            self._elapsed_seconds(protection_started),
+            {
+                "trade_no": self.open_position.get("trade_no", ""),
+                "instrument": signal.get("instrument", ""),
+                "entry_order_id": entry_order_id,
+                "target_order_id": self.open_position.get("target_order_id", ""),
+                "stoploss_order_id": self.open_position.get("stoploss_order_id", ""),
+                "quantity": filled_qty,
+            },
+            log_event=True,
+        )
         self._save_open_position()
 
     def _place_protective_exit_orders(self):
+        protection_started = time.perf_counter()
         position = self.open_position
         if self.mode != "LIVE" or not self.zerodha or not position:
             return
@@ -930,6 +998,98 @@ class LivePaperSession:
                     "errors": errors,
                 },
             )
+        self._verify_protective_orders(position, errors)
+        self._record_latency_event(
+            "protective_order_pair",
+            self._elapsed_seconds(protection_started),
+            {
+                "trade_no": position.get("trade_no", ""),
+                "instrument": position.get("signal", {}).get("instrument", ""),
+                "entry_order_id": position.get("entry_order_id", ""),
+                "target_order_id": position.get("target_order_id", ""),
+                "stoploss_order_id": position.get("stoploss_order_id", ""),
+                "errors": list(errors),
+            },
+            log_event=True,
+        )
+
+    def _verify_protective_orders(self, position, placement_errors=None):
+        if self.mode != "LIVE" or not self.zerodha or not position:
+            return True
+        placement_errors = list(placement_errors or [])
+        target_order_id = str(position.get("target_order_id") or "")
+        stoploss_order_id = str(position.get("stoploss_order_id") or "")
+        target_status = self.last_order_status_by_id.get(target_order_id, "") if target_order_id else ""
+        stoploss_status = self.last_order_status_by_id.get(stoploss_order_id, "") if stoploss_order_id else ""
+
+        findings = []
+        if placement_errors:
+            findings.extend(placement_errors)
+        if not target_order_id:
+            findings.append("target order id missing")
+        if not stoploss_order_id:
+            findings.append("stoploss order id missing")
+        if target_order_id and stoploss_order_id and target_order_id == stoploss_order_id:
+            findings.append("target and stoploss share the same order id")
+        if target_status and self._status_for_active_order(target_status) in {"REJECTED", "CANCELLED"}:
+            findings.append(f"target order terminal status {target_status}")
+        if stoploss_status and self._status_for_active_order(stoploss_status) in {"REJECTED", "CANCELLED"}:
+            findings.append(f"stoploss order terminal status {stoploss_status}")
+
+        payload = {
+            "trade_no": position.get("trade_no", ""),
+            "instrument": position.get("signal", {}).get("instrument", ""),
+            "quantity": position.get("quantity", ""),
+            "entry_order_id": position.get("entry_order_id", ""),
+            "target_order_id": target_order_id,
+            "target_status": target_status,
+            "stoploss_order_id": stoploss_order_id,
+            "stoploss_status": stoploss_status,
+            "target_price": position.get("target", ""),
+            "stoploss_price": position.get("stoploss", ""),
+            "findings": findings,
+        }
+        if findings:
+            message = "Protective order verification failed: " + "; ".join(str(item) for item in findings)
+            self.protective_verification_events.append({
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "passed": False,
+                **payload,
+            })
+            self.protective_verification_events = self.protective_verification_events[-50:]
+            self._emit_alert("CRITICAL", PROTECTIVE_ORDER_VERIFICATION_FAILED, message, payload)
+            self._log_lifecycle_event(
+                PROTECTIVE_ORDER_VERIFICATION_FAILED,
+                "CRITICAL",
+                message,
+                trade_no=position.get("trade_no", ""),
+                status="FAILED",
+                side="SELL",
+                instrument=position.get("signal", {}).get("instrument", ""),
+                quantity=position.get("quantity", ""),
+                payload=payload,
+            )
+            return False
+
+        message = "Protective order verification passed"
+        self.protective_verification_events.append({
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "passed": True,
+            **payload,
+        })
+        self.protective_verification_events = self.protective_verification_events[-50:]
+        self._log_lifecycle_event(
+            PROTECTIVE_ORDER_VERIFICATION_PASSED,
+            "INFO",
+            message,
+            trade_no=position.get("trade_no", ""),
+            status="PASSED",
+            side="SELL",
+            instrument=position.get("signal", {}).get("instrument", ""),
+            quantity=position.get("quantity", ""),
+            payload=payload,
+        )
+        return True
 
     def _validate_entry(self, signal, i):
         if i >= len(self.nifty):
@@ -1245,7 +1405,7 @@ class LivePaperSession:
             self.order_transition_in_progress = False
         pnl = (exit_price - position["entry_price"]) * exit_quantity
         self.balance += pnl
-        self.risk_guard.record_trade_result(pnl)
+        self.risk_guard.record_trade_result(pnl, reason)
         self._sync_risk_state_from_guard()
         trade = {
             "Trade No": position["trade_no"],
@@ -1272,6 +1432,7 @@ class LivePaperSession:
             "Exit Order ID": exit_order_id,
             "Buy Score": position["signal"].get("score_row", {}).get("Buy Score", ""),
             "Buy Entry": position["signal"].get("score_row", {}).get("Buy Entry", ""),
+            "Entry Remark": position["signal"].get("entry_remark", ""),
         }
         self.trades.append(trade)
         self.trade_count += 1
@@ -1323,7 +1484,7 @@ class LivePaperSession:
             return None
         pnl = (exit_price - position["entry_price"]) * exit_quantity
         self.balance += pnl
-        self.risk_guard.record_trade_result(pnl)
+        self.risk_guard.record_trade_result(pnl, reason)
         self._sync_risk_state_from_guard()
         trade = {
             "Trade No": position["trade_no"],
@@ -1350,6 +1511,7 @@ class LivePaperSession:
             "Exit Order ID": exit_order_id,
             "Buy Score": position["signal"].get("score_row", {}).get("Buy Score", ""),
             "Buy Entry": position["signal"].get("score_row", {}).get("Buy Entry", ""),
+            "Entry Remark": position["signal"].get("entry_remark", ""),
         }
         self.trades.append(trade)
         self.trade_count += 1
@@ -1407,6 +1569,7 @@ class LivePaperSession:
             "Exit Order ID": "",
             "Buy Score": position["signal"].get("score_row", {}).get("Buy Score", ""),
             "Buy Entry": position["signal"].get("score_row", {}).get("Buy Entry", ""),
+            "Entry Remark": position["signal"].get("entry_remark", ""),
         }
         self._append_excel(self.save_path, [trade])
         self._log_trade(trade)
@@ -1430,6 +1593,10 @@ class LivePaperSession:
     def _record_pending_entry_order(self, signal, i, status, order_id, qty, lot_size):
         zerodha_status = self._zerodha_order_status(order_id, fallback="OPEN")
         self.last_order_status_by_id[str(order_id)] = zerodha_status
+        entry_remark = signal.get("entry_remark")
+        pending_remark = f"Pending BUY limit at {signal.get('entry', '')}"
+        if entry_remark:
+            pending_remark = f"{entry_remark}; {pending_remark}"
         trade = {
             "Trade No": self.trade_count + 1,
             "Type": signal.get("type", ""),
@@ -1448,13 +1615,14 @@ class LivePaperSession:
             "Quantity": qty,
             "Contract Lot Size": lot_size,
             "Reason": "ENTRY ORDER PLACED",
-            "Remarks": f"Pending BUY limit at {signal.get('entry', '')}",
+            "Remarks": pending_remark,
             "Order Status": zerodha_status,
             "Zerodha Order Status": zerodha_status,
             "Entry Order ID": order_id,
             "Exit Order ID": "",
             "Buy Score": signal.get("score_row", {}).get("Buy Score", ""),
             "Buy Entry": signal.get("score_row", {}).get("Buy Entry", ""),
+            "Entry Remark": signal.get("entry_remark", ""),
         }
         self._append_excel(self.save_path, [trade])
         self._log_trade(trade)
@@ -1468,7 +1636,7 @@ class LivePaperSession:
             quantity=qty,
             entry_price="",
             limit_price=signal.get("entry", ""),
-            remarks=f"Pending BUY limit at {signal.get('entry', '')}",
+            remarks=pending_remark,
         )
         if self.on_trade:
             self.on_trade(trade, self.balance)
@@ -1506,6 +1674,7 @@ class LivePaperSession:
             "Exit Order ID": order_id,
             "Buy Score": position["signal"].get("score_row", {}).get("Buy Score", ""),
             "Buy Entry": position["signal"].get("score_row", {}).get("Buy Entry", ""),
+            "Entry Remark": position["signal"].get("entry_remark", ""),
         }
         self._append_excel(self.save_path, [trade])
         self._log_trade(trade)
@@ -1603,6 +1772,7 @@ class LivePaperSession:
             "Exit Order ID": exit_order_id,
             "Buy Score": signal.get("score_row", {}).get("Buy Score", ""),
             "Buy Entry": signal.get("score_row", {}).get("Buy Entry", ""),
+            "Entry Remark": signal.get("entry_remark", ""),
         }
         self._append_excel(self.save_path, [trade])
         self._log_trade(trade)
@@ -1694,6 +1864,7 @@ class LivePaperSession:
             "Exit Order ID": "",
             "Buy Score": signal.get("score_row", {}).get("Buy Score", ""),
             "Buy Entry": signal.get("score_row", {}).get("Buy Entry", ""),
+            "Entry Remark": signal.get("entry_remark", ""),
         }
         self.trades.append(trade)
         self.trade_count += 1
@@ -1826,6 +1997,33 @@ class LivePaperSession:
 
     def _square_off_time_reached(self):
         return self.risk_guard.square_off_time_reached()
+
+    def _elapsed_seconds(self, started_at):
+        return max(time.perf_counter() - started_at, 0.0)
+
+    def _record_latency_event(self, stage, duration_seconds, payload=None, log_event=False):
+        event = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "stage": str(stage or ""),
+            "duration_seconds": float(duration_seconds or 0.0),
+            "payload": payload or {},
+        }
+        self.latency_events.append(event)
+        self.latency_events = self.latency_events[-100:]
+        if log_event:
+            self._log_lifecycle_event(
+                LIVE_LATENCY_MEASURED,
+                "INFO",
+                f"Live latency measured: {event['stage']} {event['duration_seconds']:.6f}s",
+                order_id=(payload or {}).get("order_id", ""),
+                trade_no=(payload or {}).get("trade_no", ""),
+                status=(payload or {}).get("status", ""),
+                side=(payload or {}).get("side", ""),
+                instrument=(payload or {}).get("instrument", "") or (payload or {}).get("tradingsymbol", ""),
+                quantity=(payload or {}).get("quantity"),
+                payload=event,
+            )
+        return event
 
     def _log_event(self, level, message, payload=None):
         if self.store:
@@ -2183,6 +2381,12 @@ class LivePaperSession:
                 **self.candle_builder.stats,
                 "active_keys": len(self.candle_builder.current),
             },
+            "latency": {
+                "last_tick_batch": dict(self.last_tick_batch_latency),
+                "last_candle_processing": dict(self.last_candle_processing_latency),
+                "recent_events": list(self.latency_events[-10:]),
+                "protective_verification": list(self.protective_verification_events[-10:]),
+            },
             "excel_writer": excel_health,
             "store": self._store_health(),
             "ui": {
@@ -2200,7 +2404,18 @@ class LivePaperSession:
         bearish_threshold = float(self.settings.get("bearish_threshold", -15))
         rsi_bull = float(self.settings.get("rsi_bull", 55))
         rsi_bear = float(self.settings.get("rsi_bear", 45))
-        scored = build_scoring_row(self.nifty, i, bullish_threshold, bearish_threshold, rsi_bull, rsi_bear)
+        rsi_reversal_bullish = float(self.settings.get("rsi_reversal_bullish", 70))
+        rsi_reversal_bearish = float(self.settings.get("rsi_reversal_bearish", 20))
+        scored = build_scoring_row(
+            self.nifty,
+            i,
+            bullish_threshold,
+            bearish_threshold,
+            rsi_bull,
+            rsi_bear,
+            rsi_reversal_bullish,
+            rsi_reversal_bearish,
+        )
         export = {
             "Date": row.get("date", ""),
             "Open": row.get("open", ""),
@@ -2651,4 +2866,3 @@ class Executor:
         if not session:
             return None
         return session.activate_kill_switch(reason)
-

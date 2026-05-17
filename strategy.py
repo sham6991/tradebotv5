@@ -2,24 +2,58 @@
 # MARKET TREND
 # ==================================================
 
+RSI_EARLY_BULL_REMARK = "RSI based early Bull entry"
+RSI_EARLY_BEAR_REMARK = "RSI based early bear entry"
+
+
+def market_trend_signal(
+    nifty_row,
+    bullish_threshold: float = 5,
+    bearish_threshold: float = -5,
+    rsi_bull: float = 55,
+    rsi_bear: float = 45,
+    rsi_reversal_bullish: float = 70,
+    rsi_reversal_bearish: float = 20,
+):
+
+    ema_diff = nifty_row["EMA20"] - nifty_row["EMA50"]
+    rsi = float(nifty_row.get("RSI", 0) or 0)
+
+    if rsi > rsi_reversal_bullish:
+        return "BULLISH", RSI_EARLY_BULL_REMARK
+
+    if rsi < rsi_reversal_bearish:
+        return "BEARISH", RSI_EARLY_BEAR_REMARK
+
+    if ema_diff > bullish_threshold and rsi > rsi_bull:
+        return "BULLISH", ""
+
+    if ema_diff < bearish_threshold and rsi < rsi_bear:
+        return "BEARISH", ""
+
+    return "SIDEWAYS", ""
+
+
 def market_trend(
     nifty_row,
     bullish_threshold: float = 5,
     bearish_threshold: float = -5,
     rsi_bull: float = 55,
     rsi_bear: float = 45,
+    rsi_reversal_bullish: float = 70,
+    rsi_reversal_bearish: float = 20,
 ):
 
-    ema_diff = nifty_row["EMA20"] - nifty_row["EMA50"]
-    rsi = float(nifty_row.get("RSI", 0) or 0)
-
-    if ema_diff > bullish_threshold and rsi > rsi_bull:
-        return "BULLISH"
-
-    elif ema_diff < bearish_threshold and rsi < rsi_bear:
-        return "BEARISH"
-
-    return "SIDEWAYS"
+    trend, _remark = market_trend_signal(
+        nifty_row,
+        bullish_threshold,
+        bearish_threshold,
+        rsi_bull,
+        rsi_bear,
+        rsi_reversal_bullish,
+        rsi_reversal_bearish,
+    )
+    return trend
 
 
 # ==================================================
@@ -435,6 +469,8 @@ def build_scoring_row(
     bearish_threshold: float = -5,
     rsi_bull: float = 55,
     rsi_bear: float = 45,
+    rsi_reversal_bullish: float = 70,
+    rsi_reversal_bearish: float = 20,
     data_kind="nifty",
     min_buy_score: float = 60,
 ):
@@ -449,7 +485,15 @@ def build_scoring_row(
                 "RSI": df.iloc[i].get("RSI", 0),
             }
         row = df.iloc[i]
-        trend = market_trend(row, bullish_threshold, bearish_threshold, rsi_bull, rsi_bear)
+        trend = market_trend(
+            row,
+            bullish_threshold,
+            bearish_threshold,
+            rsi_bull,
+            rsi_bear,
+            rsi_reversal_bullish,
+            rsi_reversal_bearish,
+        )
         return {
             "Trend": trend,
             "EMA20": row.get("EMA20", 0),

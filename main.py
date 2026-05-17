@@ -1,11 +1,8 @@
-import tkinter as tk
-from ui import TradeBotUI
+from web_app import main as run_web_app
 
 
 def main():
-    root = tk.Tk()
-    app = TradeBotUI(root)
-    app.run()
+    run_web_app()
 
 
 if __name__ == "__main__":

@@ -36,6 +36,20 @@ class LiveRiskGuardTests(unittest.TestCase):
         self.assertTrue(blocked)
         self.assertEqual(reason, "CONSECUTIVE LOSS LIMIT HIT")
 
+    def test_two_stoploss_exits_block_even_when_not_consecutive(self):
+        guard = LiveRiskGuard({}, starting_balance=10000)
+
+        guard.record_trade_result(-10, "STOPLOSS")
+        self.assertFalse(guard.is_blocked(9990)[0])
+        guard.record_trade_result(25, "TARGET")
+        self.assertFalse(guard.is_blocked(10015)[0])
+        guard.record_trade_result(-10, "STOPLOSS")
+
+        blocked, reason = guard.is_blocked(10005)
+
+        self.assertTrue(blocked)
+        self.assertEqual(reason, "STOPLOSS TRADE LIMIT HIT")
+
     def test_square_off_time_reached_blocks(self):
         guard = LiveRiskGuard(
             {"square_off_time": "15:20"},

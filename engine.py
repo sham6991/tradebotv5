@@ -5,7 +5,7 @@ from strategy import (
     build_scoring_row,
     ensure_option_formula_columns,
     has_option_formula_columns,
-    market_trend,
+    market_trend_signal,
 )
 import re
 
@@ -256,8 +256,18 @@ class TradingEngine:
         bearish_threshold = float(settings.get("bearish_threshold", -15))
         rsi_bull = float(settings.get("rsi_bull", 55))
         rsi_bear = float(settings.get("rsi_bear", 45))
+        rsi_reversal_bullish = float(settings.get("rsi_reversal_bullish", 70))
+        rsi_reversal_bearish = float(settings.get("rsi_reversal_bearish", 20))
         self.min_buy_score = float(settings.get("min_buy_score", 60))
-        trend = market_trend(nifty.iloc[i], bullish_threshold, bearish_threshold, rsi_bull, rsi_bear)
+        trend, entry_remark = market_trend_signal(
+            nifty.iloc[i],
+            bullish_threshold,
+            bearish_threshold,
+            rsi_bull,
+            rsi_bear,
+            rsi_reversal_bullish,
+            rsi_reversal_bearish,
+        )
         if trend == "SIDEWAYS":
             self.cooldown_until = i + self.cooldown
             self.last_skip_reason = "sideways_trend"
@@ -306,4 +316,5 @@ class TradingEngine:
             "target": entry_price + float(settings["profit_points"]),
             "stoploss": entry_price - float(settings["safety_points"]),
             "score_row": evaluated["score_row"],
+            "entry_remark": entry_remark,
         }

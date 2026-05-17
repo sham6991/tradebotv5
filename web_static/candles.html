@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TradeBot Candle Builder</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body class="utility-page">
+    <main class="utility-main">
+      <header class="utility-header">
+        <div>
+          <h1 id="candle-title">Candles</h1>
+          <p id="candle-status">Waiting for session.</p>
+        </div>
+        <label>Instrument
+          <select id="candle-name">
+            <option>NIFTY</option>
+            <option>CE</option>
+            <option>PE</option>
+          </select>
+        </label>
+      </header>
+
+      <section class="panel">
+        <h2>Active Candle</h2>
+        <div class="table-wrap"><table id="active-candle"></table></div>
+      </section>
+
+      <section class="panel">
+        <h2>Completed Candles</h2>
+        <div class="table-wrap tall"><table id="completed-candles"></table></div>
+      </section>
+    </main>
+    <div id="toast"></div>
+    <script src="/static/candles.js"></script>
+  </body>
+</html>

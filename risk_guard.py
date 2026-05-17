@@ -7,6 +7,7 @@ class LiveRiskGuard:
         self.settings = settings or {}
         self.daily_start_balance = float(starting_balance or 0)
         self.consecutive_losses = 0
+        self.stoploss_trades = 0
         self.blocked_reason = ""
         self.kill_switch_active = False
         self.kill_switch_reason = ""
@@ -24,11 +25,16 @@ class LiveRiskGuard:
         if self.kill_switch_active:
             self.blocked_reason = f"KILL SWITCH ACTIVE: {self.kill_switch_reason or 'Restored session state'}"
 
-    def record_trade_result(self, pnl: Any):
+    def record_trade_result(self, pnl: Any, exit_reason: Any = ""):
         if float(pnl or 0) < 0:
             self.consecutive_losses += 1
         else:
             self.consecutive_losses = 0
+        if "STOPLOSS" in str(exit_reason or "").upper().replace(" ", ""):
+            self.stoploss_trades += 1
+            max_stoploss_trades = int(self.settings.get("max_stoploss_trades", 2) or 0)
+            if max_stoploss_trades and self.stoploss_trades >= max_stoploss_trades:
+                self.blocked_reason = "STOPLOSS TRADE LIMIT HIT"
 
     def is_blocked(self, current_balance: Any):
         if self.kill_switch_active:
@@ -41,6 +47,7 @@ class LiveRiskGuard:
         max_loss = float(self.settings.get("max_daily_loss", 0) or 0)
         max_profit = float(self.settings.get("max_daily_profit", 0) or 0)
         max_losses = int(self.settings.get("max_consecutive_losses", 0) or 0)
+        max_stoploss_trades = int(self.settings.get("max_stoploss_trades", 2) or 0)
 
         if max_loss and pnl <= -abs(max_loss):
             self.blocked_reason = "DAILY LOSS LIMIT HIT"
@@ -48,6 +55,8 @@ class LiveRiskGuard:
             self.blocked_reason = "DAILY PROFIT TARGET HIT"
         elif max_losses and self.consecutive_losses >= max_losses:
             self.blocked_reason = "CONSECUTIVE LOSS LIMIT HIT"
+        elif max_stoploss_trades and self.stoploss_trades >= max_stoploss_trades:
+            self.blocked_reason = "STOPLOSS TRADE LIMIT HIT"
         elif self.square_off_time_reached():
             self.blocked_reason = "SQUARE OFF TIME REACHED"
 

@@ -12,6 +12,7 @@ class TradingCore:
         self.trade_count = 0
         self.start_balance = None
         self.consecutive_losses = 0
+        self.stoploss_trades = 0
         self.trading_blocked_reason = ""
 
     def _row_time(self, df, index):
@@ -106,6 +107,11 @@ class TradingCore:
             self.consecutive_losses += 1
         else:
             self.consecutive_losses = 0
+        if exit_reason == "STOPLOSS":
+            self.stoploss_trades += 1
+            max_stoploss_trades = int(settings.get("max_stoploss_trades", 2) or 0)
+            if max_stoploss_trades and self.stoploss_trades >= max_stoploss_trades:
+                self.trading_blocked_reason = "stoploss_trade_limit_hit"
         order_status = "PAPER"
         order_id = ""
         if order_handler is not None:
@@ -130,7 +136,10 @@ class TradingCore:
             "Bearish Threshold": settings.get("bearish_threshold", ""),
             "RSI Bull": settings.get("rsi_bull", ""),
             "RSI Bear": settings.get("rsi_bear", ""),
+            "RSI Reversal Bullish": settings.get("rsi_reversal_bullish", ""),
+            "RSI Reversal Bearish": settings.get("rsi_reversal_bearish", ""),
             "Min Buy Score": settings.get("min_buy_score", ""),
+            "Entry Remark": signal.get("entry_remark", ""),
             "Exit Time": self._row_time(option, exit_index),
             "Exit": exit_price,
             "PnL": pnl,
@@ -153,10 +162,13 @@ class TradingCore:
         max_loss = float(settings.get("max_daily_loss", 0) or 0)
         max_profit = float(settings.get("max_daily_profit", 0) or 0)
         max_losses = int(settings.get("max_consecutive_losses", 0) or 0)
+        max_stoploss_trades = int(settings.get("max_stoploss_trades", 2) or 0)
         if max_loss and pnl <= -abs(max_loss):
             self.trading_blocked_reason = "daily_loss_limit_hit"
         elif max_profit and pnl >= abs(max_profit):
             self.trading_blocked_reason = "daily_profit_target_hit"
         elif max_losses and self.consecutive_losses >= max_losses:
             self.trading_blocked_reason = "consecutive_loss_limit_hit"
+        elif max_stoploss_trades and self.stoploss_trades >= max_stoploss_trades:
+            self.trading_blocked_reason = "stoploss_trade_limit_hit"
         return bool(self.trading_blocked_reason)

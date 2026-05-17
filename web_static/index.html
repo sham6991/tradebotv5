@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TradeBotV4 Web Control Center</title>
+    <link rel="stylesheet" href="/static/app.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">TB</span>
+          <div>
+            <strong>TradeBotV4</strong>
+            <small>Web Control Center</small>
+          </div>
+        </div>
+        <nav>
+          <button class="nav active" data-view="dashboard">Dashboard</button>
+          <button class="nav" data-view="backtest">Backtest</button>
+          <button class="nav" data-view="paper">Paper Desk</button>
+          <button class="nav" data-view="live">Live Trading</button>
+          <button class="nav" data-view="replay">Session Replay</button>
+          <button class="nav" data-view="zerodha">Zerodha URLs</button>
+        </nav>
+      </aside>
+
+      <main>
+        <header class="topbar">
+          <div>
+            <h1 id="view-title">Dashboard</h1>
+            <p id="status-line">Ready</p>
+          </div>
+          <div class="account-strip">
+            <div><span>Real Margin</span><strong id="real-margin">Not Connected</strong></div>
+            <div><span>Paper Data</span><strong id="paper-margin">Not Connected</strong></div>
+          </div>
+          <div class="url-strip">
+            <label>Redirect <input id="redirect-url" readonly></label>
+          </div>
+        </header>
+
+        <section id="dashboard" class="view active">
+          <div class="metrics">
+            <article><span>Feed</span><strong id="feed-status">Stopped</strong></article>
+            <article><span>Ticks/s All Streams</span><strong id="ticks-rate">0</strong></article>
+            <article><span>Backlog</span><strong id="feed-backlog">0</strong></article>
+            <article><span>Current Mode</span><strong id="current-mode">PAPER</strong></article>
+          </div>
+          <section class="panel account-panel">
+            <h2>Account Snapshot</h2>
+            <div class="account-grid">
+              <div><span>Real Money Balance</span><strong id="dash-real-margin">Not Connected</strong><small id="dash-real-margin-time"></small></div>
+              <div><span>Paper Data Connection</span><strong id="dash-paper-margin">Not Connected</strong><small id="dash-paper-margin-time"></small></div>
+              <div><span>Orders</span><strong id="dash-order-count">0</strong><small>active and recent order rows</small></div>
+              <div><span>Order Refresh</span><strong>Polling</strong><small>status, fill qty, average price</small></div>
+            </div>
+          </section>
+          <section class="panel">
+            <h2>Network Health</h2>
+            <div class="health-toolbar">
+              <label>Mode
+                <select id="network-health-mode">
+                  <option>PAPER</option>
+                  <option>LIVE</option>
+                </select>
+              </label>
+              <button type="button" id="network-health-run" class="primary">Run Health Check</button>
+            </div>
+            <div class="account-grid health-grid">
+              <div><span>Status</span><strong id="network-health-status">Not Run</strong><small id="network-health-time"></small></div>
+              <div><span>Quality</span><strong id="network-health-quality">Unknown</strong><small id="network-health-message">Run before starting feed/trading.</small></div>
+              <div><span>Total Time</span><strong id="network-health-total">-</strong><small>read-only broker checks</small></div>
+              <div><span>Mode</span><strong id="network-health-active-mode">PAPER</strong><small>selected account</small></div>
+            </div>
+            <div class="table-wrap"><table id="network-health-steps"></table></div>
+          </section>
+          <section class="panel">
+            <h2>Recovery & Safety Center</h2>
+            <div class="health-toolbar">
+              <label>Mode
+                <select id="recovery-mode">
+                  <option>PAPER</option>
+                  <option>LIVE</option>
+                </select>
+              </label>
+              <button type="button" id="recovery-run" class="primary">Check Recovery State</button>
+            </div>
+            <div class="account-grid health-grid">
+              <div><span>Status</span><strong id="recovery-status">Not Checked</strong><small id="recovery-time"></small></div>
+              <div><span>Severity</span><strong id="recovery-severity">Unknown</strong><small id="recovery-summary">Run before restarting after a lost session.</small></div>
+              <div><span>Recommendation</span><strong id="recovery-recommendation">Run Check</strong><small>follow before trading</small></div>
+              <div><span>Mode</span><strong id="recovery-active-mode">PAPER</strong><small>selected account</small></div>
+            </div>
+            <div class="grid two recovery-tables">
+              <div class="table-wrap"><table id="recovery-checks"></table></div>
+              <div class="table-wrap"><table id="recovery-files"></table></div>
+            </div>
+            <div class="table-wrap"><table id="recovery-findings"></table></div>
+          </section>
+          <div class="grid two">
+            <section class="panel">
+              <h2>Zerodha Connection</h2>
+              <div class="connection-grid">
+                <div><span>Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
+                <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
+              </div>
+            </section>
+            <section class="panel">
+              <h2>Latest Result</h2>
+              <pre id="latest-result">No run yet</pre>
+            </section>
+          </div>
+          <section class="panel">
+            <h2>Active Orders</h2>
+            <div class="table-wrap"><table id="active-orders"></table></div>
+          </section>
+          <section class="panel">
+            <h2>Live Trade</h2>
+            <div class="table-wrap"><table id="live-trade"></table></div>
+          </section>
+        </section>
+
+        <section id="backtest" class="view">
+          <form id="backtest-form" class="panel upload-form">
+            <h2>Dataset And Contract Metadata</h2>
+            <div class="file-card">
+              <strong>NIFTY</strong>
+              <label>Excel/CSV file <input type="file" name="nifty_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
+              <label>Or server path <input name="nifty_path" placeholder="C:\path\to\nifty.xlsx"></label>
+            </div>
+            <div class="file-card">
+              <strong>CALL / CE</strong>
+              <label>Excel/CSV file <input type="file" name="call_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
+              <label>Or server path <input name="call_path"></label>
+              <label>Tradingsymbol <input name="call_symbol" value="NIFTY_CE"></label>
+              <label>Strike <input name="call_strike"></label>
+              <label>Expiry <input type="date" name="call_expiry"></label>
+            </div>
+            <div class="file-card">
+              <strong>PUT / PE</strong>
+              <label>Excel/CSV file <input type="file" name="put_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
+              <label>Or server path <input name="put_path"></label>
+              <label>Tradingsymbol <input name="put_symbol" value="NIFTY_PE"></label>
+              <label>Strike <input name="put_strike"></label>
+              <label>Expiry <input type="date" name="put_expiry"></label>
+            </div>
+            <div class="actions wide">
+              <button type="button" data-settings="backtest">Risk Settings</button>
+              <button type="submit" class="primary">Start Backtest</button>
+            </div>
+          </form>
+          <section class="panel">
+            <h2>Backtest Output</h2>
+            <pre id="backtest-output">No backtest completed yet.</pre>
+          </section>
+        </section>
+
+        <section id="paper" class="view live-view" data-mode="PAPER">
+          <div class="live-layout"></div>
+        </section>
+
+        <section id="live" class="view live-view" data-mode="LIVE">
+          <div class="live-layout"></div>
+        </section>
+
+        <section id="replay" class="view">
+          <form id="replay-form" class="panel form-grid">
+            <h2>Replay Source</h2>
+            <label class="wide">Upload SQLite database <input type="file" name="db_file" accept=".db,.sqlite,.sqlite3"></label>
+            <label class="wide">SQLite database <input name="path" placeholder="results\session.db"></label>
+            <label>Session ID <input name="session_id"></label>
+            <label>Filter
+              <select name="filter">
+                <option>All</option>
+                <option>Critical</option>
+                <option>Warnings</option>
+                <option>Partial Fills/Exits</option>
+                <option>Rejected/Failed</option>
+                <option>Kill Switch</option>
+                <option>Reconciliation</option>
+                <option>Unknown Broker State</option>
+              </select>
+            </label>
+            <div class="actions wide">
+              <button type="button" id="latest-replay">Latest</button>
+              <button type="submit" class="primary">Load Replay</button>
+            </div>
+          </form>
+          <section class="panel">
+            <h2>Replay Summary</h2>
+            <pre id="replay-summary">No replay loaded.</pre>
+          </section>
+          <section class="panel">
+            <h2>Timeline</h2>
+            <div class="table-wrap tall"><table id="replay-table"></table></div>
+          </section>
+        </section>
+
+        <section id="zerodha" class="view">
+          <div class="grid two">
+            <form class="panel auth-form" data-mode="PAPER">
+              <h2>Paper Data Login</h2>
+              <label>API key <input name="api_key" autocomplete="off"></label>
+              <label>API secret <input name="api_secret" type="password"></label>
+              <div class="actions">
+                <button class="primary" type="submit">Connect Paper Data</button>
+                <button type="button" data-disconnect-mode="PAPER">Disconnect</button>
+              </div>
+            </form>
+            <form class="panel auth-form" data-mode="LIVE">
+              <h2>Real Money Login</h2>
+              <label>API key <input name="api_key" autocomplete="off"></label>
+              <label>API secret <input name="api_secret" type="password"></label>
+              <div class="actions">
+                <button class="danger" type="submit">Connect Real Money</button>
+                <button type="button" data-disconnect-mode="LIVE">Disconnect</button>
+              </div>
+            </form>
+          </div>
+          <section class="panel">
+            <h2>Zerodha App Settings</h2>
+            <div class="copy-list">
+              <label>Redirect URL <input id="zerodha-redirect-copy" readonly></label>
+            </div>
+            <p class="note">Postback is disabled. The app continues to refresh order status, fill quantity, average price, and pending quantity through the existing polling flow.</p>
+          </section>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="settings-dialog">
+      <form method="dialog" id="settings-form">
+        <header>
+          <h2 id="settings-title">Risk Settings</h2>
+          <button value="cancel" class="ghost" type="submit">Close</button>
+        </header>
+        <div id="settings-fields" class="settings-grid"></div>
+        <footer>
+          <button type="button" id="settings-defaults">Defaults</button>
+          <button type="button" id="settings-save" class="primary">Save Settings</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <div id="toast"></div>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

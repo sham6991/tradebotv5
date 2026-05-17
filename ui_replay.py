@@ -1,5 +1,6 @@
 import json
 import os
+from typing import TYPE_CHECKING, Any
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -73,6 +74,29 @@ def replay_table_row(item):
 
 
 class ReplayViewMixin:
+    if TYPE_CHECKING:
+        root: tk.Tk
+        status_text: tk.StringVar
+        replay_db_path: tk.Entry
+        replay_session_id: tk.Entry
+        replay_filter: ttk.Combobox
+        replay_summary_text: tk.StringVar
+        replay_tree: ttk.Treeview
+        replay_payload: scrolledtext.ScrolledText
+        replay_report: dict[str, Any] | None
+        replay_visible_items: list[dict[str, Any]]
+
+        def clear_window(self) -> None: ...
+        def set_status(self, text: str) -> None: ...
+        def header(self, title: str, subtitle: str = "") -> None: ...
+        def content(self) -> tk.Frame: ...
+        def status_bar(self) -> None: ...
+        def show_home(self) -> None: ...
+        def _card(self, parent: tk.Misc, padx: int = 16, pady: int = 14) -> tk.Frame: ...
+        def _section_title(self, parent: tk.Misc, text: str, subtitle: str = "") -> None: ...
+        def make_button(self, parent: tk.Misc, text: str, command: Any, bg: str = "#0f766e", width: int = 20) -> tk.Button: ...
+        def _set_field_value(self, field: tk.Entry | ttk.Combobox, value: Any) -> None: ...
+
     def show_session_replay(self):
         self.clear_window()
         self.set_status("Session replay ready")

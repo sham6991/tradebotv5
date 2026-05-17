@@ -20,8 +20,8 @@ This repository must remain private. Do not commit broker credentials, access to
 
 - Local project folder: `tradebotV4`
 - New private GitHub target: `https://github.com/sham6991/tradebotV4`
-- Default local web URL: `http://127.0.0.1:8000`
-- Zerodha redirect URL: `http://127.0.0.1:8000/zerodha/callback`
+- Default local web URL: `http://127.0.0.1:8006`
+- Zerodha redirect URL: `http://127.0.0.1:8006/zerodha/callback`
 - Postback remains disabled; order status, fill quantity, pending quantity, cancellation, rejection, and average price are refreshed by polling and reconciliation logic.
 
 ## Entry Points
@@ -357,8 +357,47 @@ This TradeBotV4 snapshot is intended to be published as a new private GitHub pro
 
 ## Recommended Next Work
 
-1. Run the full test suite after the web baseline is committed.
-2. Consider removing account-sensitive runtime values, such as fetched real margin, from tracked settings profiles.
-3. Rename remaining user-facing `TradeBotV3` strings in auth/keyring text if a clean V4 identity is required.
-4. Run a real paper/live trial latency review before optimizing decision-path code.
-5. Add backtest-vs-live parity reporting from saved candles and session events.
+1. Add a backtest workbook `Run Metadata` or `Summary` sheet with:
+   - report/export timestamp
+   - exporter/code version
+   - settings hash/version
+   - app process start time or code-loaded timestamp
+   - final balance, trade count, win/loss summary, and workbook sheet guide.
+   This should make stale-process/stale-export issues obvious from inside Excel.
+2. Move account-sensitive runtime values, especially fetched real margin and live connection state, out of tracked settings profiles.
+   - Keep default strategy/risk settings in `data/settings_profiles.json`.
+   - Store runtime account/margin/session state in ignored runtime files under `results/` or an ignored `data/runtime/` folder.
+3. Create one shared settings/profile module used by both web and desktop UI.
+   - Move defaults, labels, blank-value fallback, profile load/save, and apply-backtest-to-live logic out of duplicated UI/web code.
+   - Prevent future drift between `ui_shared.py` and `web_app.py`.
+4. Add backtest-vs-live parity replay.
+   - Run saved paper/live candles through the backtest decision path.
+   - Compare signal time, CE/PE selection, Buy Score, entry price, target, stoploss, and skip reason.
+   - Export a parity report for any mismatch.
+5. Pin dependency versions in `requirements.txt`.
+   - Lock `pandas`, `numpy`, `kiteconnect`, `openpyxl`, and `keyring` to known-good versions.
+   - Re-test before upgrading dependencies.
+6. Make real-money live start require fresh safety checks.
+   - Recent network health pass.
+   - Recent recovery check pass.
+   - Fresh margin check.
+   - Market-hours/preflight pass.
+   - No restored kill-switch state.
+7. Add a paper-first guard after applying backtest settings to live profiles.
+   - Require or strongly warn for a paper run/session before starting real money with newly copied settings.
+8. Improve broker/feed/order exception classification.
+   - Keep UI catch-all behavior, but classify runtime errors as network, auth, margin, rejected, timeout, unknown broker state, or reconciliation-required.
+9. Split `execution_v2.py` into smaller ownership modules when making the next major live-runtime change.
+   - Suggested modules: live session orchestration, order lifecycle, feed runtime, recovery runtime, and session persistence.
+10. Mark or move legacy paths clearly.
+    - `execution.py`, Tkinter desktop paths, and older V3-named text should be documented as legacy/comparison paths or moved under a future `legacy/` folder.
+11. Add performance benchmark thresholds.
+    - Turn candle-builder, tick-storm, process-flow, and scoring benchmarks into pass/fail checks with reasonable thresholds.
+    - Use them before optimizing or changing live decision-path code.
+12. Rename remaining user-facing `TradeBotV3` strings in auth/keyring text if a clean V4 identity is required.
+13. Run a real paper/live trial latency review before further decision-path optimization.
+14. Run the full test suite after the web/backtest baseline is committed:
+    ```powershell
+    python -m unittest discover -s tests
+    python -m compileall -q .
+    ```

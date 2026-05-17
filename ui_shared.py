@@ -27,7 +27,17 @@ DEFAULT_SETTINGS = {
     "rsi_bear": "45",
     "rsi_reversal_bullish": "70",
     "rsi_reversal_bearish": "20",
-    "min_buy_score": "60",
+    "watch_buy_score": "60",
+    "min_buy_score": "75",
+    "strong_buy_score": "80",
+    "min_volume_ratio": "1.2",
+    "min_option_volume": "0",
+    "aggression_score_cap": "55",
+    "compression_range_ratio": "0.7",
+    "expansion_range_ratio": "1.8",
+    "max_chase_range_ratio": "2.5",
+    "failed_breakout_penalty": "-15",
+    "early_breakout_min_score": "60",
     "max_daily_loss": "0",
     "max_daily_profit": "0",
     "max_consecutive_losses": "0",
@@ -53,13 +63,38 @@ SETTING_LABELS = {
     "rsi_bear": "RSI Bear",
     "rsi_reversal_bullish": "RSI Reversal Bullish",
     "rsi_reversal_bearish": "RSI Reversal Bearish",
-    "min_buy_score": "Min Buy Score",
+    "watch_buy_score": "Watch Buy Score",
+    "min_buy_score": "Entry Buy Score",
+    "strong_buy_score": "Strong Buy Score",
+    "min_volume_ratio": "Min Volume Ratio",
+    "min_option_volume": "Min Option Volume",
+    "aggression_score_cap": "Aggression Score Cap",
+    "compression_range_ratio": "Compression Range Ratio",
+    "expansion_range_ratio": "Expansion Range Ratio",
+    "max_chase_range_ratio": "Max Chase Range Ratio",
+    "failed_breakout_penalty": "Failed Breakout Penalty",
+    "early_breakout_min_score": "Early Breakout Min Score",
     "max_daily_loss": "Max Daily Loss",
     "max_daily_profit": "Max Daily Profit",
     "max_consecutive_losses": "Max Loss Streak",
     "square_off_time": "Square Off Time",
     "order_product": "Order Product",
 }
+
+
+def setting_value(values, key):
+    value = (values or {}).get(key, DEFAULT_SETTINGS.get(key, ""))
+    if value is None or str(value).strip() == "":
+        return DEFAULT_SETTINGS.get(key, "")
+    return value
+
+
+def normalized_settings_profile(values):
+    values = values or {}
+    return {
+        **values,
+        **{key: setting_value(values, key) for key in DEFAULT_SETTINGS},
+    }
 
 
 class SharedUIMixin:
@@ -449,12 +484,22 @@ class SharedUIMixin:
             "rsi_bear": self._field(frame, "RSI Bear", "45", start_row + 6, column=1),
             "rsi_reversal_bullish": self._field(frame, "RSI Reversal Bullish", "70", start_row + 6, column=4),
             "rsi_reversal_bearish": self._field(frame, "RSI Reversal Bearish", "20", start_row + 7, column=1),
-            "min_buy_score": self._field(frame, "Min Buy Score", "60", start_row + 7, column=4),
-            "max_daily_loss": self._field(frame, "Max Daily Loss", "0", start_row + 8, column=1),
-            "max_daily_profit": self._field(frame, "Max Daily Profit", "0", start_row + 8, column=4),
-            "max_consecutive_losses": self._field(frame, "Max Loss Streak", "0", start_row + 9, column=1),
-            "square_off_time": self._field(frame, "Square Off Time", "15:20", start_row + 9, column=4),
-            "order_product": self._order_product_field(frame, "Order Product", "NRML", start_row + 10, column=1),
+            "watch_buy_score": self._field(frame, "Watch Buy Score", "60", start_row + 7, column=4),
+            "min_buy_score": self._field(frame, "Entry Buy Score", "75", start_row + 8, column=1),
+            "strong_buy_score": self._field(frame, "Strong Buy Score", "80", start_row + 8, column=4),
+            "min_volume_ratio": self._field(frame, "Min Volume Ratio", "1.2", start_row + 9, column=1),
+            "min_option_volume": self._field(frame, "Min Option Volume", "0", start_row + 9, column=4),
+            "aggression_score_cap": self._field(frame, "Aggression Score Cap", "55", start_row + 10, column=1),
+            "max_chase_range_ratio": self._field(frame, "Max Chase Range Ratio", "2.5", start_row + 10, column=4),
+            "compression_range_ratio": self._field(frame, "Compression Range Ratio", "0.7", start_row + 11, column=1),
+            "expansion_range_ratio": self._field(frame, "Expansion Range Ratio", "1.8", start_row + 11, column=4),
+            "failed_breakout_penalty": self._field(frame, "Failed Breakout Penalty", "-15", start_row + 12, column=1),
+            "early_breakout_min_score": self._field(frame, "Early Breakout Min Score", "60", start_row + 12, column=4),
+            "max_daily_loss": self._field(frame, "Max Daily Loss", "0", start_row + 13, column=1),
+            "max_daily_profit": self._field(frame, "Max Daily Profit", "0", start_row + 13, column=4),
+            "max_consecutive_losses": self._field(frame, "Max Loss Streak", "0", start_row + 14, column=1),
+            "square_off_time": self._field(frame, "Square Off Time", "15:20", start_row + 14, column=4),
+            "order_product": self._order_product_field(frame, "Order Product", "NRML", start_row + 15, column=1),
         }
         return fields
 
@@ -471,9 +516,9 @@ class SharedUIMixin:
         if not real_profile.get("zerodha_margin_fetched"):
             real_profile = {**real_profile, "balance": "0"}
         return {
-            "backtest": {**DEFAULT_SETTINGS, **data.get("backtest", {})},
-            "paper": {**DEFAULT_SETTINGS, **data.get("paper", {})},
-            "real": {**DEFAULT_SETTINGS, **real_profile},
+            "backtest": normalized_settings_profile(data.get("backtest", {})),
+            "paper": normalized_settings_profile(data.get("paper", {})),
+            "real": normalized_settings_profile(real_profile),
         }
 
     def _profile_name_for_attr(self, attr_name: str) -> str:
@@ -497,7 +542,7 @@ class SharedUIMixin:
 
     def _populate_settings_fields(self, fields, values):
         for key, field in fields.items():
-            value = values.get(key, DEFAULT_SETTINGS.get(key, ""))
+            value = setting_value(values, key)
             if key == "chart_interval":
                 value = self._interval_label(value)
             if key == "order_product":
@@ -505,6 +550,7 @@ class SharedUIMixin:
             self._set_field_value(field, str(value))
 
     def _settings_from_values(self, values):
+        values = {key: setting_value(values, key) for key in DEFAULT_SETTINGS}
         return {
             "balance": float(values["balance"]),
             "lot_size": int(values["lot_size"]),
@@ -521,7 +567,17 @@ class SharedUIMixin:
             "rsi_bear": float(values["rsi_bear"]),
             "rsi_reversal_bullish": float(values.get("rsi_reversal_bullish", DEFAULT_SETTINGS["rsi_reversal_bullish"])),
             "rsi_reversal_bearish": float(values.get("rsi_reversal_bearish", DEFAULT_SETTINGS["rsi_reversal_bearish"])),
+            "watch_buy_score": float(values.get("watch_buy_score", DEFAULT_SETTINGS["watch_buy_score"])),
             "min_buy_score": float(values["min_buy_score"]),
+            "strong_buy_score": float(values.get("strong_buy_score", DEFAULT_SETTINGS["strong_buy_score"])),
+            "min_volume_ratio": float(values.get("min_volume_ratio", DEFAULT_SETTINGS["min_volume_ratio"])),
+            "min_option_volume": float(values.get("min_option_volume", DEFAULT_SETTINGS["min_option_volume"])),
+            "aggression_score_cap": float(values.get("aggression_score_cap", DEFAULT_SETTINGS["aggression_score_cap"])),
+            "compression_range_ratio": float(values.get("compression_range_ratio", DEFAULT_SETTINGS["compression_range_ratio"])),
+            "expansion_range_ratio": float(values.get("expansion_range_ratio", DEFAULT_SETTINGS["expansion_range_ratio"])),
+            "max_chase_range_ratio": float(values.get("max_chase_range_ratio", DEFAULT_SETTINGS["max_chase_range_ratio"])),
+            "failed_breakout_penalty": float(values.get("failed_breakout_penalty", DEFAULT_SETTINGS["failed_breakout_penalty"])),
+            "early_breakout_min_score": float(values.get("early_breakout_min_score", DEFAULT_SETTINGS["early_breakout_min_score"])),
             "max_daily_loss": float(values["max_daily_loss"]),
             "max_daily_profit": float(values["max_daily_profit"]),
             "max_consecutive_losses": int(values["max_consecutive_losses"]),
@@ -534,8 +590,8 @@ class SharedUIMixin:
 
         popup = tk.Toplevel(self.root)
         popup.title(title)
-        popup.geometry("720x560")
-        popup.minsize(660, 520)
+        popup.geometry("760x720")
+        popup.minsize(700, 640)
         popup.configure(bg=PALETTE["bg"])
         popup.transient(self.root)
         popup.grab_set()
@@ -547,7 +603,7 @@ class SharedUIMixin:
         self._populate_settings_fields(fields, current_values)
 
         actions = tk.Frame(body, bg=PALETTE["surface"])
-        actions.grid(row=14, column=0, columnspan=4, pady=(16, 0), sticky="w")
+        actions.grid(row=20, column=0, columnspan=4, pady=(16, 0), sticky="w")
 
         def save():
             try:
@@ -595,7 +651,8 @@ class SharedUIMixin:
             f"SL {values.get('safety_points')}",
             f"RSI {values.get('rsi_bull')}/{values.get('rsi_bear')}",
             f"RSI reversal {values.get('rsi_reversal_bullish', DEFAULT_SETTINGS['rsi_reversal_bullish'])}/{values.get('rsi_reversal_bearish', DEFAULT_SETTINGS['rsi_reversal_bearish'])}",
-            f"Score {values.get('min_buy_score')}",
+            f"Score {values.get('watch_buy_score', DEFAULT_SETTINGS['watch_buy_score'])}/{values.get('min_buy_score')}/{values.get('strong_buy_score', DEFAULT_SETTINGS['strong_buy_score'])}",
+            f"Vol {values.get('min_volume_ratio', DEFAULT_SETTINGS['min_volume_ratio'])} | Chase {values.get('max_chase_range_ratio', DEFAULT_SETTINGS['max_chase_range_ratio'])}x",
             f"Square-off {values.get('square_off_time')}",
             f"Product {self._normalise_order_product(values.get('order_product', 'NRML'))}",
         ]
@@ -619,6 +676,16 @@ class SharedUIMixin:
             "rsi_reversal_bullish": float(fields["rsi_reversal_bullish"].get()),
             "rsi_reversal_bearish": float(fields["rsi_reversal_bearish"].get()),
             "min_buy_score": float(fields["min_buy_score"].get()),
+            "watch_buy_score": float(fields["watch_buy_score"].get()),
+            "strong_buy_score": float(fields["strong_buy_score"].get()),
+            "min_volume_ratio": float(fields["min_volume_ratio"].get()),
+            "min_option_volume": float(fields["min_option_volume"].get()),
+            "aggression_score_cap": float(fields["aggression_score_cap"].get()),
+            "compression_range_ratio": float(fields["compression_range_ratio"].get()),
+            "expansion_range_ratio": float(fields["expansion_range_ratio"].get()),
+            "max_chase_range_ratio": float(fields["max_chase_range_ratio"].get()),
+            "failed_breakout_penalty": float(fields["failed_breakout_penalty"].get()),
+            "early_breakout_min_score": float(fields["early_breakout_min_score"].get()),
             "max_daily_loss": float(fields["max_daily_loss"].get()),
             "max_daily_profit": float(fields["max_daily_profit"].get()),
             "max_consecutive_losses": int(fields["max_consecutive_losses"].get()),

@@ -59,7 +59,17 @@ def _validate_settings(settings, checks):
     _positive_float(settings, "profit_points", checks)
     _positive_float(settings, "safety_points", checks)
     _positive_float(settings, "balance", checks)
+    _range_float(settings, "watch_buy_score", checks, 0, 200)
     _range_float(settings, "min_buy_score", checks, 0, 200)
+    _range_float(settings, "strong_buy_score", checks, 0, 200)
+    _range_float(settings, "min_volume_ratio", checks, 0, 100)
+    _range_float(settings, "min_option_volume", checks, 0, 100000000)
+    _range_float(settings, "aggression_score_cap", checks, 0, 200)
+    _range_float(settings, "compression_range_ratio", checks, 0, 10)
+    _range_float(settings, "expansion_range_ratio", checks, 0, 10)
+    _range_float(settings, "max_chase_range_ratio", checks, 0, 50)
+    _range_float(settings, "failed_breakout_penalty", checks, -200, 0)
+    _range_float(settings, "early_breakout_min_score", checks, 0, 200)
     _float_setting(settings, "bullish_threshold", checks)
     _float_setting(settings, "bearish_threshold", checks)
     _float_setting(settings, "rsi_bull", checks)
@@ -151,6 +161,8 @@ def _positive_float(settings, key, checks):
 
 
 def _range_float(settings, key, checks, minimum, maximum):
+    if key not in settings:
+        return
     value = _float_setting(settings, key, checks)
     if value is None:
         return

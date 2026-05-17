@@ -34,7 +34,7 @@ RESULT_FOLDER = os.path.join(BASE_DIR, "results")
 STATIC_DIR = os.path.join(BASE_DIR, "web_static")
 UPLOAD_DIR = os.path.join(BASE_DIR, "data", "uploads")
 WEB_HOST = "127.0.0.1"
-WEB_PORT = 8000
+WEB_PORT = 8006
 WEB_REDIRECT_PATH = "/zerodha/callback"
 
 
@@ -64,8 +64,23 @@ def normalise_order_product(value):
     return "MIS" if text in ("MIS", "INTRADAY") else "NRML"
 
 
+def setting_value(values, key):
+    value = (values or {}).get(key, DEFAULT_SETTINGS.get(key, ""))
+    if value is None or str(value).strip() == "":
+        return DEFAULT_SETTINGS.get(key, "")
+    return value
+
+
+def normalized_settings_profile(values):
+    values = values or {}
+    return {
+        **values,
+        **{key: setting_value(values, key) for key in DEFAULT_SETTINGS},
+    }
+
+
 def settings_from_values(values):
-    values = {**DEFAULT_SETTINGS, **(values or {})}
+    values = {key: setting_value(values, key) for key in DEFAULT_SETTINGS}
     return {
         "balance": float(values["balance"]),
         "lot_size": int(values["lot_size"]),
@@ -82,7 +97,17 @@ def settings_from_values(values):
         "rsi_bear": float(values["rsi_bear"]),
         "rsi_reversal_bullish": float(values.get("rsi_reversal_bullish", DEFAULT_SETTINGS["rsi_reversal_bullish"])),
         "rsi_reversal_bearish": float(values.get("rsi_reversal_bearish", DEFAULT_SETTINGS["rsi_reversal_bearish"])),
+        "watch_buy_score": float(values.get("watch_buy_score", DEFAULT_SETTINGS["watch_buy_score"])),
         "min_buy_score": float(values["min_buy_score"]),
+        "strong_buy_score": float(values.get("strong_buy_score", DEFAULT_SETTINGS["strong_buy_score"])),
+        "min_volume_ratio": float(values.get("min_volume_ratio", DEFAULT_SETTINGS["min_volume_ratio"])),
+        "min_option_volume": float(values.get("min_option_volume", DEFAULT_SETTINGS["min_option_volume"])),
+        "aggression_score_cap": float(values.get("aggression_score_cap", DEFAULT_SETTINGS["aggression_score_cap"])),
+        "compression_range_ratio": float(values.get("compression_range_ratio", DEFAULT_SETTINGS["compression_range_ratio"])),
+        "expansion_range_ratio": float(values.get("expansion_range_ratio", DEFAULT_SETTINGS["expansion_range_ratio"])),
+        "max_chase_range_ratio": float(values.get("max_chase_range_ratio", DEFAULT_SETTINGS["max_chase_range_ratio"])),
+        "failed_breakout_penalty": float(values.get("failed_breakout_penalty", DEFAULT_SETTINGS["failed_breakout_penalty"])),
+        "early_breakout_min_score": float(values.get("early_breakout_min_score", DEFAULT_SETTINGS["early_breakout_min_score"])),
         "max_daily_loss": float(values["max_daily_loss"]),
         "max_daily_profit": float(values["max_daily_profit"]),
         "max_consecutive_losses": int(values["max_consecutive_losses"]),
@@ -101,9 +126,9 @@ def load_settings_profiles():
     if not real_profile.get("zerodha_margin_fetched"):
         real_profile = {**real_profile, "balance": "0"}
     return {
-        "backtest": {**DEFAULT_SETTINGS, **data.get("backtest", {})},
-        "paper": {**DEFAULT_SETTINGS, **data.get("paper", {})},
-        "real": {**DEFAULT_SETTINGS, **real_profile},
+        "backtest": normalized_settings_profile(data.get("backtest", {})),
+        "paper": normalized_settings_profile(data.get("paper", {})),
+        "real": normalized_settings_profile(real_profile),
     }
 
 
@@ -112,10 +137,34 @@ def save_settings_profile(profile, values):
         raise ValueError("Unknown settings profile.")
     os.makedirs(os.path.dirname(SETTINGS_PROFILE_PATH), exist_ok=True)
     profiles = load_settings_profiles()
-    profiles[profile] = dict(values)
+    profiles[profile] = normalized_settings_profile(values)
     with open(SETTINGS_PROFILE_PATH, "w", encoding="utf-8") as handle:
         json.dump(profiles, handle, indent=2)
     return profiles[profile]
+
+
+def apply_backtest_settings_to_live(values=None):
+    profiles = load_settings_profiles()
+    source = normalized_settings_profile(values or profiles["backtest"])
+    real_existing = profiles.get("real", {})
+    real_preserved = {
+        key: real_existing[key]
+        for key in ("balance", "zerodha_margin_fetched")
+        if key in real_existing
+    }
+
+    profiles["backtest"] = source
+    profiles["paper"] = normalized_settings_profile(source)
+    profiles["real"] = normalized_settings_profile({**source, **real_preserved})
+
+    os.makedirs(os.path.dirname(SETTINGS_PROFILE_PATH), exist_ok=True)
+    with open(SETTINGS_PROFILE_PATH, "w", encoding="utf-8") as handle:
+        json.dump(profiles, handle, indent=2)
+    return {
+        "backtest": profiles["backtest"],
+        "paper": profiles["paper"],
+        "real": profiles["real"],
+    }
 
 
 def load_csv_dataframe(path, instrument="", option_data=False, strike="", expiry="", option_type=""):
@@ -1145,7 +1194,11 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             limit = (params.get("limit") or ["200"])[0]
             return self.send_json(self.app_state.candle_snapshot(name, limit))
         if path == "/api/settings":
-            return self.send_json({"profiles": load_settings_profiles(), "labels": SETTING_LABELS})
+            return self.send_json({
+                "profiles": load_settings_profiles(),
+                "labels": SETTING_LABELS,
+                "defaults": DEFAULT_SETTINGS,
+            })
         if path == "/api/replay/latest":
             return self.send_json(self.app_state.replay_latest())
         if path == WEB_REDIRECT_PATH:
@@ -1166,6 +1219,10 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         payload = self.read_payload()
+        if path == "/api/settings/apply-backtest-live":
+            return self.send_json({
+                "profiles": apply_backtest_settings_to_live(payload.get("settings") or payload),
+            })
         if path.startswith("/api/settings/"):
             profile = path.rsplit("/", 1)[-1]
             return self.send_json({"profile": profile, "values": save_settings_profile(profile, payload)})
@@ -1310,6 +1367,9 @@ def main():
     parser.add_argument("--host", default=WEB_HOST)
     parser.add_argument("--port", default=WEB_PORT, type=int)
     args = parser.parse_args()
+    if int(args.port) != WEB_PORT:
+        print(f"TradeBot uses fixed port {WEB_PORT}; ignoring requested port {args.port}.")
+        args.port = WEB_PORT
     server, app = create_server(args.host, args.port)
     print(f"TradeBot web app: {app.local_url}")
     print(f"Zerodha redirect URL: {app.redirect_url}")

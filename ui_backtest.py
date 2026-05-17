@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 from backtest import run_backtest
 from engine import parse_option_metadata_from_text
 from reporting import timestamped_file
+from ui_shared import normalized_settings_profile
 from ui_theme import PALETTE
 
 if TYPE_CHECKING:
@@ -83,6 +84,13 @@ class BacktestViewMixin(_BacktestViewBase):
             PALETTE["primary"],
             16,
         ).grid(row=3, column=4, sticky="e", padx=8)
+        self.make_button(
+            settings_card,
+            "APPLY TO LIVE",
+            self.apply_backtest_settings_to_live,
+            "#0ea5e9",
+            16,
+        ).grid(row=3, column=5, sticky="e", padx=8)
 
         actions = tk.Frame(frame, bg=PALETTE["bg"])
         actions.pack(pady=12)
@@ -134,6 +142,23 @@ class BacktestViewMixin(_BacktestViewBase):
         except Exception as exc:
             self.set_status("Backtest failed")
             messagebox.showerror("ERROR", str(exc))
+
+    def apply_backtest_settings_to_live(self):
+        source = normalized_settings_profile(self._ensure_settings_values("backtest_settings_values"))
+        real_existing = dict(self._ensure_settings_values("real_settings_values"))
+        real_preserved = {
+            key: real_existing[key]
+            for key in ("balance", "zerodha_margin_fetched")
+            if key in real_existing
+        }
+
+        self.paper_settings_values = normalized_settings_profile(source)
+        self.real_settings_values = normalized_settings_profile({**source, **real_preserved})
+        self._save_settings_profile("backtest_settings_values", source)
+        self._save_settings_profile("paper_settings_values", self.paper_settings_values)
+        self._save_settings_profile("real_settings_values", self.real_settings_values)
+        self.set_status("Backtest settings applied to paper and real live profiles")
+        messagebox.showinfo("Settings", "Backtest settings applied to Paper and Real Money profiles.")
 
     def load_sample_backtest_dataset(self):
         self.backtest_nifty.delete(0, tk.END)

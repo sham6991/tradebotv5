@@ -14,7 +14,7 @@ except ImportError:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUTH_STORE_PATH = os.path.join(BASE_DIR, "data", "zerodha_auth.json")
-DEFAULT_REDIRECT_URL = "http://127.0.0.1:8000/zerodha/callback"
+DEFAULT_REDIRECT_URL = "http://127.0.0.1:8006/zerodha/callback"
 KEYRING_SERVICE = "TradeBotV3 Zerodha"
 
 
@@ -172,4 +172,3 @@ def extract_request_token_from_url(url):
     if not token:
         raise ValueError("No request_token found in the redirected URL.")
     return token
-

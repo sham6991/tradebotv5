@@ -25,6 +25,24 @@ def candle_rows(count):
 
 
 class IncrementalLiveIndicatorTests(unittest.TestCase):
+    def test_rsi_uses_wilder_smoothing_after_first_period(self):
+        closes = [100, 101, 102, 101, 103, 104, 103, 105, 106, 107, 106, 108, 109, 110, 111, 109]
+        rows = candle_rows(len(closes))
+        for row, close in zip(rows, closes):
+            row["close"] = close
+            row["open"] = close
+            row["high"] = close
+            row["low"] = close
+
+        frame = clean_and_add_indicators(pd.DataFrame(rows))
+        first_avg_gain = 14 / 14
+        first_avg_loss = 3 / 14
+        smoothed_gain = ((first_avg_gain * 13) + 0) / 14
+        smoothed_loss = ((first_avg_loss * 13) + 2) / 14
+        expected = 100 - (100 / (1 + (smoothed_gain / smoothed_loss)))
+
+        self.assertAlmostEqual(float(frame.iloc[15]["RSI"]), expected, places=8)
+
     def test_incremental_nifty_append_matches_full_indicator_recompute(self):
         rows = candle_rows(30)
         incremental = clean_and_add_indicators(pd.DataFrame(rows[:-1]))

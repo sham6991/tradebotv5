@@ -2,7 +2,7 @@ from trading_core import TradingCore
 from engine import TradingEngine
 from config import LOT_SIZE
 from indicators import clean_and_add_indicators
-from strategy import build_scoring_row, ensure_option_formula_columns
+from strategy import BUY_SCORE_REPORT_COLUMNS, build_scoring_row, ensure_option_formula_columns
 from reporting import format_datetime_value, format_time_columns, write_sqlite, validate_risk_engine_sqlite
 from datetime import datetime
 
@@ -22,7 +22,7 @@ def export_time(row):
     return ""
 
 
-def trim_to_common_datetime(nifty, options):
+def trim_to_common_datetime(nifty, options, settings=None):
     import pandas as pd
 
     frames = [nifty, *options]
@@ -50,18 +50,80 @@ def trim_to_common_datetime(nifty, options):
 
     trimmed_options = []
     for option in options:
-        trimmed = ensure_option_formula_columns(trim(option))
+        trimmed = trim(option)
         trimmed.attrs.update(option.attrs)
+        trimmed = ensure_option_formula_columns(trimmed, settings)
         trimmed_options.append(trimmed)
 
     return nifty, trimmed_options
 
+
+def score_formula_rows(settings):
+    return [
+        {
+            "Field": "Aggression Score",
+            "Formula": "Bullish Close Score + Volume Strength Score + Candle Body Strength Score + Breakout Score + Expansion Score",
+            "Active Setting": "",
+        },
+        {
+            "Field": "Capped Aggression Score",
+            "Formula": "min(Aggression Score, aggression_score_cap). If cap <= 0, Aggression Score is used as-is.",
+            "Active Setting": settings.get("aggression_score_cap", ""),
+        },
+        {
+            "Field": "Buy Score",
+            "Formula": "Capped Aggression Score + Higher Low Score + Compression Score + Failed Breakout Penalty + Bear Trap Penalty + Bull Trap penalty",
+            "Active Setting": "",
+        },
+        {
+            "Field": "Compression Score",
+            "Formula": "15 when Range Ratio < compression_range_ratio, else 0",
+            "Active Setting": settings.get("compression_range_ratio", ""),
+        },
+        {
+            "Field": "Expansion Score",
+            "Formula": "25 when Range Ratio > expansion_range_ratio, else 0",
+            "Active Setting": settings.get("expansion_range_ratio", ""),
+        },
+        {
+            "Field": "Failed Breakout Penalty",
+            "Formula": "failed_breakout_penalty when any prior 3 candles had high > previous high and Close Position Score < 0.5",
+            "Active Setting": settings.get("failed_breakout_penalty", ""),
+        },
+        {
+            "Field": "Liquidity Filter",
+            "Formula": "PASS when Volume Ratio >= min_volume_ratio and volume >= min_option_volume",
+            "Active Setting": f"{settings.get('min_volume_ratio', '')}, {settings.get('min_option_volume', '')}",
+        },
+        {
+            "Field": "Chase Filter",
+            "Formula": "PASS when Average Range is unavailable, Range Ratio <= max_chase_range_ratio, or follow-through is strong",
+            "Active Setting": settings.get("max_chase_range_ratio", ""),
+        },
+        {
+            "Field": "Early Breakout Probability Score",
+            "Formula": "Compression Score + Volume Strength Score + Higher Low Score + Bullish Close Score + Upper Wick Shrink Score",
+            "Active Setting": settings.get("early_breakout_min_score", ""),
+        },
+        {
+            "Field": "High Probability Buy",
+            "Formula": "HIGH PROB BUY when Buy Score >= strong_buy_score, Early Breakout Probability Score >= early_breakout_min_score, and Momentum Acceleration Score > 0",
+            "Active Setting": f"{settings.get('strong_buy_score', '')}, {settings.get('early_breakout_min_score', '')}",
+        },
+        {
+            "Field": "Buy Entry",
+            "Formula": "BUY when Buy Score >= min_buy_score and both Liquidity Filter and Chase Filter pass",
+            "Active Setting": settings.get("min_buy_score", ""),
+        },
+    ]
+
+
 def run_backtest(nifty, options, settings, save_path):
-    nifty, options = trim_to_common_datetime(nifty, options)
+    nifty, options = trim_to_common_datetime(nifty, options, settings)
 
     engine = TradingEngine(settings["cooldown"])
 
-    core = TradingCore(engine)
+    core = TradingCore(engine, mode="BACKTEST")
 
     core.balance = settings["balance"]
     core.lot_size = settings["lot_size"] * LOT_SIZE
@@ -156,6 +218,40 @@ def run_backtest(nifty, options, settings, save_path):
             "Expiry": option.attrs.get("expiry", ""),
         })
 
+    option_score_rows = []
+    for option_no, option in enumerate(options, start=1):
+        scored = ensure_option_formula_columns(option, settings)
+        metadata = {
+            "Option No": option_no,
+            "Instrument": scored.attrs.get("instrument", ""),
+            "Tradingsymbol": scored.attrs.get("tradingsymbol", ""),
+            "Type": scored.attrs.get("option_type", ""),
+            "Strike": scored.attrs.get("strike", ""),
+            "Expiry": scored.attrs.get("expiry", ""),
+        }
+        for row_index, row in scored.iterrows():
+            score_row = build_scoring_row(
+                scored,
+                row_index,
+                data_kind="option",
+                min_buy_score=settings.get("min_buy_score", 75),
+                scoring_settings=settings,
+                include_calculations=True,
+            )
+            option_score_rows.append({
+                **metadata,
+                "Index": row_index,
+                "Datetime": export_time(row),
+                "Open": row.get("open", ""),
+                "High": row.get("high", ""),
+                "Low": row.get("low", ""),
+                "Close": row.get("close", ""),
+                "Volume": row.get("volume", ""),
+                **{column: score_row.get(column, "") for column in BUY_SCORE_REPORT_COLUMNS},
+                "Sell Score": score_row.get("Sell Score", ""),
+                "Sell Entry": score_row.get("Sell Entry", ""),
+            })
+
     normalized_trades = [normalize_trade(t) for t in core.trades]
     df = pd.DataFrame(normalized_trades)
 
@@ -164,6 +260,8 @@ def run_backtest(nifty, options, settings, save_path):
     pe_trades = trades_df[trades_df.get("Type", pd.Series(dtype=str)).astype(str).str.upper() == "PE"].copy()
     candles_df = format_time_columns(pd.DataFrame(candle_rows))
     skips_df = format_time_columns(pd.DataFrame(skip_rows))
+    option_scores_df = format_time_columns(pd.DataFrame(option_score_rows))
+    score_formula_df = pd.DataFrame(score_formula_rows(settings))
     risk_df = format_time_columns(df)
 
     with pd.ExcelWriter(save_path) as writer:
@@ -171,6 +269,8 @@ def run_backtest(nifty, options, settings, save_path):
         ce_trades.to_excel(writer, sheet_name="CE Trades", index=False)
         pe_trades.to_excel(writer, sheet_name="PE Trades", index=False)
         candles_df.to_excel(writer, sheet_name="Candles", index=False)
+        option_scores_df.to_excel(writer, sheet_name="Option Scores", index=False)
+        score_formula_df.to_excel(writer, sheet_name="Score Formula", index=False)
         skips_df.to_excel(writer, sheet_name="Skips", index=False)
         pd.DataFrame(settings_rows).to_excel(writer, sheet_name="Settings", index=False)
         pd.DataFrame(option_rows).to_excel(writer, sheet_name="Option Metadata", index=False)
@@ -178,6 +278,8 @@ def run_backtest(nifty, options, settings, save_path):
 
     sql_path = save_path.replace(".xlsx", ".db")
     write_sqlite(sql_path, df, table_name="trades")
+    write_sqlite(sql_path, option_scores_df, table_name="option_scores")
+    write_sqlite(sql_path, score_formula_df, table_name="score_formula")
 
     backtest_run = [{
         "run_id": f"BACKTEST_{datetime.now().strftime('%Y%m%d_%H%M%S')}",

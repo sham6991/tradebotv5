@@ -141,11 +141,7 @@ def clean_and_add_indicators(df):
         if "EMA50" not in df.columns or df["EMA50"].isna().all():
             df["EMA50"] = df["close"].ewm(span=50, adjust=False).mean()
         if "RSI" not in df.columns or df["RSI"].isna().all():
-            delta = df["close"].diff()
-            gain = delta.clip(lower=0).rolling(14).mean()
-            loss = (-delta.clip(upper=0)).rolling(14).mean()
-            rs = gain / loss
-            df["RSI"] = 100 - (100 / (1 + rs))
+            df["RSI"] = _calculate_wilder_rsi(df["close"], period=14)
 
     return df
 
@@ -219,18 +215,42 @@ def _append_ema(df, index, close, column, span):
 def _append_rsi(df, index):
     if "RSI" not in df.columns:
         df["RSI"] = pd.NA
-    if index < 14:
-        df.loc[index, "RSI"] = pd.NA
-        return
+    df.loc[index, "RSI"] = _calculate_wilder_rsi(df["close"], period=14).iloc[index]
 
-    closes = pd.to_numeric(df["close"].iloc[index - 14:index + 1], errors="coerce")
-    delta = closes.diff()
-    gain = delta.clip(lower=0).iloc[1:].mean()
-    loss = (-delta.clip(upper=0)).iloc[1:].mean()
-    if pd.isna(gain) or pd.isna(loss):
-        df.loc[index, "RSI"] = pd.NA
-    elif loss == 0:
-        df.loc[index, "RSI"] = 100
-    else:
-        rs = gain / loss
-        df.loc[index, "RSI"] = 100 - (100 / (1 + rs))
+
+def _calculate_wilder_rsi(close, period=14):
+    close = pd.to_numeric(close, errors="coerce")
+    rsi = pd.Series(pd.NA, index=close.index, dtype="Float64")
+    if len(close) <= period:
+        return rsi
+
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.iloc[1:period + 1].mean()
+    avg_loss = loss.iloc[1:period + 1].mean()
+
+    if pd.isna(avg_gain) or pd.isna(avg_loss):
+        return rsi
+
+    rsi.iloc[period] = _rsi_from_average_gain_loss(avg_gain, avg_loss)
+    for index in range(period + 1, len(close)):
+        current_gain = gain.iloc[index]
+        current_loss = loss.iloc[index]
+        if pd.isna(current_gain) or pd.isna(current_loss):
+            rsi.iloc[index] = pd.NA
+            continue
+        avg_gain = ((avg_gain * (period - 1)) + current_gain) / period
+        avg_loss = ((avg_loss * (period - 1)) + current_loss) / period
+        rsi.iloc[index] = _rsi_from_average_gain_loss(avg_gain, avg_loss)
+
+    return rsi
+
+
+def _rsi_from_average_gain_loss(avg_gain, avg_loss):
+    if avg_loss == 0:
+        return 100.0
+    if avg_gain == 0:
+        return 0.0
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))

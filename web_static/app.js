@@ -17,7 +17,10 @@ const titles = {
 const settingOrder = [
   "balance", "lot_size", "max_trades", "profit_points", "safety_points", "entry_offset",
   "time_exit", "cooldown", "chart_interval", "bullish_threshold", "bearish_threshold",
-  "rsi_bull", "rsi_bear", "rsi_reversal_bullish", "rsi_reversal_bearish", "min_buy_score",
+  "rsi_bull", "rsi_bear", "rsi_reversal_bullish", "rsi_reversal_bearish",
+  "watch_buy_score", "min_buy_score", "strong_buy_score", "min_volume_ratio", "min_option_volume",
+  "aggression_score_cap", "compression_range_ratio", "expansion_range_ratio", "max_chase_range_ratio",
+  "failed_breakout_penalty", "early_breakout_min_score",
   "max_daily_loss", "max_daily_profit", "max_consecutive_losses", "square_off_time", "order_product",
 ];
 
@@ -117,7 +120,8 @@ function renderTable(target, rows, columns = null) {
   if (!table) return;
   table.textContent = "";
   const normalized = Array.isArray(rows) ? rows : [];
-  const cols = columns || Array.from(new Set(normalized.flatMap(row => Object.keys(row || {})))).slice(0, 18);
+  const cols = columns || Array.from(new Set(normalized.flatMap(row => Object.keys(row || {}))));
+  table.style.minWidth = `${Math.max(760, cols.length * 128)}px`;
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
   cols.forEach(col => {
@@ -179,7 +183,13 @@ function renderRecoveryStatus(recoveryStatus) {
 }
 
 function currentSettings(profile) {
-  return { ...(state.settings[profile] || state.defaults || {}) };
+  const values = { ...(state.defaults || {}), ...(state.settings[profile] || {}) };
+  Object.entries(state.defaults || {}).forEach(([key, fallback]) => {
+    if (values[key] === null || values[key] === undefined || String(values[key]).trim() === "") {
+      values[key] = fallback;
+    }
+  });
+  return values;
 }
 
 function collectSettingsFromDialog() {
@@ -218,7 +228,7 @@ async function loadSettings() {
   const data = await api("/api/settings");
   state.settings = data.profiles;
   state.labels = data.labels;
-  state.defaults = { ...(data.profiles?.backtest || {}) };
+  state.defaults = { ...(data.defaults || data.profiles?.backtest || {}) };
 }
 
 function buildLiveViews() {
@@ -502,6 +512,13 @@ function bindForms() {
     state.settings[state.activeSettingsProfile] = saved.values;
     $("#settings-dialog").close();
     toast("Settings saved");
+  });
+
+  $("#apply-backtest-live").addEventListener("click", async () => {
+    const settings = currentSettings("backtest");
+    const saved = await api("/api/settings/apply-backtest-live", { settings });
+    state.settings = saved.profiles;
+    toast("Backtest settings applied to Paper and Real");
   });
 
   $("#network-health-run").addEventListener("click", () => {

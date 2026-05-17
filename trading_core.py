@@ -1,3 +1,6 @@
+from strategy import BUY_SCORE_REPORT_COLUMNS, option_score_calculation_details
+
+
 class TradingCore:
 
     def __init__(self, engine, mode="LIVE"):
@@ -117,7 +120,10 @@ class TradingCore:
         if order_handler is not None:
             order_status, order_id = order_handler(signal, self.trade_count + 1)
 
-        self.trades.append({
+        score_row = dict(signal.get("score_row", {}))
+        if self.mode == "BACKTEST":
+            score_row.update(option_score_calculation_details(score_row, settings))
+        trade = {
             "Trade No": self.trade_count + 1,
             "Type": option_type,
             "Instrument": instrument,
@@ -150,9 +156,12 @@ class TradingCore:
             "Remarks": exit_reason,
             "Order Status": order_status,
             "Order ID": order_id,
-            "Buy Score": signal.get("score_row", {}).get("Buy Score", ""),
-            "Buy Entry": signal.get("score_row", {}).get("Buy Entry", ""),
-        })
+            "Buy Score": score_row.get("Buy Score", ""),
+            "Buy Entry": score_row.get("Buy Entry", ""),
+        }
+        for column in BUY_SCORE_REPORT_COLUMNS:
+            trade.setdefault(column, score_row.get(column, ""))
+        self.trades.append(trade)
         self.trade_count += 1
 
     def _trading_blocked(self, settings):

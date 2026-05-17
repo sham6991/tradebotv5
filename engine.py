@@ -4,8 +4,8 @@ from typing import Any
 from strategy import (
     build_scoring_row,
     ensure_option_formula_columns,
-    has_option_formula_columns,
     market_trend_signal,
+    option_scoring_settings,
 )
 import re
 
@@ -229,16 +229,26 @@ class TradingEngine:
     def mark_trade_complete(self, exit_index):
         self.cooldown_until = max(self.cooldown_until, int(exit_index) + self.cooldown)
 
-    def evaluate_option_signal(self, option_df, i):
+    def evaluate_option_signal(self, option_df, i, settings=None, trend=""):
         if i >= len(option_df):
             return {"buy_entry": "", "score_row": {}}
 
-        min_buy_score = float(getattr(self, "min_buy_score", 60))
-        if not has_option_formula_columns(option_df):
-            option_df = ensure_option_formula_columns(option_df)
-        score = build_scoring_row(option_df, i, data_kind="option", min_buy_score=min_buy_score)
+        min_buy_score = float(getattr(self, "min_buy_score", 75))
+        expected_settings = option_scoring_settings(settings)
+        if option_df.attrs.get("_option_scoring_settings") != expected_settings:
+            option_df = ensure_option_formula_columns(option_df, settings)
+        score = build_scoring_row(
+            option_df,
+            i,
+            data_kind="option",
+            min_buy_score=min_buy_score,
+            scoring_settings=settings,
+        )
         if not score:
             return {"buy_entry": "", "score_row": {}}
+        if trend:
+            score["NIFTY Trend"] = trend
+            score["Trend Alignment"] = "PASS"
         return {
             "buy_entry": score.get("Buy Entry", ""),
             "score_row": score,
@@ -258,7 +268,7 @@ class TradingEngine:
         rsi_bear = float(settings.get("rsi_bear", 45))
         rsi_reversal_bullish = float(settings.get("rsi_reversal_bullish", 70))
         rsi_reversal_bearish = float(settings.get("rsi_reversal_bearish", 20))
-        self.min_buy_score = float(settings.get("min_buy_score", 60))
+        self.min_buy_score = float(settings.get("min_buy_score", 75))
         trend, entry_remark = market_trend_signal(
             nifty.iloc[i],
             bullish_threshold,
@@ -282,12 +292,14 @@ class TradingEngine:
             self.last_skip_reason = "missing_aligned_option_candle"
             return None
 
-        evaluated = self.evaluate_option_signal(option_df, option_i)
+        evaluated = self.evaluate_option_signal(option_df, option_i, settings, trend)
         buy_entry = evaluated["buy_entry"]
 
         if buy_entry != "BUY":
+            reason = evaluated["score_row"].get("Entry Block Reason", "")
             self.last_skip_reason = (
-                f"buy_score_below_{self.min_buy_score}"
+                reason
+                or f"buy_score_below_{self.min_buy_score}"
                 f"({evaluated['score_row'].get('Buy Score', 0)})"
             )
             return None

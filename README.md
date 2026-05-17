@@ -23,24 +23,24 @@ Easiest start: double-click:
 Start TradeBot Web.bat
 ```
 
-This starts the local TradeBot web app on port 8000.
+This starts the local TradeBot web app on the fixed port 8006.
 
 Run the browser control center:
 
 ```powershell
-python main.py --host 127.0.0.1 --port 8000
+python main.py --host 127.0.0.1 --port 8006
 ```
 
 Open:
 
 ```text
-http://127.0.0.1:8000
+http://127.0.0.1:8006
 ```
 
 Zerodha app settings for the default local web app:
 
 ```text
-Redirect URL: http://127.0.0.1:8000/zerodha/callback
+Redirect URL: http://127.0.0.1:8006/zerodha/callback
 ```
 
 Postback is disabled. Live order status, average price, fill quantity, pending

@@ -81,12 +81,30 @@ def option_frame(option_type, buy_score=85, exit_mode="target", count=6):
         rows.append(row)
 
     # Signal at index 1, entry at index 2 with entry_offset 0 and open 100.
+    if buy_score >= 60 and count > 1:
+        rows[1].update({
+            "open": 100,
+            "high": 112,
+            "low": 98,
+            "close": 111,
+            "volume": 5000,
+        })
+    elif count > 1:
+        rows[1].update({
+            "open": 100,
+            "high": 102,
+            "low": 97,
+            "close": 100,
+            "volume": 800,
+        })
     if exit_mode == "target":
         for index in range(2, count):
             rows[index].update({"high": 111, "low": 98, "close": 110})
     elif exit_mode == "stoploss":
         for index in range(2, count):
             rows[index].update({"high": 104, "low": 94, "close": 95})
+        if count > 5:
+            rows[4].update({"open": 100, "high": 112, "low": 98, "close": 111, "volume": 7000})
     elif exit_mode == "time":
         for index in range(2, min(count, 5)):
             rows[index].update({"high": 104, "low": 97, "close": 102 + index})
@@ -209,7 +227,7 @@ class StrategyRegressionTests(unittest.TestCase):
         )
 
         self.assertIsNone(signal)
-        self.assertTrue(engine.last_skip_reason.startswith("buy_score_below_60.0"))
+        self.assertTrue(engine.last_skip_reason.startswith("buy_score_below_60"))
 
     def test_target_exit(self):
         core = run_backtest_trade(nifty_frame("bullish"), option_frame("CE", exit_mode="target"))

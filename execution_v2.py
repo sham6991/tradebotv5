@@ -37,7 +37,7 @@ from reporting import BufferedExcelWriter, format_datetime_value
 from risk_guard import LiveRiskGuard
 from session_audit import write_session_audit
 from sqlite_store import AsyncTradingStore, TradingStore
-from strategy import append_option_formula_row, build_scoring_row, ensure_option_formula_columns
+from strategy import BUY_SCORE_REPORT_COLUMNS, append_option_formula_row, build_scoring_row, ensure_option_formula_columns
 from zerodha_client import ZerodhaClient
 
 
@@ -397,8 +397,9 @@ class LivePaperSession:
             if self._is_duplicate_or_old(self.options[idx], row["datetime"]):
                 return False
             attrs = dict(self.options[idx].attrs)
+            attrs.pop("_option_scoring_settings", None)
             option = append_clean_candle(self.options[idx], row)
-            option = append_option_formula_row(option)
+            option = append_option_formula_row(option, self.settings)
             option.attrs.update(attrs)
             append_datetime_index_key(option, row["datetime"])
             self.options[idx] = option
@@ -2203,8 +2204,9 @@ class LivePaperSession:
         price_fallback = entry_price or exit_price or limit_price or trigger_price or 0
         quantity_details = self._order_quantity_visibility(order_id, quantity, price_fallback, normalized_status)
         action = self._action_from_reason(side, exit_reason or remarks or status)
-        buy_score = signal.get("score_row", {}).get("Buy Score", "")
-        sell_score = signal.get("score_row", {}).get("Sell Score", "")
+        score_row = signal.get("score_row", {})
+        buy_score = score_row.get("Buy Score", "")
+        sell_score = score_row.get("Sell Score", "")
         trade_id = related_trade_id or f"{self.session_id}_{trade_no}"
 
         active_row = {
@@ -2262,6 +2264,9 @@ class LivePaperSession:
             "Related Trade ID": trade_id,
             "Error / Rejection Reason": remarks if normalized_status in {"REJECTED", "CANCELLED"} else "",
         }
+        for column in BUY_SCORE_REPORT_COLUMNS:
+            active_row.setdefault(column, score_row.get(column, ""))
+            history_row.setdefault(column, score_row.get(column, "") if side == "BUY" else "")
 
         key = str(order_id or trade_id or f"{trade_no}_{side}_{timestamp}")
         if keep_active and normalized_status not in {"CANCELLED", "REJECTED"}:
@@ -2533,7 +2538,7 @@ class Executor:
         for contract in option_contracts:
             df = self.zerodha.historical_candles(contract["token"], from_date, to_date, interval=interval)
             df = clean_and_add_indicators(df)
-            df = ensure_option_formula_columns(df)
+            df = ensure_option_formula_columns(df, self.settings)
             df.attrs["instrument"] = contract["tradingsymbol"]
             df.attrs["tradingsymbol"] = contract["tradingsymbol"]
             if contract.get("strike"):

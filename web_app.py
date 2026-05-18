@@ -20,6 +20,7 @@ from engine import parse_option_metadata_from_text
 from event_replay import build_session_replay, format_replay_report
 from execution_v2 import Executor
 from indicators import clean_and_add_indicators
+from live_backtest_optimizer import OPTIMIZED_SETTING_KEYS, run_live_backtest_optimizer
 from position_reconciler import PositionReconciler
 from reporting import timestamped_file
 from strategy import ensure_option_formula_columns
@@ -36,6 +37,12 @@ UPLOAD_DIR = os.path.join(BASE_DIR, "data", "uploads")
 WEB_HOST = "127.0.0.1"
 WEB_PORT = 8006
 WEB_REDIRECT_PATH = "/zerodha/callback"
+ZERODHA_MODES = {"PAPER", "LIVE", "BACKTEST"}
+LIVE_BLOCKING_MODES = {
+    "PAPER": {"LIVE"},
+    "LIVE": {"PAPER", "BACKTEST"},
+    "BACKTEST": {"LIVE"},
+}
 
 
 def json_default(value):
@@ -64,6 +71,19 @@ def normalise_order_product(value):
     return "MIS" if text in ("MIS", "INTRADAY") else "NRML"
 
 
+def parse_instrument_token(value, label):
+    text = str(value if value is not None else "").strip().replace(",", "")
+    if not text:
+        raise ValueError(f"{label} is required. Use Fetch or enter the numeric Zerodha instrument token.")
+    try:
+        token = int(text)
+    except (TypeError, ValueError):
+        raise ValueError(f"{label} must be a numeric Zerodha instrument token, got {value!r}.")
+    if token <= 0:
+        raise ValueError(f"{label} must be a positive Zerodha instrument token.")
+    return token
+
+
 def setting_value(values, key):
     value = (values or {}).get(key, DEFAULT_SETTINGS.get(key, ""))
     if value is None or str(value).strip() == "":
@@ -71,16 +91,29 @@ def setting_value(values, key):
     return value
 
 
+def derived_watch_buy_score(values):
+    try:
+        score = float(setting_value(values, "min_buy_score")) - 5
+    except (TypeError, ValueError):
+        return DEFAULT_SETTINGS["watch_buy_score"]
+    if score.is_integer():
+        return str(int(score))
+    return f"{score:.2f}".rstrip("0").rstrip(".")
+
+
 def normalized_settings_profile(values):
     values = values or {}
-    return {
+    normalized = {
         **values,
         **{key: setting_value(values, key) for key in DEFAULT_SETTINGS},
     }
+    normalized["watch_buy_score"] = derived_watch_buy_score(normalized)
+    return normalized
 
 
 def settings_from_values(values):
     values = {key: setting_value(values, key) for key in DEFAULT_SETTINGS}
+    values["watch_buy_score"] = derived_watch_buy_score(values)
     return {
         "balance": float(values["balance"]),
         "lot_size": int(values["lot_size"]),
@@ -97,7 +130,7 @@ def settings_from_values(values):
         "rsi_bear": float(values["rsi_bear"]),
         "rsi_reversal_bullish": float(values.get("rsi_reversal_bullish", DEFAULT_SETTINGS["rsi_reversal_bullish"])),
         "rsi_reversal_bearish": float(values.get("rsi_reversal_bearish", DEFAULT_SETTINGS["rsi_reversal_bearish"])),
-        "watch_buy_score": float(values.get("watch_buy_score", DEFAULT_SETTINGS["watch_buy_score"])),
+        "watch_buy_score": float(values["watch_buy_score"]),
         "min_buy_score": float(values["min_buy_score"]),
         "strong_buy_score": float(values.get("strong_buy_score", DEFAULT_SETTINGS["strong_buy_score"])),
         "min_volume_ratio": float(values.get("min_volume_ratio", DEFAULT_SETTINGS["min_volume_ratio"])),
@@ -146,15 +179,21 @@ def save_settings_profile(profile, values):
 def apply_backtest_settings_to_live(values=None):
     profiles = load_settings_profiles()
     source = normalized_settings_profile(values or profiles["backtest"])
+    paper_existing = profiles.get("paper", {})
+    paper_preserved = {
+        key: paper_existing[key]
+        for key in ("balance", "chart_interval")
+        if key in paper_existing
+    }
     real_existing = profiles.get("real", {})
     real_preserved = {
         key: real_existing[key]
-        for key in ("balance", "zerodha_margin_fetched")
+        for key in ("balance", "zerodha_margin_fetched", "chart_interval")
         if key in real_existing
     }
 
     profiles["backtest"] = source
-    profiles["paper"] = normalized_settings_profile(source)
+    profiles["paper"] = normalized_settings_profile({**source, **paper_preserved})
     profiles["real"] = normalized_settings_profile({**source, **real_preserved})
 
     os.makedirs(os.path.dirname(SETTINGS_PROFILE_PATH), exist_ok=True)
@@ -199,13 +238,14 @@ class WebTradeBotApp:
         self.lock = threading.RLock()
         self.executor = Executor()
         self.auth_store = ZerodhaAuthStore()
-        self.zerodha_clients_by_mode = {"PAPER": None, "LIVE": None}
-        self.zerodha_auth_profiles = {"PAPER": None, "LIVE": None}
-        self.zerodha_auth_login_times = {"PAPER": "", "LIVE": ""}
+        self.zerodha_clients_by_mode = {mode: None for mode in ZERODHA_MODES}
+        self.zerodha_auth_profiles = {mode: None for mode in ZERODHA_MODES}
+        self.zerodha_auth_login_times = {mode: "" for mode in ZERODHA_MODES}
         self.pending_auth = {}
         self.account_margins = {
-            "PAPER": {"available": None, "updated_at": "", "error": ""},
+            "PAPER": self.paper_balance_snapshot(),
             "LIVE": {"available": None, "updated_at": "", "error": ""},
+            "BACKTEST": {"available": None, "updated_at": "", "error": ""},
         }
         self.status = "Ready"
         self.current_mode = "PAPER"
@@ -217,6 +257,7 @@ class WebTradeBotApp:
         self.live_order_history_rows = []
         self.live_trade_snapshot = {}
         self.live_health_snapshot = {}
+        self.session_summary = self.empty_session_summary("PAPER")
         self.network_health = {
             "PAPER": self.empty_network_health("PAPER"),
             "LIVE": self.empty_network_health("LIVE"),
@@ -247,16 +288,34 @@ class WebTradeBotApp:
             self.status = text
 
     def auth_label(self, mode):
-        return "Real Money Zerodha" if mode == "LIVE" else "Paper Trading Data"
+        mode = str(mode or "").upper()
+        if mode == "LIVE":
+            return "Real Money Zerodha"
+        if mode == "BACKTEST":
+            return "Backtest Live Data"
+        return "Paper Trading Data"
 
     def sync_zerodha_client_for_mode(self, mode):
         self.current_mode = mode
         self.executor.zerodha = self.zerodha_clients_by_mode.get(mode)
         return self.executor.zerodha
 
+    def validate_zerodha_mode(self, mode):
+        mode = str(mode or "").upper()
+        if mode not in ZERODHA_MODES:
+            raise ValueError("Mode must be PAPER, LIVE, or BACKTEST.")
+        return mode
+
+    def blocking_connection_modes(self, mode):
+        mode = str(mode or "").upper()
+        return [
+            other
+            for other in LIVE_BLOCKING_MODES.get(mode, set())
+            if self.zerodha_clients_by_mode.get(other)
+        ]
+
     def connection_blocked(self, mode):
-        other = "PAPER" if mode == "LIVE" else "LIVE"
-        return bool(self.zerodha_clients_by_mode.get(other))
+        return bool(self.blocking_connection_modes(mode))
 
     def connection_status(self, mode):
         profile = self.zerodha_auth_profiles.get(mode) or {}
@@ -296,6 +355,51 @@ class WebTradeBotApp:
             "recommendation": "Run recovery check.",
         }
 
+    def empty_session_summary(self, mode):
+        return {
+            "mode": str(mode or "PAPER").upper(),
+            "session_id": "",
+            "account_balance": self.paper_balance_value() if str(mode or "").upper() == "PAPER" else None,
+            "session_start_balance": None,
+            "session_pnl": 0,
+            "session_trade_count": 0,
+            "updated_at": "",
+        }
+
+    def paper_balance_value(self):
+        try:
+            return float(load_settings_profiles()["paper"].get("balance", 0) or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def paper_balance_snapshot(self):
+        return {
+            "available": self.paper_balance_value(),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "error": "",
+        }
+
+    def save_paper_balance(self, balance):
+        profiles = load_settings_profiles()
+        paper = normalized_settings_profile(profiles.get("paper", {}))
+        paper["balance"] = f"{float(balance):.2f}"
+        save_settings_profile("paper", paper)
+        self.account_margins["PAPER"] = self.paper_balance_snapshot()
+        return paper
+
+    def update_session_summary(self, health=None, mode=None):
+        health = health or {}
+        current_mode = str(mode or health.get("mode") or self.current_mode or "PAPER").upper()
+        self.session_summary = {
+            "mode": current_mode,
+            "session_id": health.get("session_id", self.session_summary.get("session_id", "")),
+            "account_balance": health.get("account_balance", self.session_summary.get("account_balance")),
+            "session_start_balance": health.get("session_start_balance", self.session_summary.get("session_start_balance")),
+            "session_pnl": health.get("session_pnl", self.session_summary.get("session_pnl", 0)),
+            "session_trade_count": health.get("session_trade_count", self.session_summary.get("session_trade_count", 0)),
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
     def status_payload(self):
         with self.lock:
             metrics = self.executor.feed_metrics()
@@ -311,6 +415,7 @@ class WebTradeBotApp:
                 "connections": {
                     "PAPER": self.connection_status("PAPER"),
                     "LIVE": self.connection_status("LIVE"),
+                    "BACKTEST": self.connection_status("BACKTEST"),
                 },
                 "account_margins": self.account_margins,
                 "feed": metrics,
@@ -320,6 +425,7 @@ class WebTradeBotApp:
                 "order_history": self.live_order_history_rows[-200:],
                 "live_trade": self.live_trade_snapshot,
                 "health": self.live_health_snapshot,
+                "session_summary": self.session_summary,
                 "network_health": self.network_health,
                 "recovery_status": self.recovery_status,
                 "alerts": self.alerts[-50:],
@@ -746,11 +852,10 @@ class WebTradeBotApp:
         return value
 
     def start_login(self, payload):
-        mode = str(payload.get("mode") or "PAPER").upper()
-        if mode not in {"PAPER", "LIVE"}:
-            raise ValueError("Mode must be PAPER or LIVE.")
-        if self.connection_blocked(mode):
-            raise ValueError(f"{self.auth_label('PAPER' if mode == 'LIVE' else 'LIVE')} is already connected.")
+        mode = self.validate_zerodha_mode(payload.get("mode") or "PAPER")
+        blockers = self.blocking_connection_modes(mode)
+        if blockers:
+            raise ValueError(f"{self.auth_label(blockers[0])} is already connected.")
         api_key = str(payload.get("api_key") or "").strip()
         api_secret = str(payload.get("api_secret") or "").strip()
         if not api_key or not api_secret:
@@ -766,14 +871,16 @@ class WebTradeBotApp:
         return {"login_url": client.login_url(), "redirect_url": self.redirect_url, "mode": mode}
 
     def disconnect_zerodha(self, mode):
-        mode = str(mode or "").upper()
-        if mode not in {"PAPER", "LIVE"}:
-            raise ValueError("Mode must be PAPER or LIVE.")
+        mode = self.validate_zerodha_mode(mode)
         client = self.zerodha_clients_by_mode.get(mode)
         if not client:
             return {"disconnected": False, "message": f"{self.auth_label(mode)} is not connected."}
 
-        self.executor.stop()
+        if mode in {"PAPER", "LIVE"}:
+            try:
+                self.executor.stop()
+            except Exception:
+                pass
         try:
             client.stop_ticker()
         except Exception:
@@ -782,7 +889,7 @@ class WebTradeBotApp:
         self.zerodha_clients_by_mode[mode] = None
         self.zerodha_auth_profiles[mode] = None
         self.zerodha_auth_login_times[mode] = ""
-        self.account_margins[mode] = {"available": None, "updated_at": "", "error": ""}
+        self.account_margins[mode] = self.paper_balance_snapshot() if mode == "PAPER" else {"available": None, "updated_at": "", "error": ""}
         self.pending_auth.pop(mode, None)
         if self.current_mode == mode:
             self.executor.zerodha = None
@@ -799,7 +906,7 @@ class WebTradeBotApp:
 
     def finish_login(self, request_token, mode=""):
         mode = str(mode or "").upper()
-        if mode not in {"PAPER", "LIVE"}:
+        if mode not in ZERODHA_MODES:
             if len(self.pending_auth) == 1:
                 mode = next(iter(self.pending_auth))
             else:
@@ -821,7 +928,11 @@ class WebTradeBotApp:
         return profile
 
     def refresh_margin(self, mode, raise_errors=True):
-        mode = str(mode or "LIVE").upper()
+        mode = self.validate_zerodha_mode(mode or "LIVE")
+        if mode == "PAPER":
+            snapshot = self.paper_balance_snapshot()
+            self.account_margins["PAPER"] = snapshot
+            return snapshot
         client = self.zerodha_clients_by_mode.get(mode)
         if not client:
             if raise_errors:
@@ -887,6 +998,68 @@ class WebTradeBotApp:
         self.set_status(f"Backtest complete: {len(trades)} trades")
         return result
 
+    def run_live_backtest_optimizer_job(self, payload):
+        mode = self.validate_zerodha_mode(payload.get("mode") or "BACKTEST")
+        if mode != "BACKTEST":
+            raise ValueError("Zerodha optimizer must use Backtest Live Data connection.")
+        self.sync_zerodha_client_for_mode(mode)
+        client = self.executor.zerodha
+        if not client:
+            raise ValueError(f"Connect {self.auth_label(mode)} first.")
+        settings_values = payload.get("settings") or load_settings_profiles()["backtest"]
+        settings = settings_from_values(settings_values)
+        interval = normalise_interval(payload.get("history_interval") or settings.get("chart_interval"))
+        settings["chart_interval"] = interval
+        contracts = self.option_contracts_from_payload(payload.get("options"))
+        nifty_token = parse_instrument_token(payload.get("nifty_token"), "NIFTY token")
+        start_date = str(payload.get("start_date") or "").strip()
+        end_date = str(payload.get("end_date") or "").strip()
+        if not start_date or not end_date:
+            raise ValueError("Start date and end date are required.")
+
+        self.set_status("Running Zerodha range optimizer...")
+        os.makedirs(RESULT_FOLDER, exist_ok=True)
+        result = run_live_backtest_optimizer(
+            client,
+            nifty_token,
+            contracts,
+            start_date,
+            end_date,
+            interval,
+            settings,
+            RESULT_FOLDER,
+        )
+        with self.lock:
+            self.last_backtest = result
+        self.set_status(f"Zerodha optimizer complete: {result['runs']} runs, {result['days_used']} days")
+        return result
+
+    def apply_latest_optimizer_settings(self, profile):
+        profile = str(profile or "").strip().lower()
+        if profile not in {"paper", "real"}:
+            raise ValueError("Optimized settings can be applied only to paper or real.")
+        latest = self.last_backtest or {}
+        best_settings = latest.get("best_settings") or {}
+        if not best_settings:
+            raise ValueError("Run Backtest Live optimizer before applying optimized settings.")
+
+        profiles = load_settings_profiles()
+        existing = profiles.get(profile, {})
+        updated = dict(existing)
+        for key in OPTIMIZED_SETTING_KEYS:
+            if key in best_settings:
+                updated[key] = best_settings[key]
+        if "min_buy_score" in updated:
+            updated["watch_buy_score"] = derived_watch_buy_score(updated)
+
+        values = save_settings_profile(profile, updated)
+        if profile == "paper":
+            self.account_margins["PAPER"] = self.paper_balance_snapshot()
+            if not self.executor.live_paper_session:
+                self.session_summary = self.empty_session_summary("PAPER")
+        self.set_status(f"Latest optimized settings applied to {profile.title()}")
+        return {"profile": profile, "values": values, "source": latest.get("output_path", "")}
+
     def normalise_backtest_payload(self, payload):
         payload = dict(payload or {})
         if isinstance(payload.get("settings"), str):
@@ -921,12 +1094,14 @@ class WebTradeBotApp:
         return payload
 
     def fetch_nifty_token(self, mode):
+        mode = self.validate_zerodha_mode(mode)
         self.sync_zerodha_client_for_mode(mode)
         if not self.executor.zerodha:
             raise ValueError(f"Connect {self.auth_label(mode)} first.")
         return {"token": self.executor.zerodha.get_nifty50_token()}
 
     def fetch_option_contract(self, mode, payload):
+        mode = self.validate_zerodha_mode(mode)
         self.sync_zerodha_client_for_mode(mode)
         if not self.executor.zerodha:
             raise ValueError(f"Connect {self.auth_label(mode)} first.")
@@ -939,6 +1114,7 @@ class WebTradeBotApp:
         return {
             "tradingsymbol": contract["tradingsymbol"],
             "instrument_token": contract["instrument_token"],
+            "token": contract["instrument_token"],
             "expiry": str(contract.get("expiry", ""))[:10],
             "strike": contract.get("strike", payload.get("strike", "")),
             "option_type": contract.get("instrument_type", payload.get("option_type", "")),
@@ -947,13 +1123,14 @@ class WebTradeBotApp:
     def option_contracts_from_payload(self, options):
         contracts = []
         for index, item in enumerate(options or []):
+            name = "Call" if index == 0 else "Put"
             symbol = str(item.get("tradingsymbol") or item.get("symbol") or "").strip()
-            token = str(item.get("token") or item.get("instrument_token") or "").strip()
-            if not symbol or not token:
-                raise ValueError(f"Enter tradingsymbol and token for option {index + 1}.")
+            raw_token = item.get("token") or item.get("instrument_token")
+            if not symbol or raw_token in ("", None):
+                raise ValueError(f"Enter tradingsymbol and token for {name.lower()} option.")
             contracts.append({
                 "tradingsymbol": symbol,
-                "token": int(token),
+                "token": parse_instrument_token(raw_token, f"{name} token"),
                 "strike": str(item.get("strike") or "").strip(),
                 "expiry": str(item.get("expiry") or "").strip(),
                 "option_type": str(item.get("option_type") or "").strip().upper(),
@@ -963,12 +1140,15 @@ class WebTradeBotApp:
         return contracts[:2]
 
     def token_map_from_payload(self, payload):
-        token_map = {int(payload.get("nifty_token")): "NIFTY"}
+        token_map = {parse_instrument_token(payload.get("nifty_token"), "NIFTY token"): "NIFTY"}
         for index, contract in enumerate(self.option_contracts_from_payload(payload.get("options"))):
             token_map[int(contract["token"])] = f"OPTION_{index}"
         return token_map
 
     def start_market_feed(self, mode, payload):
+        mode = str(mode or "PAPER").upper()
+        if mode not in {"PAPER", "LIVE"}:
+            raise ValueError("Market feed can be started only from Paper or Live trading.")
         self.sync_zerodha_client_for_mode(mode)
         token_map = self.token_map_from_payload(payload)
         self.current_token_map = token_map
@@ -982,6 +1162,9 @@ class WebTradeBotApp:
         return {"tokens": list(token_map.keys()), "status": "connecting"}
 
     def start_live(self, mode, payload):
+        mode = str(mode or "PAPER").upper()
+        if mode not in {"PAPER", "LIVE"}:
+            raise ValueError("Trading can be started only from Paper or Live trading.")
         thread = threading.Thread(target=self._run_live_worker, args=(mode, payload), daemon=True)
         thread.start()
         self.set_status(f"{mode.title()} live worker starting...")
@@ -993,8 +1176,29 @@ class WebTradeBotApp:
             if not self.executor.zerodha:
                 raise ValueError(f"Connect {self.auth_label(mode)} first.")
             settings_profile = "paper" if mode == "PAPER" else "real"
-            settings_values = payload.get("settings") or load_settings_profiles()[settings_profile]
+            profiles = load_settings_profiles()
+            settings_values = payload.get("settings") or profiles[settings_profile]
+            if mode == "PAPER":
+                settings_values = {**settings_values, "balance": profiles["paper"].get("balance", settings_values.get("balance"))}
             settings = settings_from_values(settings_values)
+            with self.lock:
+                self.live_log_active_rows = []
+                self.live_order_history_rows = []
+                self.live_trade_snapshot = {}
+                self.live_health_snapshot = {}
+                self.update_session_summary(
+                    {
+                        "mode": mode,
+                        "session_id": "",
+                        "account_balance": settings["balance"],
+                        "session_start_balance": settings["balance"],
+                        "session_pnl": 0,
+                        "session_trade_count": 0,
+                    },
+                    mode=mode,
+                )
+                if mode == "PAPER":
+                    self.account_margins["PAPER"] = self.paper_balance_snapshot()
             history_days = int(payload.get("history_days") or 5)
             interval = normalise_interval(payload.get("history_interval") or settings.get("chart_interval"))
             contracts = self.option_contracts_from_payload(payload.get("options"))
@@ -1004,7 +1208,13 @@ class WebTradeBotApp:
             token_map = self.token_map_from_payload(payload)
             self.current_token_map = token_map
             self.set_status("Fetching historical candles...")
-            nifty, options = self.executor.fetch_live_history(nifty_token, contracts, days=history_days, interval=interval)
+            nifty, options = self.executor.fetch_live_history(
+                nifty_token,
+                contracts,
+                days=history_days,
+                interval=interval,
+                settings=settings,
+            )
             os.makedirs(RESULT_FOLDER, exist_ok=True)
             if mode == "PAPER":
                 save_path = timestamped_file("paper_trading", RESULT_FOLDER)
@@ -1089,6 +1299,14 @@ class WebTradeBotApp:
         with self.lock:
             self.trades.append({"balance": balance, "trade": trade, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
             self.trades = self.trades[-300:]
+            session = self.executor.live_paper_session
+            if session and session.mode == "PAPER":
+                self.save_paper_balance(balance)
+                self.update_session_summary(session.health_snapshot(), mode="PAPER")
+            else:
+                session = self.executor.live_real_session
+                if session:
+                    self.update_session_summary(session.health_snapshot(), mode="LIVE")
         self.set_status(f"Trade update received. Balance {float(balance):.2f}")
 
     def on_alert(self, alert):
@@ -1105,6 +1323,7 @@ class WebTradeBotApp:
             health = payload.get("health")
             if health is not None:
                 self.live_health_snapshot = health
+                self.update_session_summary(health)
             active_orders = payload.get("active_orders")
             if active_orders is not None:
                 self.live_log_active_rows = list(active_orders)
@@ -1223,11 +1442,20 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.send_json({
                 "profiles": apply_backtest_settings_to_live(payload.get("settings") or payload),
             })
+        if path == "/api/settings/apply-latest-optimized":
+            return self.send_json(self.app_state.apply_latest_optimizer_settings(payload.get("profile")))
         if path.startswith("/api/settings/"):
             profile = path.rsplit("/", 1)[-1]
-            return self.send_json({"profile": profile, "values": save_settings_profile(profile, payload)})
+            values = save_settings_profile(profile, payload)
+            if profile == "paper":
+                self.app_state.account_margins["PAPER"] = self.app_state.paper_balance_snapshot()
+                if not self.app_state.executor.live_paper_session:
+                    self.app_state.session_summary = self.app_state.empty_session_summary("PAPER")
+            return self.send_json({"profile": profile, "values": values})
         if path == "/api/backtest/run":
             return self.send_json(self.app_state.run_backtest_job(payload))
+        if path == "/api/backtest/zerodha-optimize":
+            return self.send_json(self.app_state.run_live_backtest_optimizer_job(payload))
         if path == "/api/zerodha/login":
             return self.send_json(self.app_state.start_login(payload))
         if path == "/api/zerodha/disconnect":

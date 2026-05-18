@@ -34,7 +34,7 @@
           </div>
           <div class="account-strip">
             <div><span>Real Margin</span><strong id="real-margin">Not Connected</strong></div>
-            <div><span>Paper Data</span><strong id="paper-margin">Not Connected</strong></div>
+            <div><span>Paper Balance</span><strong id="paper-margin">0.00</strong></div>
           </div>
           <div class="url-strip">
             <label>Redirect <input id="redirect-url" readonly></label>
@@ -46,13 +46,14 @@
             <article><span>Feed</span><strong id="feed-status">Stopped</strong></article>
             <article><span>Ticks/s All Streams</span><strong id="ticks-rate">0</strong></article>
             <article><span>Backlog</span><strong id="feed-backlog">0</strong></article>
+            <article><span>Session PnL</span><strong id="dash-session-pnl" class="money-zero">0.00</strong></article>
             <article><span>Current Mode</span><strong id="current-mode">PAPER</strong></article>
           </div>
           <section class="panel account-panel">
             <h2>Account Snapshot</h2>
             <div class="account-grid">
               <div><span>Real Money Balance</span><strong id="dash-real-margin">Not Connected</strong><small id="dash-real-margin-time"></small></div>
-              <div><span>Paper Data Connection</span><strong id="dash-paper-margin">Not Connected</strong><small id="dash-paper-margin-time"></small></div>
+              <div><span>Paper Trading Balance</span><strong id="dash-paper-margin">0.00</strong><small id="dash-paper-margin-time"></small></div>
               <div><span>Orders</span><strong id="dash-order-count">0</strong><small>active and recent order rows</small></div>
               <div><span>Order Refresh</span><strong>Polling</strong><small>status, fill qty, average price</small></div>
             </div>
@@ -105,6 +106,7 @@
               <div class="connection-grid">
                 <div><span>Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
                 <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
+                <div><span>Backtest Live Data</span><strong id="backtest-connection">Not Connected</strong></div>
               </div>
             </section>
             <section class="panel">
@@ -155,6 +157,58 @@
           <section class="panel">
             <h2>Backtest Output</h2>
             <pre id="backtest-output">No backtest completed yet.</pre>
+          </section>
+          <form id="zerodha-backtest-form" class="panel zerodha-backtest-form">
+            <h2>Zerodha Date Range Optimizer</h2>
+            <label>Account
+              <input name="mode_label" value="Backtest Live Data" readonly>
+              <input type="hidden" name="mode" value="BACKTEST">
+            </label>
+            <label>NIFTY Token <input name="nifty_token"></label>
+            <button type="button" data-zbt-action="fetch-nifty">Fetch NIFTY</button>
+            <label>Start Date <input type="date" name="start_date"></label>
+            <label>End Date <input type="date" name="end_date"></label>
+            <label>Interval
+              <select name="history_interval">
+                <option>1 min</option>
+                <option>2 min</option>
+                <option selected>3 min</option>
+                <option>5 min</option>
+              </select>
+            </label>
+            <div class="file-card">
+              <strong>CALL / CE</strong>
+              <label>Type
+                <select data-zbt-option="0" name="option_type"><option>CE</option><option>PE</option></select>
+              </label>
+              <label>Strike <input data-zbt-option="0" name="strike"></label>
+              <label>Expiry <input type="date" data-zbt-option="0" name="expiry"></label>
+              <label>Trading Symbol <input data-zbt-option="0" name="tradingsymbol"></label>
+              <label>Token <input data-zbt-option="0" name="token"></label>
+              <button type="button" data-zbt-action="fetch-option" data-zbt-option="0">Fetch CE</button>
+            </div>
+            <div class="file-card">
+              <strong>PUT / PE</strong>
+              <label>Type
+                <select data-zbt-option="1" name="option_type"><option>PE</option><option>CE</option></select>
+              </label>
+              <label>Strike <input data-zbt-option="1" name="strike"></label>
+              <label>Expiry <input type="date" data-zbt-option="1" name="expiry"></label>
+              <label>Trading Symbol <input data-zbt-option="1" name="tradingsymbol"></label>
+              <label>Token <input data-zbt-option="1" name="token"></label>
+              <button type="button" data-zbt-action="fetch-option" data-zbt-option="1">Fetch PE</button>
+            </div>
+            <div class="actions wide">
+              <button type="submit" class="primary">Run Zerodha Optimizer</button>
+            </div>
+          </form>
+          <section class="panel">
+            <h2>Zerodha Optimizer Output</h2>
+            <div class="actions">
+              <button type="button" data-apply-optimized="paper">Apply Latest To Paper</button>
+              <button type="button" data-apply-optimized="real" class="danger">Apply Latest To Real Money</button>
+            </div>
+            <pre id="zerodha-backtest-output">No Zerodha optimizer run yet.</pre>
           </section>
         </section>
 
@@ -217,6 +271,15 @@
               <div class="actions">
                 <button class="danger" type="submit">Connect Real Money</button>
                 <button type="button" data-disconnect-mode="LIVE">Disconnect</button>
+              </div>
+            </form>
+            <form class="panel auth-form" data-mode="BACKTEST">
+              <h2>Backtest Live Data Login</h2>
+              <label>API key <input name="api_key" autocomplete="off"></label>
+              <label>API secret <input name="api_secret" type="password"></label>
+              <div class="actions">
+                <button class="primary" type="submit">Connect Backtest Live</button>
+                <button type="button" data-disconnect-mode="BACKTEST">Disconnect</button>
               </div>
             </form>
           </div>

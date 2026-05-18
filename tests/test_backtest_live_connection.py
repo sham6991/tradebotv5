@@ -1,0 +1,67 @@
+import unittest
+
+from web_app import WebTradeBotApp
+
+
+class BacktestLiveClient:
+    def get_nifty50_token(self):
+        return 256265
+
+    def find_option_contract(self, option_type=None, strike=None, expiry=None, name="NIFTY"):
+        return {
+            "tradingsymbol": f"NIFTY{expiry}{strike}{option_type}",
+            "instrument_token": 123456,
+            "instrument_type": option_type,
+            "strike": strike,
+            "expiry": expiry,
+        }
+
+    def stop_ticker(self):
+        return None
+
+
+class BacktestLiveConnectionTests(unittest.TestCase):
+    def test_backtest_live_connection_blocks_real_live_login(self):
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["BACKTEST"] = BacktestLiveClient()
+
+        self.assertTrue(app.connection_status("LIVE")["blocked"])
+        with self.assertRaisesRegex(ValueError, "Backtest Live Data is already connected"):
+            app.start_login({"mode": "LIVE", "api_key": "key", "api_secret": "secret"})
+
+    def test_real_live_connection_blocks_backtest_live_login(self):
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["LIVE"] = BacktestLiveClient()
+
+        self.assertTrue(app.connection_status("BACKTEST")["blocked"])
+        with self.assertRaisesRegex(ValueError, "Real Money Zerodha is already connected"):
+            app.start_login({"mode": "BACKTEST", "api_key": "key", "api_secret": "secret"})
+
+    def test_backtest_optimizer_must_use_backtest_live_mode(self):
+        app = WebTradeBotApp()
+
+        with self.assertRaisesRegex(ValueError, "Backtest Live Data"):
+            app.run_live_backtest_optimizer_job({"mode": "LIVE"})
+
+    def test_backtest_live_fetch_uses_backtest_connection(self):
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["BACKTEST"] = BacktestLiveClient()
+
+        self.assertEqual(app.fetch_nifty_token("BACKTEST")["token"], 256265)
+
+    def test_fetch_option_returns_token_alias_for_backtest_form(self):
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["BACKTEST"] = BacktestLiveClient()
+
+        contract = app.fetch_option_contract("BACKTEST", {
+            "option_type": "CE",
+            "strike": "25000",
+            "expiry": "2026-05-26",
+        })
+
+        self.assertEqual(contract["instrument_token"], 123456)
+        self.assertEqual(contract["token"], 123456)
+
+
+if __name__ == "__main__":
+    unittest.main()

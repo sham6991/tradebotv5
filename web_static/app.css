@@ -224,7 +224,7 @@ main {
 
 .metrics {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
   gap: 14px;
   margin-bottom: 14px;
 }
@@ -291,6 +291,10 @@ main {
   font-size: 20px;
 }
 
+.money-positive { color: #15803d !important; }
+.money-negative { color: #b91c1c !important; }
+.money-zero { color: var(--ink) !important; }
+
 .connection-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -309,9 +313,22 @@ main {
   gap: 14px;
 }
 
+.zerodha-backtest-form {
+  display: grid;
+  grid-template-columns: 140px 1fr auto repeat(3, minmax(150px, 1fr));
+  gap: 14px;
+  align-items: end;
+}
+
 .upload-form h2,
-.upload-form .wide {
+.upload-form .wide,
+.zerodha-backtest-form h2,
+.zerodha-backtest-form .wide {
   grid-column: 1 / -1;
+}
+
+.zerodha-backtest-form .file-card {
+  grid-column: span 3;
 }
 
 .file-card {
@@ -452,6 +469,12 @@ input[type="file"] {
   overflow: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+
+.tick-scroll {
+  height: 380px;
+  max-height: 42vh;
+  min-height: 260px;
 }
 
 .table-wrap.tall {

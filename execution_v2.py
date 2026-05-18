@@ -89,6 +89,7 @@ class LivePaperSession:
                 self._initial_margin_error = ""
         else:
             self._initial_margin_error = ""
+        self.session_start_balance = self.balance
         self.settings_profile = apply_settings_profile(self.settings)
         self.lots = int(settings["lot_size"])
         self.max_trades = int(settings["max_trades"])
@@ -613,7 +614,8 @@ class LivePaperSession:
         if self.order_transition_in_progress or self.open_position or self.pending_entry:
             return
         decision_started = time.perf_counter()
-        signal = self.engine.find_trade(self.nifty, self.options, i, self.settings)
+        signal_nifty, signal_options = self._frames_with_active_candles()
+        signal = self.engine.find_trade(signal_nifty, signal_options, i, self.settings)
         decision_seconds = self._elapsed_seconds(decision_started)
         if signal is None:
             return
@@ -649,11 +651,47 @@ class LivePaperSession:
             if entry_status.startswith("FAILED"):
                 self._record_rejected_entry(signal, i, entry_status)
                 return
+            if self.mode == "LIVE" and entry_order_id:
+                self._emit_order_event(
+                    signal,
+                    self.trade_count + 1,
+                    "BUY",
+                    entry_status,
+                    order_id=entry_order_id,
+                    order_type="MARKET",
+                    quantity=qty,
+                    remarks="Entry order placed",
+                )
             entry_price = self._actual_order_price(entry_order_id, signal["entry"])
             filled_qty = self._actual_order_quantity(entry_order_id, qty)
             self._open_position_from_fill(signal, lot_size, entry_order_id, entry_price, filled_qty)
         finally:
             self.order_transition_in_progress = False
+
+    def _frames_with_active_candles(self):
+        nifty = self._append_active_candle(self.nifty, "NIFTY")
+        options = [
+            self._append_active_candle(option, f"OPTION_{index}")
+            for index, option in enumerate(self.options)
+        ]
+        return nifty, options
+
+    def _append_active_candle(self, frame, key):
+        active = self.candle_builder.snapshot(key)
+        if not active or frame is None or frame.empty:
+            return frame
+        if "datetime" in frame.columns:
+            latest = pd.to_datetime(frame["datetime"], errors="coerce").max()
+            active_time = pd.to_datetime(active.get("datetime"), errors="coerce")
+            if not pd.isna(latest) and not pd.isna(active_time) and active_time <= latest:
+                return frame
+        attrs = dict(frame.attrs)
+        active_row = {column: active.get(column, "") for column in frame.columns}
+        for column in ("datetime", "open", "high", "low", "close", "volume"):
+            active_row[column] = active.get(column, active_row.get(column, ""))
+        combined = pd.concat([frame, pd.DataFrame([active_row])], ignore_index=True)
+        combined.attrs.update(attrs)
+        return attach_datetime_index_map(combined)
 
     def _place_pending_limit_entry(self, signal, i, qty, lot_size):
         if self.order_transition_in_progress or self.open_position or self.pending_entry:
@@ -1100,7 +1138,7 @@ class LivePaperSession:
             return "ENTRY REJECTED: option data missing"
         if signal["entry_index"] >= len(signal["option"]):
             return "ENTRY REJECTED: option entry candle missing"
-        if self.mode == "LIVE":
+        if self.mode == "LIVE" and str(self.settings.get("enforce_market_hours", "1")).lower() not in ("0", "false", "no"):
             now = datetime.now().time()
             if now < datetime.strptime("09:15", "%H:%M").time() or now > datetime.strptime("15:30", "%H:%M").time():
                 return "ENTRY REJECTED: outside market hours"
@@ -2269,8 +2307,14 @@ class LivePaperSession:
             history_row.setdefault(column, score_row.get(column, "") if side == "BUY" else "")
 
         key = str(order_id or trade_id or f"{trade_no}_{side}_{timestamp}")
+        is_closing_completion = str(side or "").upper() == "SELL" and normalized_status == "COMPLETE"
+        if is_closing_completion:
+            for active_key, row in list(self.active_orders.items()):
+                if row.get("Trade ID") == trade_id:
+                    del self.active_orders[active_key]
         if keep_active and normalized_status not in {"CANCELLED", "REJECTED"}:
-            self.active_orders[key] = active_row
+            if not is_closing_completion:
+                self.active_orders[key] = active_row
         elif key in self.active_orders:
             self.active_orders[key] = active_row
         if normalized_status in {"CANCELLED", "REJECTED"}:
@@ -2309,7 +2353,7 @@ class LivePaperSession:
                 "Live PnL %": pnl_percent,
                 "Status": "COMPLETE",
             }
-            self._emit_live_log_update()
+            self._emit_live_log_update(force=True)
             return
         if not position:
             return
@@ -2374,6 +2418,10 @@ class LivePaperSession:
             "mode": self.mode,
             "session_id": self.session_id,
             "session_closed": self.session_closed,
+            "account_balance": self.balance,
+            "session_start_balance": self.session_start_balance,
+            "session_pnl": self.balance - self.session_start_balance,
+            "session_trade_count": self.trade_count,
             "open_position": bool(self.open_position),
             "pending_entry": bool(self.pending_entry),
             "active_orders": len(self.active_orders),
@@ -2527,7 +2575,7 @@ class Executor:
         self.zerodha = ZerodhaClient(api_key, api_secret, access_token)
         return self.zerodha
 
-    def fetch_live_history(self, nifty_token, option_contracts, days=5, interval="5minute"):
+    def fetch_live_history(self, nifty_token, option_contracts, days=5, interval="5minute", settings=None):
         if not self.zerodha:
             raise ValueError("Connect Zerodha first.")
         to_date = datetime.now()
@@ -2538,7 +2586,7 @@ class Executor:
         for contract in option_contracts:
             df = self.zerodha.historical_candles(contract["token"], from_date, to_date, interval=interval)
             df = clean_and_add_indicators(df)
-            df = ensure_option_formula_columns(df, self.settings)
+            df = ensure_option_formula_columns(df, settings)
             df.attrs["instrument"] = contract["tradingsymbol"]
             df.attrs["tradingsymbol"] = contract["tradingsymbol"]
             if contract.get("strike"):
@@ -2551,6 +2599,12 @@ class Executor:
     def start_market_feed(self, tokens, on_ticks, on_connect=None, on_close=None):
         if not self.zerodha:
             raise ValueError("Connect Zerodha first.")
+        if self.active_ticker:
+            try:
+                self.zerodha.stop_ticker()
+            except Exception as exc:
+                self.last_feed_event = f"previous ticker close ignored: {exc}"
+            self.active_ticker = None
         self.feed_tokens = [int(token) for token in tokens]
         self.feed_on_ticks = on_ticks
         self.feed_on_connect = on_connect
@@ -2593,11 +2647,15 @@ class Executor:
             if session:
                 session.close_session()
         if self.zerodha:
-            self.zerodha.stop_ticker()
+            try:
+                self.zerodha.stop_ticker()
+            except Exception as exc:
+                self.last_feed_event = f"ticker stop ignored: {exc}"
         self._stop_tick_dispatcher()
         self.active_ticker = None
 
     def _handle_feed_connect(self, response):
+        self._cancel_reconnect_timer()
         self.feed_status = "connected"
         self.last_feed_event = "connected"
         self.feed_reconnect_attempts = 0
@@ -2846,12 +2904,19 @@ class Executor:
             "dropped_batches": self.dropped_tick_batches,
             "last_tick_received_at": self.last_tick_received_at,
             "last_tick_processed_at": self.last_tick_processed_at,
-            "feed_status": self.feed_status,
+            "feed_status": self._effective_feed_status(),
             "last_feed_event": self.last_feed_event,
             "reconnect_attempts": self.feed_reconnect_attempts,
             "dispatcher_errors": self.dispatcher_error_count,
             "last_dispatcher_error": self.last_dispatcher_error,
         }
+
+    def _effective_feed_status(self):
+        if self.feed_should_run and self.last_tick_received_at:
+            age = time.time() - self.last_tick_received_at
+            if age <= self.feed_stale_after_seconds:
+                return "connected"
+        return self.feed_status
 
     def stop(self):
         for session in (self.live_paper_session, self.live_real_session):

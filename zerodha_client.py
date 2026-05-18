@@ -338,7 +338,6 @@ class ZerodhaClient:
         def handle_close(ws, code, reason):
             if on_close:
                 on_close(code, reason)
-            ws.stop()
 
         self.ticker.on_ticks = lambda ws, ticks: on_ticks(ticks)
         self.ticker.on_connect = handle_connect
@@ -351,7 +350,7 @@ class ZerodhaClient:
 
     def stop_ticker(self):
         if self.ticker:
-            self.ticker.stop()
+            self.ticker.close()
             self.ticker = None
 
     def _transaction_type(self, transaction_type):

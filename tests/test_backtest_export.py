@@ -169,7 +169,7 @@ class BacktestExportTests(unittest.TestCase):
         self.assertEqual(saved["min_volume_ratio"], "1.2")
         self.assertEqual(saved["early_breakout_min_score"], "60")
 
-    def test_apply_backtest_settings_to_live_updates_paper_and_preserves_real_margin(self):
+    def test_apply_backtest_settings_to_live_preserves_paper_balance_and_real_margin(self):
         import json
         import web_app
 
@@ -188,11 +188,13 @@ class BacktestExportTests(unittest.TestCase):
                         "paper": {
                             "balance": "100000",
                             "profit_points": "5",
+                            "chart_interval": "5 min",
                         },
                         "real": {
                             "balance": "518.80",
                             "profit_points": "5",
                             "zerodha_margin_fetched": "true",
+                            "chart_interval": "1 min",
                         },
                     }, handle)
 
@@ -200,12 +202,137 @@ class BacktestExportTests(unittest.TestCase):
             finally:
                 web_app.SETTINGS_PROFILE_PATH = original_path
 
-        self.assertEqual(profiles["paper"]["balance"], "10000")
+        self.assertEqual(profiles["paper"]["balance"], "100000")
         self.assertEqual(profiles["paper"]["profit_points"], "12")
         self.assertEqual(profiles["paper"]["min_volume_ratio"], "1.4")
+        self.assertEqual(profiles["paper"]["chart_interval"], "5 min")
         self.assertEqual(profiles["real"]["balance"], "518.80")
         self.assertEqual(profiles["real"]["profit_points"], "12")
         self.assertEqual(profiles["real"]["zerodha_margin_fetched"], "true")
+        self.assertEqual(profiles["real"]["chart_interval"], "1 min")
+
+    def test_web_app_saves_paper_balance_as_simulated_account(self):
+        import json
+        import web_app
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            original_path = web_app.SETTINGS_PROFILE_PATH
+            web_app.SETTINGS_PROFILE_PATH = os.path.join(temp_dir, "settings_profiles.json")
+            try:
+                with open(web_app.SETTINGS_PROFILE_PATH, "w", encoding="utf-8") as handle:
+                    json.dump({
+                        "paper": {
+                            "balance": "10000",
+                            "profit_points": "5",
+                        },
+                    }, handle)
+
+                app = web_app.WebTradeBotApp()
+                app.save_paper_balance(9665.25)
+                profiles = web_app.load_settings_profiles()
+            finally:
+                web_app.SETTINGS_PROFILE_PATH = original_path
+
+        self.assertEqual(profiles["paper"]["balance"], "9665.25")
+
+    def test_apply_latest_optimizer_settings_preserves_balances(self):
+        import json
+        import web_app
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            original_path = web_app.SETTINGS_PROFILE_PATH
+            web_app.SETTINGS_PROFILE_PATH = os.path.join(temp_dir, "settings_profiles.json")
+            try:
+                with open(web_app.SETTINGS_PROFILE_PATH, "w", encoding="utf-8") as handle:
+                    json.dump({
+                        "paper": {
+                            "balance": "100000",
+                            "min_buy_score": "60",
+                            "chart_interval": "5 min",
+                            "profit_points": "99",
+                            "entry_offset": "-3",
+                            "cooldown": "7",
+                        },
+                        "real": {
+                            "balance": "518.80",
+                            "zerodha_margin_fetched": "true",
+                            "min_buy_score": "60",
+                            "chart_interval": "1 min",
+                            "profit_points": "77",
+                            "entry_offset": "-4",
+                            "cooldown": "9",
+                        },
+                    }, handle)
+
+                app = web_app.WebTradeBotApp()
+                app.last_backtest = {
+                    "output_path": "results/livebacktesting_test.xlsx",
+                    "best_settings": {
+                        "balance": 1,
+                        "lot_size": 1,
+                        "max_trades": 5,
+                        "profit_points": 10,
+                        "safety_points": 4,
+                        "entry_offset": 0,
+                        "time_exit": 8,
+                        "cooldown": 2,
+                        "chart_interval": "2minute",
+                        "bullish_threshold": 20,
+                        "bearish_threshold": -20,
+                        "rsi_bull": 50,
+                        "rsi_bear": 45,
+                        "rsi_reversal_bullish": 65,
+                        "rsi_reversal_bearish": 20,
+                        "watch_buy_score": 50,
+                        "min_buy_score": 70,
+                        "strong_buy_score": 80,
+                        "min_volume_ratio": 1.1,
+                        "min_option_volume": 0,
+                        "aggression_score_cap": 55,
+                        "compression_range_ratio": 0.7,
+                        "expansion_range_ratio": 1.8,
+                        "max_chase_range_ratio": 2.2,
+                        "failed_breakout_penalty": -15,
+                        "early_breakout_min_score": 60,
+                        "max_daily_loss": 0,
+                        "max_daily_profit": 0,
+                        "max_consecutive_losses": 0,
+                        "square_off_time": "15:20",
+                        "order_product": "NRML",
+                    },
+                }
+                paper = app.apply_latest_optimizer_settings("paper")["values"]
+                real = app.apply_latest_optimizer_settings("real")["values"]
+            finally:
+                web_app.SETTINGS_PROFILE_PATH = original_path
+
+        self.assertEqual(paper["balance"], "100000")
+        self.assertEqual(paper["min_buy_score"], 70)
+        self.assertEqual(paper["watch_buy_score"], "65")
+        self.assertEqual(paper["chart_interval"], "5 min")
+        self.assertEqual(paper["profit_points"], "99")
+        self.assertEqual(paper["entry_offset"], "-3")
+        self.assertEqual(paper["cooldown"], "7")
+        self.assertEqual(real["balance"], "518.80")
+        self.assertEqual(real["zerodha_margin_fetched"], "true")
+        self.assertEqual(real["min_buy_score"], 70)
+        self.assertEqual(real["watch_buy_score"], "65")
+        self.assertEqual(real["chart_interval"], "1 min")
+        self.assertEqual(real["profit_points"], "77")
+        self.assertEqual(real["entry_offset"], "-4")
+        self.assertEqual(real["cooldown"], "9")
+
+    def test_watch_buy_score_is_derived_from_min_buy_score(self):
+        import web_app
+
+        saved = web_app.normalized_settings_profile({
+            "min_buy_score": "72",
+            "watch_buy_score": "10",
+        })
+        runtime = settings_from_values(saved)
+
+        self.assertEqual(saved["watch_buy_score"], "67")
+        self.assertEqual(runtime["watch_buy_score"], 67)
 
 
 if __name__ == "__main__":

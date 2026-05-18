@@ -279,7 +279,6 @@ class TradingEngine:
             rsi_reversal_bearish,
         )
         if trend == "SIDEWAYS":
-            self.cooldown_until = i + self.cooldown
             self.last_skip_reason = "sideways_trend"
             return None
         wanted_type = "CE" if trend == "BULLISH" else "PE"

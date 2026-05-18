@@ -1,6 +1,6 @@
 # TradeBotV4 Blueprint
 
-Date: 2026-05-17
+Date: 2026-05-18
 
 TradeBotV4 is a private Python trading research and execution workspace for NIFTY option backtesting, paper trading, Zerodha live trading, session replay, order lifecycle audit, and recovery/safety checks.
 
@@ -69,9 +69,10 @@ Major areas:
   - accepts CSV/Excel uploads or server paths.
   - stores uploads under ignored `data/uploads/`.
   - runs strategy/backtest path and exports reports under ignored `results/`.
+  - includes a Backtest Live Data optimizer that logs in through its own Zerodha connection, fetches NIFTY/CE/PE historical candles for a user-selected date range and interval, sweeps only selected high-impact risk settings, and exports `livebacktesting_*.xlsx`.
 - Paper Desk
   - uses Zerodha data connection for instruments/feed when connected.
-  - uses paper balance and same live session engine.
+  - uses persisted simulated paper balance and the same live session engine.
 - Live Trading
   - real-money Zerodha mode.
   - requires broker connection and preflight checks.
@@ -79,7 +80,8 @@ Major areas:
   - loads ignored SQLite session databases from `results/` or upload.
   - filters timeline by critical events, warnings, partial fills/exits, rejected/failed orders, kill switch, reconciliation, and unknown broker state.
 - Zerodha URLs
-  - separate Paper Data and Real Money login flows.
+  - separate Paper Data, Real Money, and Backtest Live Data login flows.
+  - Real Money and Backtest Live Data block each other while either is connected.
   - displays redirect URL for the Zerodha app.
 
 ### Desktop UI
@@ -104,7 +106,7 @@ Major mixins/modules:
    - optional RSI reversal thresholds.
 2. Bullish NIFTY conditions select CE.
 3. Bearish NIFTY conditions select PE.
-4. Sideways/neutral conditions skip trading and apply cooldown.
+4. Sideways/neutral conditions skip trading without starting cooldown.
 5. Option formula/scoring is applied only to the selected CE/PE dataset.
 6. Entry is allowed only when option Buy Score meets `min_buy_score`.
 7. Entry price uses:
@@ -117,7 +119,7 @@ Major mixins/modules:
    - emergency/kill-switch flow
    - configured square-off time
 9. New entries are blocked while a position or pending entry exists.
-10. Cooldown applies after exits and no-trade NIFTY decisions.
+10. Cooldown applies only after a trade/position is complete.
 
 ## Core Modules
 
@@ -140,6 +142,12 @@ Major mixins/modules:
   - dataset trimming.
   - indicator/formula preparation.
   - report export.
+- `live_backtest_optimizer.py`
+  - isolated Backtest Live Data historical optimizer.
+  - fetches day-by-day Zerodha historical candles for NIFTY, CE, and PE.
+  - optimizes only selected tested settings: safety points, time exit, trend thresholds, RSI thresholds, minimum Buy Score, minimum volume ratio, and max chase range.
+  - keeps other Paper/Real settings unchanged when applying latest optimized results.
+  - exports Summary, Optimized Settings, Base Settings, Optimization Steps, All Runs, Day Results, Best Trades, Setting Ranges, Fetch Log, and Contracts sheets.
 - `execution_v2.py`
   - paper/live session lifecycle.
   - tick-to-candle processing.
@@ -198,13 +206,23 @@ Major mixins/modules:
 - Option data is enriched with formula columns.
 - Order handling is simulated from candle high/low.
 - Reports are exported to ignored `results/`.
+- Backtest Live optimizer:
+  - requires the separate Backtest Live Data Zerodha connection.
+  - uses the user-selected historical candle interval from the optimizer form.
+  - does not optimize chart interval.
+  - applies latest optimized results to Paper or Real Money only for settings actually swept by the optimizer.
+  - derives `watch_buy_score = min_buy_score - 5`.
+  - preserves balances, chart interval, lot size, max trades, profit points, entry offset, cooldown, and all other untouched settings when applying optimized results.
 
 ## Live And Paper Behavior
 
 - Live ticks are aggregated into interval candles using `candle_builder.py`.
-- Strategy decisions use completed candles.
+- Strategy decisions use completed candles plus the current active candle snapshot for live entry decisions when available.
 - Paper and live modes share the same session engine, candle builder, risk guard, structured events, persistence, replay, and audit path.
 - LIVE mode adds broker order placement, order-status polling, broker reconciliation, and real margin checks.
+- Paper balance is a simulated account balance from the Paper settings profile, updates after completed paper trades, and is preserved across disconnects/sessions.
+- Real Money balance/margin is fetched only from Zerodha, not from manual paper settings; disconnected real mode shows `Not Connected`.
+- Paper/Real session candle interval is selected outside Risk Settings before starting a session. Paper/Real Risk Settings do not show `chart_interval`.
 - Entry order behavior:
   - `entry_offset = 0`: market BUY.
   - `entry_offset != 0`: limit BUY at next option candle open plus offset.
@@ -220,6 +238,8 @@ Major mixins/modules:
   - log critical event/order history rows.
 - Live feed callbacks stay lightweight and enqueue tick batches.
 - UI/web rendering is throttled and should never render all raw ticks from a full trading day.
+- Active Orders and Live Trade UI state is forced to clear/complete after completed target/stoploss/manual exits.
+- Tick tables for NIFTY/CE/PE are scrollable and capped in the visible table.
 
 ## Safety And Recovery
 
@@ -273,6 +293,13 @@ Profile data includes strategy, risk, lot size, order product, and square-off se
 
 Note: the current `real` profile can include the last fetched Zerodha margin value. This is not an auth secret, but it is account-sensitive operational data.
 
+Current profile rules:
+
+- `watch_buy_score` is derived as `min_buy_score - 5`.
+- Paper simulated balance is preserved unless the user manually changes Paper Risk Settings balance.
+- Applying backtest settings to live profiles preserves Paper balance, Real Money balance, `zerodha_margin_fetched`, and Paper/Real chart intervals.
+- Applying latest Backtest Live optimizer results copies only optimizer-tested settings and preserves all other Paper/Real settings.
+
 ## Tests And Verification
 
 Primary verification command:
@@ -316,6 +343,10 @@ Current test areas include:
 - UI replay helpers
 - live UI update throttling
 - alert hooks
+- Backtest Live Data connection locking
+- Backtest Live optimizer export and interval propagation
+- closed-trade UI state cleanup
+- web feed input validation and disconnect behavior
 
 The large candle-builder stress test is gated behind:
 

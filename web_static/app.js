@@ -24,6 +24,8 @@ const settingOrder = [
   "max_daily_loss", "max_daily_profit", "max_consecutive_losses", "square_off_time", "order_product",
 ];
 
+const liveProfileHiddenSettings = new Set(["chart_interval"]);
+
 function $(selector, root = document) {
   return root.querySelector(selector);
 }
@@ -61,6 +63,12 @@ function text(value) {
   if (value === null || value === undefined) return "";
   if (typeof value === "object") return JSON.stringify(value);
   return String(value);
+}
+
+function renderTickTable(table, rows) {
+  const wrap = table?.closest(".tick-scroll");
+  renderTable(table, (rows || []).slice(-80), ["time", "name", "token", "ltp", "volume"]);
+  if (wrap) wrap.scrollTop = wrap.scrollHeight;
 }
 
 const labelOverrides = {
@@ -106,6 +114,29 @@ function money(value) {
   const number = Number(value);
   if (!Number.isFinite(number)) return String(value);
   return number.toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+}
+
+function setMoneyTone(node, value) {
+  if (!node) return;
+  const number = Number(value || 0);
+  node.classList.remove("money-positive", "money-negative", "money-zero");
+  if (number > 0) node.classList.add("money-positive");
+  else if (number < 0) node.classList.add("money-negative");
+  else node.classList.add("money-zero");
+}
+
+function setMoneyText(selector, value, tone = false) {
+  const node = $(selector);
+  if (!node) return;
+  node.textContent = money(value ?? 0);
+  if (tone) setMoneyTone(node, value);
+}
+
+function accountBalanceText(mode, margin, connection) {
+  if (mode === "PAPER") return money(margin?.available ?? 0);
+  if (!connection?.connected) return connectionText(connection);
+  if (margin?.error) return margin.error;
+  return money(margin?.available);
 }
 
 function milliseconds(value) {
@@ -207,6 +238,7 @@ function openSettings(profile) {
   fields.textContent = "";
   const values = currentSettings(profile);
   settingOrder.forEach(key => {
+    if ((profile === "paper" || profile === "real") && liveProfileHiddenSettings.has(key)) return;
     const label = document.createElement("label");
     label.textContent = state.labels[key] || key;
     const input = key === "chart_interval" || key === "order_product" ? document.createElement("select") : document.createElement("input");
@@ -239,7 +271,7 @@ function buildLiveViews() {
       <section class="panel live-contracts">
         <h2>${mode === "LIVE" ? "Real Trading" : "Paper Trading"} Contracts</h2>
         <div class="live-account-card">
-          <span>${mode === "LIVE" ? "Available Margin" : "Paper Data Account"}</span>
+          <span>${mode === "LIVE" ? "Available Margin" : "Paper Balance"}</span>
           <strong data-field="account_balance">Not Connected</strong>
           <small data-field="account_time"></small>
           <div class="account-actions">
@@ -289,9 +321,9 @@ function buildLiveViews() {
           <button type="button" class="tick-tab-button" data-tick-tab="CE">CE</button>
           <button type="button" class="tick-tab-button" data-tick-tab="PE">PE</button>
         </div>
-        <div class="tick-table active" data-tick-panel="NIFTY"><div class="table-wrap"><table data-field="ticks-NIFTY"></table></div></div>
-        <div class="tick-table" data-tick-panel="CE"><div class="table-wrap"><table data-field="ticks-CE"></table></div></div>
-        <div class="tick-table" data-tick-panel="PE"><div class="table-wrap"><table data-field="ticks-PE"></table></div></div>
+        <div class="tick-table active" data-tick-panel="NIFTY"><div class="table-wrap tick-scroll"><table data-field="ticks-NIFTY"></table></div></div>
+        <div class="tick-table" data-tick-panel="CE"><div class="table-wrap tick-scroll"><table data-field="ticks-CE"></table></div></div>
+        <div class="tick-table" data-tick-panel="PE"><div class="table-wrap tick-scroll"><table data-field="ticks-PE"></table></div></div>
         <div class="candle-actions">
           <button type="button" data-action="open-candles" data-candles="NIFTY">NIFTY Candles</button>
           <button type="button" data-action="open-candles" data-candles="CE">CE Candles</button>
@@ -328,6 +360,28 @@ function collectLivePayload(view) {
   };
 }
 
+function collectZerodhaBacktestPayload(form) {
+  const optionRows = [0, 1].map(index => {
+    const find = field => $(`[data-zbt-option="${index}"][name="${field}"]`, form)?.value.trim();
+    return {
+      option_type: find("option_type"),
+      strike: find("strike"),
+      expiry: find("expiry"),
+      tradingsymbol: find("tradingsymbol"),
+      token: find("token"),
+    };
+  });
+  return {
+    mode: form.elements.mode.value,
+    nifty_token: form.elements.nifty_token.value.trim(),
+    start_date: form.elements.start_date.value,
+    end_date: form.elements.end_date.value,
+    history_interval: form.elements.history_interval.value,
+    options: optionRows,
+    settings: currentSettings("backtest"),
+  };
+}
+
 async function handleLiveAction(button) {
   const view = button.closest(".live-view");
   const mode = view.dataset.mode;
@@ -347,6 +401,7 @@ async function handleLiveAction(button) {
   if (action === "disconnect") {
     const data = await api("/api/zerodha/disconnect", { mode });
     toast(data.disconnected ? `${mode} disconnected` : data.message);
+    await refreshStatus();
     return;
   }
   if (action === "fetch-option") {
@@ -387,6 +442,30 @@ async function handleLiveAction(button) {
   if (action === "open-candles") {
     const name = button.dataset.candles || "NIFTY";
     window.open(`/static/candles.html?name=${encodeURIComponent(name)}`, "_blank", "noopener");
+  }
+}
+
+async function handleZerodhaBacktestAction(button) {
+  const form = $("#zerodha-backtest-form");
+  const mode = form.elements.mode.value || "PAPER";
+  const action = button.dataset.zbtAction;
+  if (action === "fetch-nifty") {
+    const data = await api("/api/live/fetch-nifty", { mode });
+    form.elements.nifty_token.value = data.token;
+    toast("NIFTY token fetched");
+    return;
+  }
+  if (action === "fetch-option") {
+    const index = button.dataset.zbtOption;
+    const option = {
+      option_type: $(`[data-zbt-option="${index}"][name="option_type"]`, form).value,
+      strike: $(`[data-zbt-option="${index}"][name="strike"]`, form).value.trim(),
+      expiry: $(`[data-zbt-option="${index}"][name="expiry"]`, form).value,
+    };
+    const data = await api("/api/live/fetch-option", { mode, ...option });
+    $(`[data-zbt-option="${index}"][name="tradingsymbol"]`, form).value = data.tradingsymbol;
+    $(`[data-zbt-option="${index}"][name="token"]`, form).value = data.instrument_token || data.token;
+    toast(`${option.option_type} contract fetched`);
   }
 }
 
@@ -431,15 +510,18 @@ async function refreshStatus() {
   $("#current-mode").textContent = data.current_mode || "PAPER";
   const realMargin = data.account_margins?.LIVE || {};
   const paperMargin = data.account_margins?.PAPER || {};
+  const session = data.session_summary || {};
   $("#real-margin").textContent = money(realMargin.available);
-  $("#paper-margin").textContent = paperMargin.available !== null && paperMargin.available !== undefined ? money(paperMargin.available) : connectionText(data.connections.PAPER);
+  $("#paper-margin").textContent = money(paperMargin.available ?? 0);
   $("#dash-real-margin").textContent = realMargin.error ? realMargin.error : money(realMargin.available);
   $("#dash-real-margin-time").textContent = realMargin.updated_at || "";
-  $("#dash-paper-margin").textContent = paperMargin.error ? paperMargin.error : (paperMargin.available !== null && paperMargin.available !== undefined ? money(paperMargin.available) : connectionText(data.connections.PAPER));
+  $("#dash-paper-margin").textContent = paperMargin.error ? paperMargin.error : money(paperMargin.available ?? 0);
   $("#dash-paper-margin-time").textContent = paperMargin.updated_at || "";
+  setMoneyText("#dash-session-pnl", session.session_pnl ?? 0, true);
   $("#dash-order-count").textContent = (data.active_orders?.length || 0) + (data.order_history?.length || 0);
   $("#paper-connection").textContent = connectionText(data.connections.PAPER);
   $("#live-connection").textContent = connectionText(data.connections.LIVE);
+  $("#backtest-connection").textContent = connectionText(data.connections.BACKTEST);
   renderNetworkHealth(data.network_health || {});
   renderRecoveryStatus(data.recovery_status || {});
   $("#latest-result").textContent = JSON.stringify(data.last_backtest || data.last_replay?.summary || {}, null, 2);
@@ -454,12 +536,13 @@ async function refreshStatus() {
       alerts: data.alerts?.slice(-3),
     }, null, 2);
     const margin = data.account_margins?.[view.dataset.mode] || {};
-    $(`[data-field="account_balance"]`, view).textContent = margin.error ? margin.error : money(margin.available);
+    const connection = data.connections?.[view.dataset.mode] || {};
+    $(`[data-field="account_balance"]`, view).textContent = accountBalanceText(view.dataset.mode, margin, connection);
     $(`[data-field="account_time"]`, view).textContent = margin.updated_at || "";
     ["NIFTY", "CE", "PE"].forEach(name => {
       const rateNode = $(`[data-rate="${name}"]`, view);
       if (rateNode) rateNode.textContent = `${data.tick_rates?.[name] || 0}/s`;
-      renderTable($(`table[data-field='ticks-${name}']`, view), (data.ticks?.[name] || []).slice(-80), ["time", "name", "token", "ltp", "volume"]);
+      renderTickTable($(`table[data-field='ticks-${name}']`, view), data.ticks?.[name] || []);
     });
     renderTable($("table[data-field='orders']", view), data.order_history || []);
   });
@@ -494,11 +577,27 @@ function bindForms() {
     const disconnectButton = event.target.closest("[data-disconnect-mode]");
     if (disconnectButton) {
       api("/api/zerodha/disconnect", { mode: disconnectButton.dataset.disconnectMode })
-        .then(data => toast(data.disconnected ? `${disconnectButton.dataset.disconnectMode} disconnected` : data.message))
+        .then(async data => {
+          toast(data.disconnected ? `${disconnectButton.dataset.disconnectMode} disconnected` : data.message);
+          await refreshStatus();
+        })
         .catch(error => toast(error.message));
     }
     const liveButton = event.target.closest(".live-view [data-action]");
     if (liveButton) handleLiveAction(liveButton).catch(error => toast(error.message));
+    const zerodhaBacktestButton = event.target.closest("[data-zbt-action]");
+    if (zerodhaBacktestButton) handleZerodhaBacktestAction(zerodhaBacktestButton).catch(error => toast(error.message));
+    const applyOptimizedButton = event.target.closest("[data-apply-optimized]");
+    if (applyOptimizedButton) {
+      const profile = applyOptimizedButton.dataset.applyOptimized;
+      api("/api/settings/apply-latest-optimized", { profile })
+        .then(async data => {
+          state.settings[data.profile] = data.values;
+          await refreshStatus();
+          toast(`Optimized settings applied to ${data.profile}`);
+        })
+        .catch(error => toast(error.message));
+    }
   });
 
   $("#settings-defaults").addEventListener("click", () => {
@@ -511,6 +610,7 @@ function bindForms() {
     const saved = await api(`/api/settings/${state.activeSettingsProfile}`, values);
     state.settings[state.activeSettingsProfile] = saved.values;
     $("#settings-dialog").close();
+    await refreshStatus();
     toast("Settings saved");
   });
 
@@ -518,7 +618,8 @@ function bindForms() {
     const settings = currentSettings("backtest");
     const saved = await api("/api/settings/apply-backtest-live", { settings });
     state.settings = saved.profiles;
-    toast("Backtest settings applied to Paper and Real");
+    await refreshStatus();
+    toast("Backtest settings applied; paper balance preserved");
   });
 
   $("#network-health-run").addEventListener("click", () => {
@@ -545,6 +646,20 @@ function bindForms() {
       toast("Backtest complete");
     } catch (error) {
       $("#backtest-output").textContent = error.message;
+      toast(error.message);
+    }
+  });
+
+  $("#zerodha-backtest-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    $("#zerodha-backtest-output").textContent = "Running Zerodha optimizer. This can take a few minutes for larger date ranges...";
+    try {
+      const data = await api("/api/backtest/zerodha-optimize", collectZerodhaBacktestPayload(form));
+      $("#zerodha-backtest-output").textContent = JSON.stringify(data, null, 2);
+      toast("Zerodha optimizer complete");
+    } catch (error) {
+      $("#zerodha-backtest-output").textContent = error.message;
       toast(error.message);
     }
   });

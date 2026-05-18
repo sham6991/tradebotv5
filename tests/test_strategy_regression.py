@@ -163,7 +163,7 @@ class StrategyRegressionTests(unittest.TestCase):
         self.assertEqual(signal["instrument"], "NIFTY25000PE")
 
     def test_sideways_nifty_gives_no_trade(self):
-        engine = TradingEngine(cooldown=0)
+        engine = TradingEngine(cooldown=3)
 
         signal = engine.find_trade(
             nifty_frame("sideways"),
@@ -174,6 +174,7 @@ class StrategyRegressionTests(unittest.TestCase):
 
         self.assertIsNone(signal)
         self.assertEqual(engine.last_skip_reason, "sideways_trend")
+        self.assertEqual(engine.cooldown_until, -1)
 
     def test_rsi_reversal_bullish_enters_ce_without_ema_threshold(self):
         engine = TradingEngine(cooldown=0)

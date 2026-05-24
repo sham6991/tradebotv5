@@ -7,7 +7,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -20,12 +20,15 @@ from engine import parse_option_metadata_from_text
 from event_replay import build_session_replay, format_replay_report
 from execution_v2 import Executor
 from indicators import clean_and_add_indicators
-from live_backtest_optimizer import OPTIMIZED_SETTING_KEYS, run_live_backtest_optimizer
+from live_backtest_optimizer import date_range_from_months, run_live_backtest_optimizer
+from parity_replay import build_parity_report
 from position_reconciler import PositionReconciler
 from reporting import timestamped_file
+from runtime_errors import classify_runtime_error
+import settings_service
 from strategy import ensure_option_formula_columns
 from ui_replay import REPLAY_FILTERS, latest_replay_database, replay_table_row
-from ui_shared import DEFAULT_SETTINGS, SETTING_LABELS, SETTINGS_PROFILE_PATH
+from settings_service import DEFAULT_SETTINGS, SETTING_LABELS, SETTINGS_PROFILE_PATH
 from zerodha_auth import DEFAULT_REDIRECT_URL, ZerodhaAuthStore
 from zerodha_client import ZerodhaClient
 
@@ -43,6 +46,8 @@ LIVE_BLOCKING_MODES = {
     "LIVE": {"PAPER", "BACKTEST"},
     "BACKTEST": {"LIVE"},
 }
+LIVE_START_SAFETY_MAX_AGE_SECONDS = 300
+LIVE_START_NETWORK_PASS_STATUSES = {"CONNECTED"}
 
 
 def json_default(value):
@@ -52,23 +57,15 @@ def json_default(value):
 
 
 def normalise_interval(value):
-    text = str(value or "").strip().lower()
-    return {
-        "1 min": "minute",
-        "1minute": "minute",
-        "minute": "minute",
-        "2 min": "2minute",
-        "2minute": "2minute",
-        "3 min": "3minute",
-        "3minute": "3minute",
-        "5 min": "5minute",
-        "5minute": "5minute",
-    }.get(text, "3minute")
+    return settings_service.normalise_interval(value)
 
 
 def normalise_order_product(value):
-    text = str(value or "NRML").strip().upper()
-    return "MIS" if text in ("MIS", "INTRADAY") else "NRML"
+    return settings_service.normalise_order_product(value)
+
+
+def normalise_trend_set(value):
+    return settings_service.normalise_trend_set(value)
 
 
 def parse_instrument_token(value, label):
@@ -85,125 +82,62 @@ def parse_instrument_token(value, label):
 
 
 def setting_value(values, key):
-    value = (values or {}).get(key, DEFAULT_SETTINGS.get(key, ""))
-    if value is None or str(value).strip() == "":
-        return DEFAULT_SETTINGS.get(key, "")
-    return value
+    return settings_service.setting_value(values, key)
 
 
-def derived_watch_buy_score(values):
-    try:
-        score = float(setting_value(values, "min_buy_score")) - 5
-    except (TypeError, ValueError):
-        return DEFAULT_SETTINGS["watch_buy_score"]
-    if score.is_integer():
-        return str(int(score))
-    return f"{score:.2f}".rstrip("0").rstrip(".")
+RUNTIME_ACCOUNT_KEYS = settings_service.RUNTIME_ACCOUNT_KEYS
 
 
-def normalized_settings_profile(values):
-    values = values or {}
-    normalized = {
-        **values,
-        **{key: setting_value(values, key) for key in DEFAULT_SETTINGS},
-    }
-    normalized["watch_buy_score"] = derived_watch_buy_score(normalized)
-    return normalized
+def runtime_dir():
+    return settings_service.runtime_dir(SETTINGS_PROFILE_PATH)
+
+
+def real_account_snapshot_path():
+    return settings_service.real_account_snapshot_path(SETTINGS_PROFILE_PATH)
+
+
+def load_real_account_snapshot():
+    return settings_service.load_real_account_snapshot(SETTINGS_PROFILE_PATH)
+
+
+def save_real_account_snapshot(snapshot):
+    return settings_service.save_real_account_snapshot(snapshot, SETTINGS_PROFILE_PATH, json_default=json_default)
+
+
+def sanitize_settings_profile(values, profile=""):
+    return settings_service.sanitize_settings_profile(values, profile)
+
+
+def normalized_settings_profile(values, profile=""):
+    return settings_service.normalized_settings_profile(values, profile)
+
+
+def persisted_settings_profile(profile, values):
+    return settings_service.persisted_settings_profile(profile, values)
+
+
+def persisted_settings_profiles(profiles):
+    return settings_service.persisted_settings_profiles(profiles)
 
 
 def settings_from_values(values):
-    values = {key: setting_value(values, key) for key in DEFAULT_SETTINGS}
-    values["watch_buy_score"] = derived_watch_buy_score(values)
-    return {
-        "balance": float(values["balance"]),
-        "lot_size": int(values["lot_size"]),
-        "max_trades": int(values["max_trades"]),
-        "profit_points": float(values["profit_points"]),
-        "safety_points": float(values["safety_points"]),
-        "entry_offset": float(values["entry_offset"]),
-        "time_exit": int(values["time_exit"]),
-        "cooldown": int(values["cooldown"]),
-        "chart_interval": normalise_interval(values["chart_interval"]),
-        "bullish_threshold": float(values["bullish_threshold"]),
-        "bearish_threshold": float(values["bearish_threshold"]),
-        "rsi_bull": float(values["rsi_bull"]),
-        "rsi_bear": float(values["rsi_bear"]),
-        "rsi_reversal_bullish": float(values.get("rsi_reversal_bullish", DEFAULT_SETTINGS["rsi_reversal_bullish"])),
-        "rsi_reversal_bearish": float(values.get("rsi_reversal_bearish", DEFAULT_SETTINGS["rsi_reversal_bearish"])),
-        "watch_buy_score": float(values["watch_buy_score"]),
-        "min_buy_score": float(values["min_buy_score"]),
-        "strong_buy_score": float(values.get("strong_buy_score", DEFAULT_SETTINGS["strong_buy_score"])),
-        "min_volume_ratio": float(values.get("min_volume_ratio", DEFAULT_SETTINGS["min_volume_ratio"])),
-        "min_option_volume": float(values.get("min_option_volume", DEFAULT_SETTINGS["min_option_volume"])),
-        "aggression_score_cap": float(values.get("aggression_score_cap", DEFAULT_SETTINGS["aggression_score_cap"])),
-        "compression_range_ratio": float(values.get("compression_range_ratio", DEFAULT_SETTINGS["compression_range_ratio"])),
-        "expansion_range_ratio": float(values.get("expansion_range_ratio", DEFAULT_SETTINGS["expansion_range_ratio"])),
-        "max_chase_range_ratio": float(values.get("max_chase_range_ratio", DEFAULT_SETTINGS["max_chase_range_ratio"])),
-        "failed_breakout_penalty": float(values.get("failed_breakout_penalty", DEFAULT_SETTINGS["failed_breakout_penalty"])),
-        "early_breakout_min_score": float(values.get("early_breakout_min_score", DEFAULT_SETTINGS["early_breakout_min_score"])),
-        "max_daily_loss": float(values["max_daily_loss"]),
-        "max_daily_profit": float(values["max_daily_profit"]),
-        "max_consecutive_losses": int(values["max_consecutive_losses"]),
-        "square_off_time": str(values["square_off_time"]).strip(),
-        "order_product": normalise_order_product(values.get("order_product", "NRML")),
-    }
+    return settings_service.settings_from_values(values)
+
+
+def parse_runtime_setting_value(key, value):
+    return settings_service.parse_runtime_setting_value(key, value)
 
 
 def load_settings_profiles():
-    try:
-        with open(SETTINGS_PROFILE_PATH, "r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        data = {}
-    real_profile = data.get("real", {})
-    if not real_profile.get("zerodha_margin_fetched"):
-        real_profile = {**real_profile, "balance": "0"}
-    return {
-        "backtest": normalized_settings_profile(data.get("backtest", {})),
-        "paper": normalized_settings_profile(data.get("paper", {})),
-        "real": normalized_settings_profile(real_profile),
-    }
+    return settings_service.load_settings_profiles(SETTINGS_PROFILE_PATH)
 
 
 def save_settings_profile(profile, values):
-    if profile not in {"backtest", "paper", "real"}:
-        raise ValueError("Unknown settings profile.")
-    os.makedirs(os.path.dirname(SETTINGS_PROFILE_PATH), exist_ok=True)
-    profiles = load_settings_profiles()
-    profiles[profile] = normalized_settings_profile(values)
-    with open(SETTINGS_PROFILE_PATH, "w", encoding="utf-8") as handle:
-        json.dump(profiles, handle, indent=2)
-    return profiles[profile]
+    return settings_service.save_settings_profile(profile, values, SETTINGS_PROFILE_PATH)
 
 
 def apply_backtest_settings_to_live(values=None):
-    profiles = load_settings_profiles()
-    source = normalized_settings_profile(values or profiles["backtest"])
-    paper_existing = profiles.get("paper", {})
-    paper_preserved = {
-        key: paper_existing[key]
-        for key in ("balance", "chart_interval")
-        if key in paper_existing
-    }
-    real_existing = profiles.get("real", {})
-    real_preserved = {
-        key: real_existing[key]
-        for key in ("balance", "zerodha_margin_fetched", "chart_interval")
-        if key in real_existing
-    }
-
-    profiles["backtest"] = source
-    profiles["paper"] = normalized_settings_profile({**source, **paper_preserved})
-    profiles["real"] = normalized_settings_profile({**source, **real_preserved})
-
-    os.makedirs(os.path.dirname(SETTINGS_PROFILE_PATH), exist_ok=True)
-    with open(SETTINGS_PROFILE_PATH, "w", encoding="utf-8") as handle:
-        json.dump(profiles, handle, indent=2)
-    return {
-        "backtest": profiles["backtest"],
-        "paper": profiles["paper"],
-        "real": profiles["real"],
-    }
+    return settings_service.apply_backtest_settings_to_live(values, SETTINGS_PROFILE_PATH)
 
 
 def load_csv_dataframe(path, instrument="", option_data=False, strike="", expiry="", option_type=""):
@@ -505,11 +439,14 @@ class WebTradeBotApp:
                 "error": "",
             }
         except Exception as exc:
+            classification = classify_runtime_error(exc, context="network_health")
             return {
                 "name": name,
                 "status": "Failed",
                 "duration_ms": round((time.perf_counter() - started) * 1000, 2),
                 "error": str(exc),
+                "error_class": classification["class"],
+                "error_category": classification["category"],
             }
 
     def check_zerodha_api_reachable(self):
@@ -555,12 +492,22 @@ class WebTradeBotApp:
 
         saved_position = self.read_recovery_json(mode, "open_position")
         saved_pending = self.read_recovery_json(mode, "pending_entry")
+        saved_kill_switch = self.latest_kill_switch_state(mode)
         if saved_position and not state["open_position"]:
             state["open_position"] = saved_position
             findings.append(self.recovery_finding("WARN", "SAVED_OPEN_POSITION", "Saved open position exists but no active session is loaded."))
         if saved_pending and not state["pending_entry"]:
             state["pending_entry"] = saved_pending
             findings.append(self.recovery_finding("WARN", "SAVED_PENDING_ENTRY", "Saved pending entry exists but no active session is loaded."))
+        if saved_kill_switch.get("active") and not state["kill_switch_active"]:
+            state["kill_switch_active"] = True
+            state["kill_switch_reason"] = saved_kill_switch.get("reason") or "Restored kill switch state"
+            findings.append(self.recovery_finding(
+                "ERROR",
+                "RESTORED_KILL_SWITCH_ACTIVE",
+                "Saved kill switch state is active. Resolve it before real-money trading.",
+                saved_kill_switch,
+            ))
 
         if mode == "LIVE" and client:
             findings.extend(self.reconcile_recovery_state(session, state))
@@ -665,6 +612,23 @@ class WebTradeBotApp:
         except OSError:
             return []
 
+    def latest_kill_switch_state(self, mode):
+        files = sorted(
+            self.find_result_files(f"{str(mode or '').upper()}_*_kill_switch.json"),
+            key=lambda path: os.path.getmtime(path),
+            reverse=True,
+        )
+        if not files:
+            return {}
+        try:
+            with open(files[0], "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if isinstance(data, dict):
+            return data
+        return {}
+
     def read_recovery_json(self, mode, kind):
         path = os.path.join(RESULT_FOLDER, f"{mode.lower()}_{kind}.json")
         if not os.path.exists(path):
@@ -692,7 +656,17 @@ class WebTradeBotApp:
             try:
                 status = self.zerodha_clients_by_mode["LIVE"].order_status(order_id)
             except Exception as exc:
-                findings.append(self.recovery_finding("WARN", "ORDER_STATUS_CHECK_FAILED", f"{label} status check failed: {exc}"))
+                classification = classify_runtime_error(exc, context="order_status")
+                findings.append(self.recovery_finding(
+                    "WARN",
+                    "ORDER_STATUS_CHECK_FAILED",
+                    f"{label} status check failed: {exc}",
+                    {
+                        "error": str(exc),
+                        "error_class": classification["class"],
+                        "error_category": classification["category"],
+                    },
+                ))
                 continue
             if status in {"CANCELLED", "REJECTED", "UNKNOWN"}:
                 findings.append(self.recovery_finding("WARN", "ORDER_STATUS_REVIEW", f"{label} status is {status}."))
@@ -711,7 +685,14 @@ class WebTradeBotApp:
             try:
                 status = client.order_status(order_id)
             except Exception as exc:
-                rows.append(self.recovery_check_row(label, "Error", str(exc)))
+                classification = classify_runtime_error(exc, context="order_status")
+                rows.append(self.recovery_check_row(
+                    label,
+                    "Error",
+                    str(exc),
+                    error_class=classification["class"],
+                    error_category=classification["category"],
+                ))
                 continue
             rows.append(self.recovery_check_row(label, status or "Unknown", f"Order ID {order_id}"))
         return rows
@@ -749,8 +730,13 @@ class WebTradeBotApp:
             parts.append(f"{len(findings)} finding(s)")
         return ", ".join(parts) if parts else "No local recovery state found."
 
-    def recovery_check_row(self, name, status, detail):
-        return {"name": name, "status": status, "detail": detail}
+    def recovery_check_row(self, name, status, detail, error_class="", error_category=""):
+        row = {"name": name, "status": status, "detail": detail}
+        if error_class:
+            row["error_class"] = error_class
+        if error_category:
+            row["error_category"] = error_category
+        return row
 
     def recovery_finding(self, level, code, message, raw=None):
         return {
@@ -759,6 +745,8 @@ class WebTradeBotApp:
             "message": str(message or ""),
             "order_id": str((raw or {}).get("order_id", "")) if isinstance(raw, dict) else "",
             "status": str((raw or {}).get("status", "")) if isinstance(raw, dict) else "",
+            "error_class": str((raw or {}).get("error_class", "")) if isinstance(raw, dict) else "",
+            "error_category": str((raw or {}).get("error_category", "")) if isinstance(raw, dict) else "",
         }
 
     def position_summary(self, position):
@@ -940,16 +928,30 @@ class WebTradeBotApp:
             return self.account_margins.get(mode, {})
         try:
             margin = client.available_margin()
+            fetched_at = datetime.now()
+            profile = self.zerodha_auth_profiles.get(mode) or {}
             snapshot = {
                 "available": float(margin) if margin is not None else None,
-                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "updated_at": fetched_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "error": "" if margin is not None else "Margin unavailable",
             }
+            if mode == "LIVE":
+                save_real_account_snapshot({
+                    "fetched_at": snapshot["updated_at"],
+                    "available_margin": snapshot["available"],
+                    "used_margin": None,
+                    "broker_user_id": profile.get("user_id") or profile.get("client_id") or "",
+                    "source": "Zerodha",
+                    "valid_until": (fetched_at + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S"),
+                })
         except Exception as exc:
+            classification = classify_runtime_error(exc, context="margin")
             snapshot = {
                 "available": None,
                 "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "error": str(exc),
+                "error_class": classification["class"],
+                "error_category": classification["category"],
             }
             if raise_errors:
                 self.account_margins[mode] = snapshot
@@ -1001,7 +1003,7 @@ class WebTradeBotApp:
     def run_live_backtest_optimizer_job(self, payload):
         mode = self.validate_zerodha_mode(payload.get("mode") or "BACKTEST")
         if mode != "BACKTEST":
-            raise ValueError("Zerodha optimizer must use Backtest Live Data connection.")
+            raise ValueError("NIFTY optimizer must use Backtest Live Data connection.")
         self.sync_zerodha_client_for_mode(mode)
         client = self.executor.zerodha
         if not client:
@@ -1010,19 +1012,22 @@ class WebTradeBotApp:
         settings = settings_from_values(settings_values)
         interval = normalise_interval(payload.get("history_interval") or settings.get("chart_interval"))
         settings["chart_interval"] = interval
-        contracts = self.option_contracts_from_payload(payload.get("options"))
         nifty_token = parse_instrument_token(payload.get("nifty_token"), "NIFTY token")
-        start_date = str(payload.get("start_date") or "").strip()
-        end_date = str(payload.get("end_date") or "").strip()
+        range_months = payload.get("date_range_months") or payload.get("range_months")
+        if range_months:
+            start_date, end_date = date_range_from_months(range_months)
+        else:
+            start_date = str(payload.get("start_date") or "").strip()
+            end_date = str(payload.get("end_date") or "").strip()
         if not start_date or not end_date:
-            raise ValueError("Start date and end date are required.")
+            raise ValueError("Choose a date range: last 1, 2, 3, or 6 months.")
 
-        self.set_status("Running Zerodha range optimizer...")
+        self.set_status("Running NIFTY RSI optimizer...")
         os.makedirs(RESULT_FOLDER, exist_ok=True)
         result = run_live_backtest_optimizer(
             client,
             nifty_token,
-            contracts,
+            None,
             start_date,
             end_date,
             interval,
@@ -1031,34 +1036,8 @@ class WebTradeBotApp:
         )
         with self.lock:
             self.last_backtest = result
-        self.set_status(f"Zerodha optimizer complete: {result['runs']} runs, {result['days_used']} days")
+        self.set_status(f"NIFTY optimizer complete: {result['runs']} runs, {result['days_used']} days")
         return result
-
-    def apply_latest_optimizer_settings(self, profile):
-        profile = str(profile or "").strip().lower()
-        if profile not in {"paper", "real"}:
-            raise ValueError("Optimized settings can be applied only to paper or real.")
-        latest = self.last_backtest or {}
-        best_settings = latest.get("best_settings") or {}
-        if not best_settings:
-            raise ValueError("Run Backtest Live optimizer before applying optimized settings.")
-
-        profiles = load_settings_profiles()
-        existing = profiles.get(profile, {})
-        updated = dict(existing)
-        for key in OPTIMIZED_SETTING_KEYS:
-            if key in best_settings:
-                updated[key] = best_settings[key]
-        if "min_buy_score" in updated:
-            updated["watch_buy_score"] = derived_watch_buy_score(updated)
-
-        values = save_settings_profile(profile, updated)
-        if profile == "paper":
-            self.account_margins["PAPER"] = self.paper_balance_snapshot()
-            if not self.executor.live_paper_session:
-                self.session_summary = self.empty_session_summary("PAPER")
-        self.set_status(f"Latest optimized settings applied to {profile.title()}")
-        return {"profile": profile, "values": values, "source": latest.get("output_path", "")}
 
     def normalise_backtest_payload(self, payload):
         payload = dict(payload or {})
@@ -1181,6 +1160,8 @@ class WebTradeBotApp:
             if mode == "PAPER":
                 settings_values = {**settings_values, "balance": profiles["paper"].get("balance", settings_values.get("balance"))}
             settings = settings_from_values(settings_values)
+            if mode == "LIVE":
+                self.require_real_live_start_safety()
             with self.lock:
                 self.live_log_active_rows = []
                 self.live_order_history_rows = []
@@ -1250,6 +1231,52 @@ class WebTradeBotApp:
             self.set_status("Real trading feed connecting...")
         except Exception as exc:
             self.set_status(f"Live start failed: {exc}")
+
+    def require_real_live_start_safety(self):
+        failures = self.real_live_start_safety_failures()
+        if failures:
+            raise ValueError("Real-money live start blocked: " + "; ".join(failures))
+        margin = self.refresh_margin("LIVE", raise_errors=True)
+        available = margin.get("available")
+        error = str(margin.get("error") or "").strip()
+        if error:
+            raise ValueError(f"Real-money live start blocked: fresh margin check failed: {error}")
+        try:
+            available = float(available)
+        except (TypeError, ValueError):
+            raise ValueError("Real-money live start blocked: fresh margin is unavailable")
+        if available <= 0:
+            raise ValueError("Real-money live start blocked: fresh margin must be greater than zero")
+        return True
+
+    def real_live_start_safety_failures(self):
+        failures = []
+        network = self.network_health.get("LIVE") or {}
+        recovery = self.recovery_status.get("LIVE") or {}
+        if not self._recent_check(network.get("checked_at")):
+            failures.append("run a fresh LIVE network health check")
+        elif str(network.get("status", "")).strip().upper() not in LIVE_START_NETWORK_PASS_STATUSES:
+            failures.append(f"LIVE network health is {network.get('status') or 'not connected'}")
+        if any(str(step.get("status", "")).strip().upper() == "FAILED" for step in network.get("steps") or []):
+            failures.append("LIVE network health has failed checks")
+
+        if not self._recent_check(recovery.get("checked_at")):
+            failures.append("run a fresh LIVE recovery check")
+        else:
+            severity = str(recovery.get("severity", "")).strip().upper()
+            status = str(recovery.get("status", "")).strip().upper()
+            if severity != "GOOD" or status != "SAFE TO TRADE":
+                failures.append(f"LIVE recovery status is {recovery.get('status') or 'not safe'}")
+        return failures
+
+    def _recent_check(self, checked_at, max_age_seconds=LIVE_START_SAFETY_MAX_AGE_SECONDS):
+        if not checked_at:
+            return False
+        try:
+            checked = datetime.strptime(str(checked_at), "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return False
+        return (datetime.now() - checked).total_seconds() <= max_age_seconds
 
     def on_ticks(self, ticks):
         with self.lock:
@@ -1382,6 +1409,39 @@ class WebTradeBotApp:
         self.set_status(f"Replay loaded: {result['summary'].get('total_items', 0)} rows")
         return result
 
+    def parity_replay(self, payload):
+        path = str(payload.get("db_file") or payload.get("path") or "").strip()
+        if not path:
+            path = latest_replay_database(RESULT_FOLDER)
+        if not path or not os.path.exists(path):
+            raise ValueError("Select an existing SQLite session database.")
+
+        nifty_path = str(payload.get("nifty_file") or payload.get("nifty_path") or "").strip()
+        ce_path = str(payload.get("ce_file") or payload.get("ce_path") or "").strip()
+        pe_path = str(payload.get("pe_file") or payload.get("pe_path") or "").strip()
+
+        settings_values = payload.get("settings") or load_settings_profiles()["backtest"]
+        settings = settings_from_values(settings_values)
+        nifty = ce = pe = None
+        if nifty_path or ce_path or pe_path:
+            if not nifty_path or not ce_path or not pe_path:
+                raise ValueError("Supply all NIFTY, CE, and PE candle files, or leave all candle files blank to use session DB candles.")
+            nifty = load_csv_dataframe(nifty_path, instrument="NIFTY")
+            ce = load_csv_dataframe(ce_path, instrument=os.path.basename(ce_path), option_data=True, option_type="CE")
+            pe = load_csv_dataframe(pe_path, instrument=os.path.basename(pe_path), option_data=True, option_type="PE")
+        report = build_parity_report(
+            path,
+            nifty,
+            [ce, pe] if ce is not None and pe is not None else None,
+            settings,
+            session_id=str(payload.get("session_id") or "").strip(),
+            price_tolerance=float(payload.get("price_tolerance", 0.01) or 0.01),
+        )
+        self.set_status(
+            f"Parity replay complete: {report['summary'].get('mismatches', 0)} mismatches"
+        )
+        return report
+
 
 class TradeBotRequestHandler(BaseHTTPRequestHandler):
     app_state = None
@@ -1443,7 +1503,7 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
                 "profiles": apply_backtest_settings_to_live(payload.get("settings") or payload),
             })
         if path == "/api/settings/apply-latest-optimized":
-            return self.send_json(self.app_state.apply_latest_optimizer_settings(payload.get("profile")))
+            return self.send_json({"error": "NIFTY optimizer results are report-only and are not applied to paper or real settings."}, status=404)
         if path.startswith("/api/settings/"):
             profile = path.rsplit("/", 1)[-1]
             values = save_settings_profile(profile, payload)
@@ -1490,6 +1550,8 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.send_json(self.app_state.square_off())
         if path == "/api/replay/load":
             return self.send_json(self.app_state.replay_load(payload))
+        if path == "/api/parity/replay":
+            return self.send_json(self.app_state.parity_replay(payload))
         return self.send_json({"error": "Not found"}, status=404)
 
     def read_payload(self):

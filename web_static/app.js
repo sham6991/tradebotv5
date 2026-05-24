@@ -15,16 +15,86 @@ const titles = {
 };
 
 const settingOrder = [
-  "balance", "lot_size", "max_trades", "profit_points", "safety_points", "entry_offset",
-  "time_exit", "cooldown", "chart_interval", "bullish_threshold", "bearish_threshold",
+  "balance", "lot_size", "max_trades", "profit_points", "safety_points", "stoploss_limit_buffer_points",
+  "live_option_market_entry_as_limit_enabled", "live_option_market_entry_limit_buffer_points",
+  "trailing_sl_enabled", "trailing_start_points", "trailing_step_points", "trailing_lock_points",
+  "time_exit", "cooldown", "chart_interval", "trend_set", "bullish_threshold", "bearish_threshold",
   "rsi_bull", "rsi_bear", "rsi_reversal_bullish", "rsi_reversal_bearish",
-  "watch_buy_score", "min_buy_score", "strong_buy_score", "min_volume_ratio", "min_option_volume",
-  "aggression_score_cap", "compression_range_ratio", "expansion_range_ratio", "max_chase_range_ratio",
-  "failed_breakout_penalty", "early_breakout_min_score",
+  "bullish_reversal_condition", "bearish_reversal_condition",
+  "fast_ohlcv_entry_enabled", "buy_limit_score_low", "market_entry_score",
+  "minimum_body_percent", "minimum_close_position", "market_entry_minimum_body_percent",
+  "market_entry_minimum_close_position", "trigger_upper_wick_max", "hard_rejection_upper_wick_max",
+  "volume_previous_multiplier", "avg_volume_minimum_multiplier", "volume_pickup_avg_multiplier",
+  "large_candle_multiplier", "move_from_low_max_multiplier", "gap_spike_multiplier",
+  "buy_limit_offset_multiplier", "minimum_offset", "maximum_offset", "buy_limit_validity_seconds",
+  "backtest_limit_fill_mode", "enable_chop_filter", "chop_lookback_candles", "chop_overlap_count",
+  "aggressive_live_entry_enabled", "aggressive_setup_score", "aggressive_entry_score",
+  "aggressive_upper_wick_max", "aggressive_minimum_body_percent", "aggressive_minimum_close_position",
+  "aggressive_move_from_low_max_multiplier", "one_entry_attempt_per_candle",
+  "missed_limit_cooldown_candles", "max_spread_points",
   "max_daily_loss", "max_daily_profit", "max_consecutive_losses", "square_off_time", "order_product",
 ];
 
+const settingGroups = [
+  {
+    id: "nifty",
+    label: "Nifty",
+    keys: [
+      "trend_set",
+      "bullish_threshold", "bearish_threshold",
+      "rsi_bull", "rsi_bear",
+      "rsi_reversal_bullish", "rsi_reversal_bearish",
+      "bullish_reversal_condition", "bearish_reversal_condition",
+    ],
+  },
+  {
+    id: "trading",
+    label: "Trading",
+    keys: [
+      "fast_ohlcv_entry_enabled",
+      "buy_limit_score_low", "market_entry_score",
+      "minimum_body_percent", "minimum_close_position",
+      "market_entry_minimum_body_percent", "market_entry_minimum_close_position",
+      "trigger_upper_wick_max", "hard_rejection_upper_wick_max",
+      "volume_previous_multiplier", "avg_volume_minimum_multiplier", "volume_pickup_avg_multiplier",
+      "large_candle_multiplier", "move_from_low_max_multiplier", "gap_spike_multiplier",
+      "buy_limit_offset_multiplier", "minimum_offset", "maximum_offset",
+      "buy_limit_validity_seconds", "backtest_limit_fill_mode",
+      "enable_chop_filter", "chop_lookback_candles", "chop_overlap_count",
+      "aggressive_live_entry_enabled", "aggressive_setup_score", "aggressive_entry_score",
+      "aggressive_upper_wick_max", "aggressive_minimum_body_percent",
+      "aggressive_minimum_close_position", "aggressive_move_from_low_max_multiplier",
+      "one_entry_attempt_per_candle", "missed_limit_cooldown_candles", "max_spread_points",
+    ],
+  },
+  {
+    id: "market",
+    label: "Market",
+    keys: [
+      "balance", "lot_size", "max_trades",
+      "profit_points", "safety_points", "stoploss_limit_buffer_points",
+      "live_option_market_entry_as_limit_enabled", "live_option_market_entry_limit_buffer_points",
+      "trailing_sl_enabled", "trailing_start_points", "trailing_step_points", "trailing_lock_points",
+      "time_exit", "cooldown", "chart_interval",
+      "max_daily_loss", "max_daily_profit", "max_consecutive_losses",
+      "square_off_time", "order_product",
+    ],
+  },
+];
+
 const liveProfileHiddenSettings = new Set(["chart_interval"]);
+const booleanSettings = new Set([
+  "fast_ohlcv_entry_enabled",
+  "enable_chop_filter",
+  "aggressive_live_entry_enabled",
+  "one_entry_attempt_per_candle",
+  "trailing_sl_enabled",
+  "live_option_market_entry_as_limit_enabled",
+]);
+
+function isEnabledValue(value) {
+  return ["1", "true", "yes", "on", "enabled"].includes(String(value ?? "").trim().toLowerCase());
+}
 
 function $(selector, root = document) {
   return root.querySelector(selector);
@@ -57,6 +127,13 @@ function toast(message) {
   node.classList.add("show");
   clearTimeout(node._timer);
   node._timer = setTimeout(() => node.classList.remove("show"), 3600);
+}
+
+function showSettingsError(message) {
+  const node = $("#settings-error");
+  if (!node) return;
+  node.textContent = message || "";
+  node.hidden = !message;
 }
 
 function text(value) {
@@ -226,7 +303,7 @@ function currentSettings(profile) {
 function collectSettingsFromDialog() {
   const values = {};
   $all("[data-setting-key]", $("#settings-fields")).forEach(input => {
-    values[input.dataset.settingKey] = input.value.trim();
+    values[input.dataset.settingKey] = input.type === "checkbox" ? String(input.checked) : input.value.trim();
   });
   return values;
 }
@@ -234,24 +311,74 @@ function collectSettingsFromDialog() {
 function openSettings(profile) {
   state.activeSettingsProfile = profile;
   $("#settings-title").textContent = `${profile[0].toUpperCase()}${profile.slice(1)} Risk Settings`;
+  showSettingsError("");
+  const tabs = $("#settings-tabs");
   const fields = $("#settings-fields");
+  tabs.textContent = "";
   fields.textContent = "";
   const values = currentSettings(profile);
-  settingOrder.forEach(key => {
+  const rendered = new Set();
+
+  const makeSettingField = key => {
     if ((profile === "paper" || profile === "real") && liveProfileHiddenSettings.has(key)) return;
     const label = document.createElement("label");
     label.textContent = state.labels[key] || key;
-    const input = key === "chart_interval" || key === "order_product" ? document.createElement("select") : document.createElement("input");
+    const input = key === "chart_interval" || key === "trend_set" || key === "order_product" || key === "backtest_limit_fill_mode" || booleanSettings.has(key)
+      ? document.createElement("select")
+      : document.createElement("input");
     input.dataset.settingKey = key;
     if (key === "chart_interval") {
       ["1 min", "2 min", "3 min", "5 min"].forEach(option => input.add(new Option(option, option)));
     }
+    if (key === "trend_set") {
+      ["Auto", "Bullish", "Bearish"].forEach(option => input.add(new Option(option, option)));
+    }
     if (key === "order_product") {
       ["NRML", "MIS"].forEach(option => input.add(new Option(option, option)));
     }
-    input.value = values[key] ?? "";
+    if (key === "backtest_limit_fill_mode") {
+      ["CONSERVATIVE", "SIMPLE", "STRICT"].forEach(option => input.add(new Option(option, option)));
+    }
+    if (booleanSettings.has(key) && input.tagName === "SELECT") {
+      input.add(new Option("Enabled", "Enabled"));
+      input.add(new Option("Disabled", "Disabled"));
+      input.value = isEnabledValue(values[key]) ? "Enabled" : "Disabled";
+    } else {
+      input.value = values[key] ?? "";
+    }
     label.appendChild(input);
-    fields.appendChild(label);
+    rendered.add(key);
+    return label;
+  };
+
+  settingGroups.forEach((group, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `settings-tab${index === 0 ? " active" : ""}`;
+    button.dataset.settingsTab = group.id;
+    button.textContent = group.label;
+    tabs.appendChild(button);
+
+    const panel = document.createElement("section");
+    panel.className = `settings-panel${index === 0 ? " active" : ""}`;
+    panel.dataset.settingsPanel = group.id;
+    const grid = document.createElement("div");
+    grid.className = "settings-grid";
+    group.keys.forEach(key => {
+      const field = makeSettingField(key);
+      if (field) grid.appendChild(field);
+    });
+    panel.appendChild(grid);
+    fields.appendChild(panel);
+  });
+
+  settingOrder.forEach(key => {
+    if (rendered.has(key)) return;
+    const field = makeSettingField(key);
+    if (!field) return;
+    let fallbackPanel = $("[data-settings-panel='market']", fields);
+    if (!fallbackPanel) fallbackPanel = fields.firstElementChild;
+    $(".settings-grid", fallbackPanel).appendChild(field);
   });
   $("#settings-dialog").showModal();
 }
@@ -361,23 +488,11 @@ function collectLivePayload(view) {
 }
 
 function collectZerodhaBacktestPayload(form) {
-  const optionRows = [0, 1].map(index => {
-    const find = field => $(`[data-zbt-option="${index}"][name="${field}"]`, form)?.value.trim();
-    return {
-      option_type: find("option_type"),
-      strike: find("strike"),
-      expiry: find("expiry"),
-      tradingsymbol: find("tradingsymbol"),
-      token: find("token"),
-    };
-  });
   return {
     mode: form.elements.mode.value,
     nifty_token: form.elements.nifty_token.value.trim(),
-    start_date: form.elements.start_date.value,
-    end_date: form.elements.end_date.value,
+    date_range_months: form.elements.date_range_months.value,
     history_interval: form.elements.history_interval.value,
-    options: optionRows,
     settings: currentSettings("backtest"),
   };
 }
@@ -454,18 +569,6 @@ async function handleZerodhaBacktestAction(button) {
     form.elements.nifty_token.value = data.token;
     toast("NIFTY token fetched");
     return;
-  }
-  if (action === "fetch-option") {
-    const index = button.dataset.zbtOption;
-    const option = {
-      option_type: $(`[data-zbt-option="${index}"][name="option_type"]`, form).value,
-      strike: $(`[data-zbt-option="${index}"][name="strike"]`, form).value.trim(),
-      expiry: $(`[data-zbt-option="${index}"][name="expiry"]`, form).value,
-    };
-    const data = await api("/api/live/fetch-option", { mode, ...option });
-    $(`[data-zbt-option="${index}"][name="tradingsymbol"]`, form).value = data.tradingsymbol;
-    $(`[data-zbt-option="${index}"][name="token"]`, form).value = data.instrument_token || data.token;
-    toast(`${option.option_type} contract fetched`);
   }
 }
 
@@ -568,6 +671,12 @@ function bindForms() {
   document.addEventListener("click", event => {
     const settingsButton = event.target.closest("[data-settings]");
     if (settingsButton) openSettings(settingsButton.dataset.settings);
+    const settingsTab = event.target.closest("[data-settings-tab]");
+    if (settingsTab) {
+      const dialog = settingsTab.closest("#settings-dialog");
+      $all("[data-settings-tab]", dialog).forEach(button => button.classList.toggle("active", button === settingsTab));
+      $all("[data-settings-panel]", dialog).forEach(panel => panel.classList.toggle("active", panel.dataset.settingsPanel === settingsTab.dataset.settingsTab));
+    }
     const tickTab = event.target.closest("[data-tick-tab]");
     if (tickTab) {
       const panel = tickTab.closest(".tick-tabs");
@@ -587,17 +696,6 @@ function bindForms() {
     if (liveButton) handleLiveAction(liveButton).catch(error => toast(error.message));
     const zerodhaBacktestButton = event.target.closest("[data-zbt-action]");
     if (zerodhaBacktestButton) handleZerodhaBacktestAction(zerodhaBacktestButton).catch(error => toast(error.message));
-    const applyOptimizedButton = event.target.closest("[data-apply-optimized]");
-    if (applyOptimizedButton) {
-      const profile = applyOptimizedButton.dataset.applyOptimized;
-      api("/api/settings/apply-latest-optimized", { profile })
-        .then(async data => {
-          state.settings[data.profile] = data.values;
-          await refreshStatus();
-          toast(`Optimized settings applied to ${data.profile}`);
-        })
-        .catch(error => toast(error.message));
-    }
   });
 
   $("#settings-defaults").addEventListener("click", () => {
@@ -607,11 +705,18 @@ function bindForms() {
 
   $("#settings-save").addEventListener("click", async () => {
     const values = collectSettingsFromDialog();
-    const saved = await api(`/api/settings/${state.activeSettingsProfile}`, values);
-    state.settings[state.activeSettingsProfile] = saved.values;
-    $("#settings-dialog").close();
-    await refreshStatus();
-    toast("Settings saved");
+    showSettingsError("");
+    try {
+      const saved = await api(`/api/settings/${state.activeSettingsProfile}`, values);
+      state.settings[state.activeSettingsProfile] = saved.values;
+      $("#settings-dialog").close();
+      await refreshStatus();
+      toast("Settings saved");
+    } catch (error) {
+      const message = error.message || "Settings could not be saved.";
+      showSettingsError(message);
+      toast(message);
+    }
   });
 
   $("#apply-backtest-live").addEventListener("click", async () => {
@@ -653,11 +758,11 @@ function bindForms() {
   $("#zerodha-backtest-form").addEventListener("submit", async event => {
     event.preventDefault();
     const form = event.currentTarget;
-    $("#zerodha-backtest-output").textContent = "Running Zerodha optimizer. This can take a few minutes for larger date ranges...";
+    $("#zerodha-backtest-output").textContent = "Running NIFTY optimizer. This can take a few minutes for larger date ranges...";
     try {
       const data = await api("/api/backtest/zerodha-optimize", collectZerodhaBacktestPayload(form));
       $("#zerodha-backtest-output").textContent = JSON.stringify(data, null, 2);
-      toast("Zerodha optimizer complete");
+      toast("NIFTY optimizer complete");
     } catch (error) {
       $("#zerodha-backtest-output").textContent = error.message;
       toast(error.message);

@@ -86,7 +86,7 @@ class EventReplayTests(unittest.TestCase):
 
             report_lines = format_replay_report(replay)
             self.assertIn("SESSION REPLAY", report_lines[0])
-            self.assertTrue(any("Settings version: settings-v1-" in line for line in report_lines))
+            self.assertTrue(any("Settings version: settings-v2-" in line for line in report_lines))
             self.assertTrue(any("Critical events: 1" in line for line in report_lines))
             self.assertTrue(any("Rejected/failed orders: 1" in line for line in report_lines))
 

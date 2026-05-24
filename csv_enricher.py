@@ -105,7 +105,7 @@ def enrich_option_csv(input_path, output_path):
             df.loc[i, 'Bear Trap Penalty'] = -25
     
     # Final Scores
-    df['Buy Score'] = (
+    df['Early Score'] = (
         df['Bullish Close Score'] + 
         df['Volume Strength Score'] + 
         df['Candle Body Strength Score'] + 
@@ -130,7 +130,7 @@ def enrich_option_csv(input_path, output_path):
     )
     
     # Buy/Sell Entry
-    df['Buy Entry'] = df['Buy Score'].apply(
+    df['Buy Entry'] = df['Early Score'].apply(
         lambda x: 'BUY' if x > 80 else ('WATCH' if x > 60 else '')
     )
     
@@ -153,7 +153,7 @@ def enrich_option_csv(input_path, output_path):
     )
 
     df['High Probability Buy'] = np.where(
-        (df['Buy Score'] > 80)
+        (df['Early Score'] > 80)
         & (df['Early Breakout Probability Score'] > 60)
         & (df['Momentum Acceleration Score'] > 0),
         'HIGH PROB BUY',

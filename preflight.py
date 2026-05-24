@@ -1,5 +1,8 @@
 from datetime import datetime
 
+from runtime_errors import classify_runtime_error
+from settings_validation import validate_fast_ohlcv_settings
+
 
 class PreflightReport:
     def __init__(self, mode, checks):
@@ -37,7 +40,7 @@ class PreflightReport:
 def validate_live_preflight(nifty, options, token_map, settings, mode="PAPER", zerodha=None, now=None):
     mode = str(mode or "PAPER").upper()
     checks = []
-    _validate_settings(settings or {}, checks)
+    _validate_settings(settings or {}, checks, mode=mode, zerodha=zerodha)
     _validate_market_data(nifty, options, token_map, checks)
     _validate_broker(mode, zerodha, checks)
     _validate_market_hours(settings or {}, mode, checks, now or datetime.now())
@@ -53,29 +56,60 @@ def _add(checks, level, code, message, context=None):
     })
 
 
-def _validate_settings(settings, checks):
+def _validate_settings(settings, checks, mode="PAPER", zerodha=None):
     _positive_int(settings, "lot_size", checks)
     _positive_int(settings, "max_trades", checks)
     _positive_float(settings, "profit_points", checks)
     _positive_float(settings, "safety_points", checks)
-    _positive_float(settings, "balance", checks)
-    _range_float(settings, "watch_buy_score", checks, 0, 200)
-    _range_float(settings, "min_buy_score", checks, 0, 200)
-    _range_float(settings, "strong_buy_score", checks, 0, 200)
-    _range_float(settings, "min_volume_ratio", checks, 0, 100)
-    _range_float(settings, "min_option_volume", checks, 0, 100000000)
-    _range_float(settings, "aggression_score_cap", checks, 0, 200)
-    _range_float(settings, "compression_range_ratio", checks, 0, 10)
-    _range_float(settings, "expansion_range_ratio", checks, 0, 10)
-    _range_float(settings, "max_chase_range_ratio", checks, 0, 50)
-    _range_float(settings, "failed_breakout_penalty", checks, -200, 0)
-    _range_float(settings, "early_breakout_min_score", checks, 0, 200)
+    _range_float(settings, "stoploss_limit_buffer_points", checks, 0.05, 1000)
+    _range_float(settings, "live_option_market_entry_limit_buffer_points", checks, 0.05, 1000)
+    _range_float(settings, "trailing_start_points", checks, 10, 1000)
+    _range_float(settings, "trailing_step_points", checks, 1, 1000)
+    _range_float(settings, "trailing_lock_points", checks, 1, 1000)
+    if str(mode or "PAPER").upper() == "LIVE":
+        _validate_live_margin_balance(settings, zerodha, checks)
+    else:
+        _positive_float(settings, "balance", checks)
+    _range_float(settings, "buy_limit_score_low", checks, 0, 60)
+    _range_float(settings, "market_entry_score", checks, 0, 60)
+    _range_float(settings, "aggressive_entry_score", checks, 0, 60)
+    _range_float(settings, "trigger_upper_wick_max", checks, 0, 100)
+    _range_float(settings, "hard_rejection_upper_wick_max", checks, 0, 100)
+    _range_float(settings, "aggressive_upper_wick_max", checks, 0, 100)
+    _range_float(settings, "minimum_body_percent", checks, 0, 100)
+    _range_float(settings, "market_entry_minimum_body_percent", checks, 0, 100)
+    _range_float(settings, "aggressive_minimum_body_percent", checks, 0, 100)
+    _range_float(settings, "minimum_close_position", checks, 0, 100)
+    _range_float(settings, "market_entry_minimum_close_position", checks, 0, 100)
+    _range_float(settings, "aggressive_minimum_close_position", checks, 0, 100)
+    _range_float(settings, "volume_previous_multiplier", checks, 0, 10)
+    _range_float(settings, "avg_volume_minimum_multiplier", checks, 0, 10)
+    _range_float(settings, "volume_pickup_avg_multiplier", checks, 0, 10)
+    _range_float(settings, "large_candle_multiplier", checks, 0, 20)
+    _range_float(settings, "move_from_low_max_multiplier", checks, 0, 20)
+    _range_float(settings, "aggressive_move_from_low_max_multiplier", checks, 0, 20)
+    _range_float(settings, "gap_spike_multiplier", checks, 0, 20)
+    _range_float(settings, "buy_limit_offset_multiplier", checks, 0, 10)
+    _range_float(settings, "minimum_offset", checks, 0, 100)
+    _range_float(settings, "maximum_offset", checks, 0, 100)
+    _range_float(settings, "buy_limit_validity_seconds", checks, 1, 3600)
+    _range_float(settings, "chop_lookback_candles", checks, 1, 20)
+    _range_float(settings, "chop_overlap_count", checks, 1, 20)
+    _range_float(settings, "missed_limit_cooldown_candles", checks, 0, 20)
+    _range_float(settings, "max_spread_points", checks, 0, 100)
+    fill_mode = str(settings.get("backtest_limit_fill_mode", "CONSERVATIVE")).upper()
+    if fill_mode not in {"CONSERVATIVE", "SIMPLE", "STRICT"}:
+        _add(checks, "ERROR", "INVALID_BACKTEST_LIMIT_FILL_MODE", "Backtest limit fill mode must be CONSERVATIVE, SIMPLE, or STRICT.", {"value": fill_mode})
+    for index, message in enumerate(validate_fast_ohlcv_settings(settings), start=1):
+        _add(checks, "ERROR", f"INVALID_FAST_OHLCV_RELATIONSHIP_{index}", message)
     _float_setting(settings, "bullish_threshold", checks)
     _float_setting(settings, "bearish_threshold", checks)
     _float_setting(settings, "rsi_bull", checks)
     _float_setting(settings, "rsi_bear", checks)
     _float_setting(settings, "rsi_reversal_bullish", checks, default=70)
     _float_setting(settings, "rsi_reversal_bearish", checks, default=20)
+    _float_setting(settings, "bullish_reversal_condition", checks, default=-20)
+    _float_setting(settings, "bearish_reversal_condition", checks, default=10)
 
     interval = str(settings.get("chart_interval", "")).strip().lower()
     if not interval:
@@ -120,6 +154,39 @@ def _validate_market_data(nifty, options, token_map, checks):
 def _validate_broker(mode, zerodha, checks):
     if mode == "LIVE" and not zerodha:
         _add(checks, "ERROR", "ZERODHA_NOT_CONNECTED", "Connect Zerodha before real trading.")
+
+
+def _validate_live_margin_balance(settings, zerodha, checks):
+    if not zerodha:
+        return
+    try:
+        margin = zerodha.available_margin()
+    except Exception as exc:
+        classification = classify_runtime_error(exc, context="margin")
+        _add(
+            checks,
+            "ERROR",
+            "LIVE_MARGIN_FETCH_FAILED",
+            "Could not fetch Zerodha margin for real trading preflight.",
+            {
+                "error": str(exc),
+                "error_class": classification["class"],
+                "error_category": classification["category"],
+            },
+        )
+        return
+    if margin is None:
+        _add(checks, "ERROR", "LIVE_MARGIN_UNAVAILABLE", "Zerodha margin is unavailable for real trading preflight.")
+        return
+    try:
+        margin_value = float(margin)
+    except (TypeError, ValueError):
+        _add(checks, "ERROR", "INVALID_LIVE_MARGIN", "Zerodha margin must be numeric.", {"value": margin})
+        return
+    if margin_value <= 0:
+        _add(checks, "ERROR", "INVALID_LIVE_MARGIN", "Zerodha margin must be greater than zero.", {"value": margin_value})
+        return
+    settings["balance"] = margin_value
 
 
 def _validate_market_hours(settings, mode, checks, now):

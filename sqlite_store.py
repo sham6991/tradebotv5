@@ -92,7 +92,11 @@ class TradingStore:
                     is_partial_fill INTEGER,
                     order_status TEXT,
                     entry_price REAL,
-                    buy_score REAL,
+                    early_score REAL,
+                    entry_type TEXT,
+                    final_decision TEXT,
+                    decision_reason TEXT,
+                    rejection_reason TEXT,
                     exit_price REAL,
                     exit_reason TEXT,
                     target_price REAL,
@@ -107,6 +111,28 @@ class TradingStore:
                 """
             )
             self._ensure_order_history_columns(conn)
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS candles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    session_id TEXT,
+                    stream_name TEXT NOT NULL,
+                    instrument TEXT,
+                    tradingsymbol TEXT,
+                    option_type TEXT,
+                    candle_time TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    data TEXT,
+                    UNIQUE(session_id, stream_name, candle_time)
+                )
+                """
+            )
+            self._ensure_candle_columns(conn)
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS state (
@@ -154,10 +180,38 @@ class TradingStore:
             "pending_quantity": "INTEGER",
             "cancelled_quantity": "INTEGER",
             "is_partial_fill": "INTEGER",
+            "early_score": "REAL",
+            "entry_type": "TEXT",
+            "final_decision": "TEXT",
+            "decision_reason": "TEXT",
+            "rejection_reason": "TEXT",
         }
         for column, definition in additions.items():
             if column not in columns:
                 conn.execute(f"ALTER TABLE order_history ADD COLUMN {column} {definition}")
+
+    def _ensure_candle_columns(self, conn):
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(candles)").fetchall()
+        }
+        additions = {
+            "session_id": "TEXT",
+            "stream_name": "TEXT",
+            "instrument": "TEXT",
+            "tradingsymbol": "TEXT",
+            "option_type": "TEXT",
+            "candle_time": "TEXT",
+            "open": "REAL",
+            "high": "REAL",
+            "low": "REAL",
+            "close": "REAL",
+            "volume": "REAL",
+            "data": "TEXT",
+        }
+        for column, definition in additions.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE candles ADD COLUMN {column} {definition}")
 
     def log_event(self, level, message, payload=None):
         payload = self._with_settings_profile(payload)
@@ -259,7 +313,11 @@ class TradingStore:
             "is_partial_fill": self._bool_int(event.get("Is Partial Fill")),
             "order_status": event.get("Order Status", ""),
             "entry_price": self._float_or_none(event.get("Entry Price")),
-            "buy_score": self._float_or_none(event.get("Buy Score")),
+            "early_score": self._float_or_none(event.get("Early Score")),
+            "entry_type": event.get("Entry Type", ""),
+            "final_decision": event.get("Final Decision", ""),
+            "decision_reason": event.get("Decision Reason", ""),
+            "rejection_reason": event.get("Rejection Reason", ""),
             "exit_price": self._float_or_none(event.get("Exit Price")),
             "exit_reason": event.get("Exit Reason", ""),
             "target_price": self._float_or_none(event.get("Target Price")),
@@ -278,6 +336,50 @@ class TradingStore:
                 f"INSERT INTO order_history({columns}) VALUES ({placeholders})",
                 [self._now(), *row.values()],
             )
+
+    def log_candle(self, stream_name, row, metadata=None):
+        metadata = metadata or {}
+        payload = self._candle_payload(row, metadata)
+        candle_time = format_datetime_value(payload.get("datetime") or payload.get("date") or payload.get("time"))
+        if not candle_time:
+            return False
+        record = {
+            "session_id": self.settings.get("session_id", ""),
+            "stream_name": str(stream_name or ""),
+            "instrument": metadata.get("instrument", ""),
+            "tradingsymbol": metadata.get("tradingsymbol", metadata.get("instrument", "")),
+            "option_type": metadata.get("option_type", ""),
+            "candle_time": candle_time,
+            "open": self._float_or_none(payload.get("open")),
+            "high": self._float_or_none(payload.get("high")),
+            "low": self._float_or_none(payload.get("low")),
+            "close": self._float_or_none(payload.get("close")),
+            "volume": self._float_or_none(payload.get("volume")),
+            "data": self._json(payload),
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO candles(
+                    created_at, session_id, stream_name, instrument, tradingsymbol,
+                    option_type, candle_time, open, high, low, close, volume, data
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id, stream_name, candle_time) DO UPDATE SET
+                    created_at = excluded.created_at,
+                    instrument = excluded.instrument,
+                    tradingsymbol = excluded.tradingsymbol,
+                    option_type = excluded.option_type,
+                    open = excluded.open,
+                    high = excluded.high,
+                    low = excluded.low,
+                    close = excluded.close,
+                    volume = excluded.volume,
+                    data = excluded.data
+                """,
+                [self._now(), *record.values()],
+            )
+        return True
 
     def save_state(self, key, data):
         with self._connect() as conn:
@@ -306,6 +408,16 @@ class TradingStore:
 
     def _json(self, value):
         return json.dumps(value or {}, default=str)
+
+    def _candle_payload(self, row, metadata=None):
+        if hasattr(row, "to_dict"):
+            payload = row.to_dict()
+        elif isinstance(row, dict):
+            payload = dict(row)
+        else:
+            payload = {}
+        payload.update(metadata or {})
+        return payload
 
     def _now(self):
         return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -414,6 +526,9 @@ class AsyncTradingStore:
 
     def log_order_history(self, *args, **kwargs):
         return self._enqueue("log_order_history", args, kwargs)
+
+    def log_candle(self, *args, **kwargs):
+        return self._enqueue("log_candle", args, kwargs)
 
     def save_state(self, *args, **kwargs):
         return self.store.save_state(*args, **kwargs)

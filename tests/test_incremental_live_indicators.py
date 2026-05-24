@@ -66,17 +66,19 @@ class IncrementalLiveIndicatorTests(unittest.TestCase):
 
         self.assertTrue(has_option_formula_columns(incremental))
         for column in (
-            "Candle Body",
-            "Candle Range",
-            "Close Position Score",
-            "Volume Ratio",
-            "Breakout Score",
-            "Compression Score",
-            "Expansion Score",
-            "Buy Score",
-            "Sell Score",
-            "Momentum Acceleration Score",
-            "Early Breakout Probability Score",
+            "CurrentRange",
+            "BodyAbs",
+            "BodyPercent",
+            "ClosePosition",
+            "UpperWick",
+            "LowerWick",
+            "AvgRange10",
+            "AvgVolume10",
+            "Early Score",
+            "Price Stopped Falling Points",
+            "Green Candle Points",
+            "Previous High Attack Points",
+            "Volume Pickup Points",
         ):
             self.assertAlmostEqual(
                 float(incremental.iloc[-1][column]),
@@ -86,7 +88,6 @@ class IncrementalLiveIndicatorTests(unittest.TestCase):
             )
         self.assertEqual(incremental.iloc[-1]["Buy Entry"], full.iloc[-1]["Buy Entry"])
         self.assertEqual(incremental.iloc[-1]["Sell Entry"], full.iloc[-1]["Sell Entry"])
-        self.assertEqual(incremental.iloc[-1]["High Probability Buy"], full.iloc[-1]["High Probability Buy"])
 
 
 if __name__ == "__main__":

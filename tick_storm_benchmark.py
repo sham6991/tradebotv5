@@ -75,7 +75,7 @@ def run_benchmark(total_ticks, batch_size):
         "bearish_threshold": -15,
         "rsi_bull": 55,
         "rsi_bear": 45,
-        "min_buy_score": 60,
+        "buy_limit_score_low": 40,
         "max_daily_loss": 0,
         "max_daily_profit": 0,
         "max_consecutive_losses": 0,

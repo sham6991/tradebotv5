@@ -18,17 +18,17 @@ def entry_signal(option):
         "nifty_signal_index": 1,
         "target": 110,
         "stoploss": 95,
-        "score_row": {"Buy Score": 85, "Buy Entry": "BUY"},
+        "score_row": {"Early Score": 85, "Buy Entry": "BUY"},
     }
 
 
 class ClosedTradeUiStateTests(unittest.TestCase):
     def test_stoploss_close_clears_active_orders_and_forces_complete_snapshot(self):
         updates = []
-        option = option_frame("CE", buy_score=85, exit_mode="stoploss", count=4)
+        option = option_frame("CE", entry_score=85, exit_mode="stoploss", count=4)
         session = LivePaperSession(
             nifty_frame("bullish", count=4),
-            [option, option_frame("PE", buy_score=20, count=4)],
+            [option, option_frame("PE", entry_score=20, count=4)],
             {1: "NIFTY", 2: "OPTION_0", 3: "OPTION_1"},
             settings(
                 entry_offset=0,

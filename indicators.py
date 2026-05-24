@@ -94,7 +94,7 @@ def clean_and_add_indicators(df):
         "Expansion Score",
         "Bull Trap penalty",
         "Bear Trap Penalty",
-        "Buy Score",
+        "Early Score",
         "Sell Score",
         "Momentum Acceleration Score",
         "Early Breakout Probability Score",

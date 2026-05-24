@@ -42,7 +42,7 @@ class SessionAuditTests(unittest.TestCase):
             self.assertEqual(audit["order_action_counts"]["BUY"], 1)
             self.assertEqual(audit["order_status_counts"]["OPEN"], 1)
             self.assertTrue(audit["settings_profile"]["settings_hash"])
-            self.assertTrue(audit["settings_profile"]["settings_version"].startswith("settings-v1-"))
+            self.assertTrue(audit["settings_profile"]["settings_version"].startswith("settings-v2-"))
 
     def test_write_session_audit_writes_json_file(self):
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:

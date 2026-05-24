@@ -1,14 +1,29 @@
-try:
-    from kiteconnect import KiteConnect, KiteTicker
-except ImportError:  # Allows the app to run before kiteconnect is installed.
-    KiteConnect = None
-    KiteTicker = None
-
 import pandas as pd
+
+
+KiteConnect = None
+KiteTicker = None
+
+
+def _load_kiteconnect():
+    global KiteConnect, KiteTicker
+    if KiteConnect is not None and KiteTicker is not None:
+        return
+
+    try:
+        from kiteconnect import KiteConnect as ImportedKiteConnect, KiteTicker as ImportedKiteTicker
+    except ImportError:
+        KiteConnect = None
+        KiteTicker = None
+        return
+
+    KiteConnect = ImportedKiteConnect
+    KiteTicker = ImportedKiteTicker
 
 
 class ZerodhaClient:
     def __init__(self, api_key, api_secret=None, access_token=None):
+        _load_kiteconnect()
         if KiteConnect is None:
             raise ImportError(
                 "kiteconnect is not installed. Run: "
@@ -111,6 +126,8 @@ class ZerodhaClient:
         validity=None,
         tag=None
     ):
+        if self._looks_like_option_symbol(tradingsymbol):
+            raise ValueError("SL-M is blocked for option stoploss orders; use SL with trigger and limit price.")
         transaction = self._transaction_type(transaction_type)
         order_type_slm = getattr(self.kite, "ORDER_TYPE_SLM", "SL-M")
 
@@ -127,11 +144,89 @@ class ZerodhaClient:
             tag=tag
         )
 
+    def place_stoploss_limit_order(
+        self,
+        tradingsymbol,
+        transaction_type,
+        quantity,
+        trigger_price,
+        price,
+        exchange=None,
+        product=None,
+        variety=None,
+        validity=None,
+        tag=None
+    ):
+        transaction = self._transaction_type(transaction_type)
+        order_type_sl = getattr(self.kite, "ORDER_TYPE_SL", "SL")
+
+        return self.kite.place_order(
+            variety=variety or self.kite.VARIETY_REGULAR,
+            exchange=exchange or self.kite.EXCHANGE_NFO,
+            tradingsymbol=tradingsymbol,
+            transaction_type=transaction,
+            quantity=int(quantity),
+            product=product or getattr(self.kite, "PRODUCT_NRML", "NRML"),
+            order_type=order_type_sl,
+            trigger_price=float(trigger_price),
+            price=float(price),
+            validity=validity or self.kite.VALIDITY_DAY,
+            tag=tag
+        )
+
     def cancel_order(self, order_id, variety=None):
         return self.kite.cancel_order(
             variety=variety or self.kite.VARIETY_REGULAR,
             order_id=order_id
         )
+
+    def modify_stoploss_market_order(
+        self,
+        order_id,
+        trigger_price,
+        variety=None,
+        quantity=None,
+        price=None,
+        order_type=None,
+        validity=None,
+    ):
+        payload = {
+            "variety": variety or self.kite.VARIETY_REGULAR,
+            "order_id": order_id,
+            "trigger_price": float(trigger_price),
+        }
+        if quantity not in ("", None):
+            payload["quantity"] = int(quantity)
+        if price not in ("", None):
+            payload["price"] = float(price)
+        if order_type not in ("", None):
+            payload["order_type"] = order_type
+        if validity not in ("", None):
+            payload["validity"] = validity
+        return self.kite.modify_order(**payload)
+
+    def modify_stoploss_limit_order(
+        self,
+        order_id,
+        trigger_price,
+        price,
+        variety=None,
+        quantity=None,
+        order_type=None,
+        validity=None,
+    ):
+        payload = {
+            "variety": variety or self.kite.VARIETY_REGULAR,
+            "order_id": order_id,
+            "order_type": order_type or getattr(self.kite, "ORDER_TYPE_SL", "SL"),
+            "trigger_price": float(trigger_price),
+            "price": float(price),
+        }
+        if quantity not in ("", None):
+            payload["quantity"] = int(quantity)
+        if validity not in ("", None):
+            payload["validity"] = validity
+        return self.kite.modify_order(**payload)
 
     def place_equity_market_order(self, tradingsymbol, transaction_type, quantity):
         return self.place_market_order(
@@ -298,6 +393,10 @@ class ZerodhaClient:
             self._instrument_cache[exchange] = self.kite.instruments(exchange)
         return self._instrument_cache[exchange]
 
+    def _looks_like_option_symbol(self, tradingsymbol):
+        symbol = str(tradingsymbol or "").strip().upper()
+        return symbol.endswith(("CE", "PE")) and any(character.isdigit() for character in symbol)
+
     def historical_candles(self, instrument_token, from_date, to_date, interval="5minute"):
         candles = self.kite.historical_data(
             instrument_token=int(instrument_token),
@@ -317,6 +416,8 @@ class ZerodhaClient:
         on_reconnect=None,
         on_noreconnect=None,
     ):
+        if KiteTicker is None:
+            _load_kiteconnect()
         if KiteTicker is None:
             raise ImportError(
                 "KiteTicker is not available. Run: "

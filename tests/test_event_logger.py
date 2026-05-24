@@ -52,7 +52,7 @@ def signal(option):
         "entry": 100,
         "entry_offset": -2,
         "entry_index": 0,
-        "score_row": {"Buy Score": 85, "Buy Entry": "BUY"},
+        "score_row": {"Early Score": 85, "Buy Entry": "BUY"},
     }
 
 

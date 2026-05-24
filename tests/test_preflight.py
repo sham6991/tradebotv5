@@ -37,9 +37,24 @@ def settings():
         "bearish_threshold": -15,
         "rsi_bull": 55,
         "rsi_bear": 45,
-        "min_buy_score": 60,
+        "buy_limit_score_low": 40,
         "square_off_time": "15:20",
     }
+
+
+class FakeMarginClient:
+    def __init__(self, margin):
+        self.margin = margin
+        self.calls = 0
+
+    def available_margin(self):
+        self.calls += 1
+        return self.margin
+
+
+class PaperMarginShouldNotBeFetched:
+    def available_margin(self):
+        raise AssertionError("Paper preflight must not fetch Zerodha margin")
 
 
 class PreflightTests(unittest.TestCase):
@@ -72,6 +87,22 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("INVALID_LOT_SIZE", {item["code"] for item in report.errors})
         self.assertIn("INVALID_SQUARE_OFF_TIME", {item["code"] for item in report.errors})
 
+    def test_trailing_stop_requires_profit_points_above_ten(self):
+        bad_settings = settings()
+        bad_settings["profit_points"] = 10
+        bad_settings["trailing_sl_enabled"] = True
+
+        report = validate_live_preflight(
+            frame(),
+            [frame()],
+            {1: "NIFTY", 2: "OPTION_0"},
+            bad_settings,
+            mode="PAPER",
+        )
+
+        self.assertFalse(report.ok)
+        self.assertTrue(any("Trailing Stop Loss requires" in item["message"] for item in report.errors))
+
     def test_missing_market_inputs_fail_preflight(self):
         report = validate_live_preflight(
             pd.DataFrame(),
@@ -101,6 +132,54 @@ class PreflightTests(unittest.TestCase):
         self.assertFalse(report.ok)
         self.assertIn("ZERODHA_NOT_CONNECTED", {item["code"] for item in report.errors})
         self.assertIn("OUTSIDE_MARKET_HOURS", {item["code"] for item in report.warnings})
+
+    def test_real_mode_fetches_zerodha_margin_for_balance_preflight(self):
+        live_settings = settings()
+        live_settings["balance"] = 0
+        client = FakeMarginClient(125000)
+
+        report = validate_live_preflight(
+            frame(),
+            [frame()],
+            {1: "NIFTY", 2: "OPTION_0"},
+            live_settings,
+            mode="LIVE",
+            zerodha=client,
+            now=datetime(2026, 5, 10, 10, 0),
+        )
+
+        self.assertTrue(report.ok)
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(live_settings["balance"], 125000.0)
+
+    def test_real_mode_fails_when_zerodha_margin_is_unavailable(self):
+        live_settings = settings()
+        live_settings["balance"] = 0
+
+        report = validate_live_preflight(
+            frame(),
+            [frame()],
+            {1: "NIFTY", 2: "OPTION_0"},
+            live_settings,
+            mode="LIVE",
+            zerodha=FakeMarginClient(None),
+            now=datetime(2026, 5, 10, 10, 0),
+        )
+
+        self.assertFalse(report.ok)
+        self.assertIn("LIVE_MARGIN_UNAVAILABLE", {item["code"] for item in report.errors})
+
+    def test_paper_mode_does_not_fetch_zerodha_margin(self):
+        report = validate_live_preflight(
+            frame(),
+            [frame()],
+            {1: "NIFTY", 2: "OPTION_0"},
+            settings(),
+            mode="PAPER",
+            zerodha=PaperMarginShouldNotBeFetched(),
+        )
+
+        self.assertTrue(report.ok)
 
     def test_executor_blocks_bad_preflight_before_starting_feed(self):
         executor = Executor()

@@ -115,6 +115,15 @@ def timestamp_key(value):
         return None
 
 
+def normalise_trend_set(value):
+    text = str(value or "Auto").strip().upper()
+    if text in {"BULLISH", "BULL", "CE"}:
+        return "BULLISH"
+    if text in {"BEARISH", "BEAR", "PE"}:
+        return "BEARISH"
+    return "AUTO"
+
+
 def build_datetime_index_map(df):
     mapping = {}
     keys = []
@@ -229,11 +238,19 @@ class TradingEngine:
     def mark_trade_complete(self, exit_index):
         self.cooldown_until = max(self.cooldown_until, int(exit_index) + self.cooldown)
 
-    def evaluate_option_signal(self, option_df, i, settings=None, trend=""):
+    def evaluate_option_signal(self, option_df, i, settings=None, trend="", option_index=None):
         if i >= len(option_df):
             return {"buy_entry": "", "score_row": {}}
 
-        min_buy_score = float(getattr(self, "min_buy_score", 75))
+        settings = dict(settings or {})
+        if option_index is not None:
+            spread_by_option = settings.get("_fast_spread_by_option") or {}
+            ltp_by_option = settings.get("_fast_ltp_by_option") or {}
+            if option_index in spread_by_option:
+                settings["_fast_spread_points"] = spread_by_option.get(option_index)
+            if option_index in ltp_by_option:
+                settings["_fast_ltp"] = ltp_by_option.get(option_index)
+        entry_score_threshold = float(getattr(self, "entry_score_threshold", settings.get("buy_limit_score_low", 40)))
         expected_settings = option_scoring_settings(settings)
         if option_df.attrs.get("_option_scoring_settings") != expected_settings:
             option_df = ensure_option_formula_columns(option_df, settings)
@@ -241,7 +258,7 @@ class TradingEngine:
             option_df,
             i,
             data_kind="option",
-            min_buy_score=min_buy_score,
+            entry_score_threshold=entry_score_threshold,
             scoring_settings=settings,
         )
         if not score:
@@ -268,7 +285,9 @@ class TradingEngine:
         rsi_bear = float(settings.get("rsi_bear", 45))
         rsi_reversal_bullish = float(settings.get("rsi_reversal_bullish", 70))
         rsi_reversal_bearish = float(settings.get("rsi_reversal_bearish", 20))
-        self.min_buy_score = float(settings.get("min_buy_score", 75))
+        bullish_reversal_condition = float(settings.get("bullish_reversal_condition", -20))
+        bearish_reversal_condition = float(settings.get("bearish_reversal_condition", 10))
+        self.entry_score_threshold = float(settings.get("buy_limit_score_low", 40))
         trend, entry_remark = market_trend_signal(
             nifty.iloc[i],
             bullish_threshold,
@@ -277,8 +296,17 @@ class TradingEngine:
             rsi_bear,
             rsi_reversal_bullish,
             rsi_reversal_bearish,
+            bullish_reversal_condition,
+            bearish_reversal_condition,
         )
-        if trend == "SIDEWAYS":
+        trend_set = normalise_trend_set(settings.get("trend_set", "Auto"))
+        if trend_set == "BULLISH":
+            trend = "BULLISH"
+            entry_remark = "Trend Set Bullish override"
+        elif trend_set == "BEARISH":
+            trend = "BEARISH"
+            entry_remark = "Trend Set Bearish override"
+        elif trend == "SIDEWAYS":
             self.last_skip_reason = "sideways_trend"
             return None
         wanted_type = "CE" if trend == "BULLISH" else "PE"
@@ -291,24 +319,30 @@ class TradingEngine:
             self.last_skip_reason = "missing_aligned_option_candle"
             return None
 
-        evaluated = self.evaluate_option_signal(option_df, option_i, settings, trend)
+        evaluated = self.evaluate_option_signal(option_df, option_i, settings, trend, option_index=option_index)
         buy_entry = evaluated["buy_entry"]
 
         if buy_entry != "BUY":
             reason = evaluated["score_row"].get("Entry Block Reason", "")
             self.last_skip_reason = (
                 reason
-                or f"buy_score_below_{self.min_buy_score}"
-                f"({evaluated['score_row'].get('Buy Score', 0)})"
+                or f"early_score_below_{self.entry_score_threshold}"
+                f"({evaluated['score_row'].get('Early Score', 0)})"
             )
             return None
-        if option_i + 1 >= len(option_df):
-            self.last_skip_reason = "next_candle_missing"
-            return None
-
-        next_open = float(option_df.iloc[option_i + 1].get("open", option_df.iloc[option_i + 1]["close"]))
-        entry_offset = float(settings.get("entry_offset", -2))
-        entry_price = max(next_open + entry_offset, 0)
+        score_row = evaluated["score_row"]
+        entry_type = str(score_row.get("Entry Type", "") or "").upper()
+        order_type = "LIMIT" if entry_type == "BUY LIMIT" else "MARKET"
+        entry_index = option_i
+        entry_row = option_df.iloc[entry_index]
+        entry_base = float(entry_row.get("close", entry_row.get("open", 0)))
+        limit_offset = float(score_row.get("Limit Offset", 0) or 0)
+        if order_type == "LIMIT":
+            entry_price = float(score_row.get("Buy Limit Price", 0) or 0)
+            entry_offset = -limit_offset
+        else:
+            entry_price = max(entry_base, 0)
+            entry_offset = 0
         metadata = option_metadata(option_df, instrument or "")
         self.last_skip_reason = "entry_created"
         return {
@@ -321,11 +355,15 @@ class TradingEngine:
             "expiry": metadata["expiry"],
             "entry": entry_price,
             "entry_offset": entry_offset,
+            "entry_order_type": order_type,
+            "entry_type": entry_type,
+            "limit_offset": limit_offset,
+            "limit_validity_seconds": score_row.get("Limit Validity Seconds", settings.get("buy_limit_validity_seconds", 30)),
             "signal_index": option_i,
             "nifty_signal_index": i,
-            "entry_index": option_i + 1,
+            "entry_index": entry_index,
             "target": entry_price + float(settings["profit_points"]),
             "stoploss": entry_price - float(settings["safety_points"]),
-            "score_row": evaluated["score_row"],
+            "score_row": score_row,
             "entry_remark": entry_remark,
         }

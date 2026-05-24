@@ -1,4 +1,3 @@
-import json
 import os
 from datetime import datetime
 import tkinter as tk
@@ -8,93 +7,33 @@ import pandas as pd
 
 from engine import parse_option_metadata_from_text
 from indicators import clean_and_add_indicators
+from settings_service import (
+    DEFAULT_SETTINGS,
+    SETTING_LABELS,
+    SETTINGS_PROFILE_PATH,
+    interval_label,
+    load_settings_profiles,
+    normalise_interval,
+    normalise_order_product,
+    normalise_trend_set,
+    parse_runtime_setting_value,
+    save_settings_profile,
+    setting_value,
+    settings_from_values,
+)
+from settings_validation import raise_for_fast_ohlcv_settings
 from strategy import ensure_option_formula_columns
-from ui_theme import INTERVAL_CHOICES, INTERVAL_VALUES, PALETTE, configure_theme
+from ui_theme import INTERVAL_CHOICES, PALETTE, configure_theme
 
-DEFAULT_SETTINGS = {
-    "balance": "100000",
-    "lot_size": "1",
-    "max_trades": "5",
-    "profit_points": "20",
-    "safety_points": "10",
-    "entry_offset": "-2",
-    "time_exit": "10",
-    "cooldown": "5",
-    "chart_interval": "3 min",
-    "bullish_threshold": "16",
-    "bearish_threshold": "-15",
-    "rsi_bull": "55",
-    "rsi_bear": "45",
-    "rsi_reversal_bullish": "70",
-    "rsi_reversal_bearish": "20",
-    "watch_buy_score": "60",
-    "min_buy_score": "75",
-    "strong_buy_score": "80",
-    "min_volume_ratio": "1.2",
-    "min_option_volume": "0",
-    "aggression_score_cap": "55",
-    "compression_range_ratio": "0.7",
-    "expansion_range_ratio": "1.8",
-    "max_chase_range_ratio": "2.5",
-    "failed_breakout_penalty": "-15",
-    "early_breakout_min_score": "60",
-    "max_daily_loss": "0",
-    "max_daily_profit": "0",
-    "max_consecutive_losses": "0",
-    "square_off_time": "15:20",
-    "order_product": "NRML",
+
+BOOLEAN_SETTING_KEYS = {
+    "fast_ohlcv_entry_enabled",
+    "enable_chop_filter",
+    "aggressive_live_entry_enabled",
+    "one_entry_attempt_per_candle",
+    "trailing_sl_enabled",
+    "live_option_market_entry_as_limit_enabled",
 }
-
-SETTINGS_PROFILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "settings_profiles.json")
-
-SETTING_LABELS = {
-    "balance": "Balance",
-    "lot_size": "Lots",
-    "max_trades": "Max Trades",
-    "profit_points": "Profit Points",
-    "safety_points": "Safety Points",
-    "entry_offset": "Entry Offset",
-    "time_exit": "Time Exit",
-    "cooldown": "Cooldown",
-    "chart_interval": "Chart Interval",
-    "bullish_threshold": "Bullish Threshold",
-    "bearish_threshold": "Bearish Threshold",
-    "rsi_bull": "RSI Bull",
-    "rsi_bear": "RSI Bear",
-    "rsi_reversal_bullish": "RSI Reversal Bullish",
-    "rsi_reversal_bearish": "RSI Reversal Bearish",
-    "watch_buy_score": "Watch Buy Score",
-    "min_buy_score": "Entry Buy Score",
-    "strong_buy_score": "Strong Buy Score",
-    "min_volume_ratio": "Min Volume Ratio",
-    "min_option_volume": "Min Option Volume",
-    "aggression_score_cap": "Aggression Score Cap",
-    "compression_range_ratio": "Compression Range Ratio",
-    "expansion_range_ratio": "Expansion Range Ratio",
-    "max_chase_range_ratio": "Max Chase Range Ratio",
-    "failed_breakout_penalty": "Failed Breakout Penalty",
-    "early_breakout_min_score": "Early Breakout Min Score",
-    "max_daily_loss": "Max Daily Loss",
-    "max_daily_profit": "Max Daily Profit",
-    "max_consecutive_losses": "Max Loss Streak",
-    "square_off_time": "Square Off Time",
-    "order_product": "Order Product",
-}
-
-
-def setting_value(values, key):
-    value = (values or {}).get(key, DEFAULT_SETTINGS.get(key, ""))
-    if value is None or str(value).strip() == "":
-        return DEFAULT_SETTINGS.get(key, "")
-    return value
-
-
-def normalized_settings_profile(values):
-    values = values or {}
-    return {
-        **values,
-        **{key: setting_value(values, key) for key in DEFAULT_SETTINGS},
-    }
 
 
 class SharedUIMixin:
@@ -356,23 +295,16 @@ class SharedUIMixin:
         return field
 
     def _interval_label(self, value):
-        normalised = self._normalise_interval(value)
-        return {
-            "minute": "1 min",
-            "2minute": "2 min",
-            "3minute": "3 min",
-            "5minute": "5 min",
-        }.get(normalised, "3 min")
+        return interval_label(value)
 
     def _normalise_interval(self, value):
-        text = str(value or "").strip()
-        return INTERVAL_VALUES.get(text, INTERVAL_VALUES.get(text.lower(), "3minute"))
+        return normalise_interval(value)
 
     def _normalise_order_product(self, value):
-        text = str(value or "NRML").strip().upper()
-        if text in ("MIS", "INTRADAY"):
-            return "MIS"
-        return "NRML"
+        return normalise_order_product(value)
+
+    def _normalise_trend_set(self, value):
+        return normalise_trend_set(value)
 
     def _order_product_field(self, frame, text, default="NRML", row=0, column=1, width=18):
         tk.Label(frame, text=text, bg=frame["bg"], fg=PALETTE["muted"], font=("Segoe UI", 9)).grid(
@@ -380,6 +312,15 @@ class SharedUIMixin:
         )
         field = ttk.Combobox(frame, width=width, values=("NRML", "MIS"), state="readonly")
         field.set(self._normalise_order_product(default))
+        field.grid(row=row, column=column, pady=3, padx=6, sticky="w")
+        return field
+
+    def _trend_set_field(self, frame, text, default="Auto", row=0, column=1, width=18):
+        tk.Label(frame, text=text, bg=frame["bg"], fg=PALETTE["muted"], font=("Segoe UI", 9)).grid(
+            row=row, column=column - 1, pady=3, padx=6, sticky="e"
+        )
+        field = ttk.Combobox(frame, width=width, values=("Auto", "Bullish", "Bearish"), state="readonly")
+        field.set(self._normalise_trend_set(default))
         field.grid(row=row, column=column, pady=3, padx=6, sticky="w")
         return field
 
@@ -474,32 +415,59 @@ class SharedUIMixin:
             "max_trades": self._field(frame, "Max Trades", "5", start_row + 1, column=1),
             "profit_points": self._field(frame, "Profit Points", "20", start_row + 1, column=4),
             "safety_points": self._field(frame, "Safety Points", "10", start_row + 2, column=1),
-            "entry_offset": self._field(frame, "Entry Offset", "-2", start_row + 2, column=4),
-            "time_exit": self._field(frame, "Time Exit (candles)", "10", start_row + 3, column=1),
-            "cooldown": self._field(frame, "Cooldown", "5", start_row + 3, column=4),
-            "chart_interval": self._interval_field(frame, "Chart Interval", "3 min", start_row + 4, column=1),
-            "bullish_threshold": self._field(frame, "Bullish Threshold", "16", start_row + 4, column=4),
-            "bearish_threshold": self._field(frame, "Bearish Threshold", "-15", start_row + 5, column=1),
-            "rsi_bull": self._field(frame, "RSI Bull", "55", start_row + 5, column=4),
-            "rsi_bear": self._field(frame, "RSI Bear", "45", start_row + 6, column=1),
-            "rsi_reversal_bullish": self._field(frame, "RSI Reversal Bullish", "70", start_row + 6, column=4),
-            "rsi_reversal_bearish": self._field(frame, "RSI Reversal Bearish", "20", start_row + 7, column=1),
-            "watch_buy_score": self._field(frame, "Watch Buy Score", "60", start_row + 7, column=4),
-            "min_buy_score": self._field(frame, "Entry Buy Score", "75", start_row + 8, column=1),
-            "strong_buy_score": self._field(frame, "Strong Buy Score", "80", start_row + 8, column=4),
-            "min_volume_ratio": self._field(frame, "Min Volume Ratio", "1.2", start_row + 9, column=1),
-            "min_option_volume": self._field(frame, "Min Option Volume", "0", start_row + 9, column=4),
-            "aggression_score_cap": self._field(frame, "Aggression Score Cap", "55", start_row + 10, column=1),
-            "max_chase_range_ratio": self._field(frame, "Max Chase Range Ratio", "2.5", start_row + 10, column=4),
-            "compression_range_ratio": self._field(frame, "Compression Range Ratio", "0.7", start_row + 11, column=1),
-            "expansion_range_ratio": self._field(frame, "Expansion Range Ratio", "1.8", start_row + 11, column=4),
-            "failed_breakout_penalty": self._field(frame, "Failed Breakout Penalty", "-15", start_row + 12, column=1),
-            "early_breakout_min_score": self._field(frame, "Early Breakout Min Score", "60", start_row + 12, column=4),
-            "max_daily_loss": self._field(frame, "Max Daily Loss", "0", start_row + 13, column=1),
-            "max_daily_profit": self._field(frame, "Max Daily Profit", "0", start_row + 13, column=4),
-            "max_consecutive_losses": self._field(frame, "Max Loss Streak", "0", start_row + 14, column=1),
-            "square_off_time": self._field(frame, "Square Off Time", "15:20", start_row + 14, column=4),
-            "order_product": self._order_product_field(frame, "Order Product", "NRML", start_row + 15, column=1),
+            "time_exit": self._field(frame, "Time Exit (candles)", "10", start_row + 2, column=4),
+            "cooldown": self._field(frame, "Cooldown", "5", start_row + 3, column=1),
+            "chart_interval": self._interval_field(frame, "Chart Interval", "3 min", start_row + 3, column=4),
+            "trend_set": self._trend_set_field(frame, "Trend Set", "Auto", start_row + 4, column=1),
+            "bullish_threshold": self._field(frame, "Bullish Threshold", "16", start_row + 5, column=1),
+            "bearish_threshold": self._field(frame, "Bearish Threshold", "-15", start_row + 5, column=4),
+            "rsi_bull": self._field(frame, "RSI Bull", "55", start_row + 6, column=1),
+            "rsi_bear": self._field(frame, "RSI Bear", "45", start_row + 6, column=4),
+            "rsi_reversal_bullish": self._field(frame, "RSI Reversal Bullish", "70", start_row + 7, column=1),
+            "rsi_reversal_bearish": self._field(frame, "RSI Reversal Bearish", "20", start_row + 7, column=4),
+            "bullish_reversal_condition": self._field(frame, "Bullish Reversal Condition", "-20", start_row + 8, column=1),
+            "bearish_reversal_condition": self._field(frame, "Bearish Reversal Condition", "10", start_row + 8, column=4),
+            "buy_limit_score_low": self._field(frame, "Buy Limit Score Low", "40", start_row + 9, column=1),
+            "market_entry_score": self._field(frame, "Market Entry Score", "50", start_row + 9, column=4),
+            "minimum_body_percent": self._field(frame, "Min Body %", "20", start_row + 10, column=1),
+            "minimum_close_position": self._field(frame, "Min Close Position", "55", start_row + 10, column=4),
+            "market_entry_minimum_body_percent": self._field(frame, "Market Body %", "25", start_row + 11, column=1),
+            "market_entry_minimum_close_position": self._field(frame, "Market Close Position", "60", start_row + 11, column=4),
+            "trigger_upper_wick_max": self._field(frame, "Trigger Wick Max", "45", start_row + 12, column=1),
+            "hard_rejection_upper_wick_max": self._field(frame, "Hard Wick Max", "50", start_row + 12, column=4),
+            "volume_previous_multiplier": self._field(frame, "Prev Vol Mult", "0.80", start_row + 13, column=1),
+            "avg_volume_minimum_multiplier": self._field(frame, "Avg Vol Min", "0.50", start_row + 13, column=4),
+            "volume_pickup_avg_multiplier": self._field(frame, "Vol Pickup Avg", "0.70", start_row + 14, column=1),
+            "large_candle_multiplier": self._field(frame, "Large Candle Mult", "2.2", start_row + 14, column=4),
+            "move_from_low_max_multiplier": self._field(frame, "Move From Low Max", "1.10", start_row + 15, column=1),
+            "gap_spike_multiplier": self._field(frame, "Gap Spike Mult", "1.2", start_row + 15, column=4),
+            "buy_limit_offset_multiplier": self._field(frame, "Limit Offset Mult", "0.15", start_row + 16, column=1),
+            "minimum_offset": self._field(frame, "Minimum Offset", "1", start_row + 16, column=4),
+            "maximum_offset": self._field(frame, "Maximum Offset", "2", start_row + 17, column=1),
+            "buy_limit_validity_seconds": self._field(frame, "Limit Validity Sec", "30", start_row + 17, column=4),
+            "backtest_limit_fill_mode": self._field(frame, "Backtest Fill Mode", "CONSERVATIVE", start_row + 18, column=1),
+            "enable_chop_filter": self._field(frame, "Enable Chop Filter", "false", start_row + 18, column=4),
+            "aggressive_live_entry_enabled": self._field(frame, "Aggressive Live Entry", "false", start_row + 19, column=1),
+            "aggressive_entry_score": self._field(frame, "Aggressive Score", "50", start_row + 19, column=4),
+            "aggressive_upper_wick_max": self._field(frame, "Aggressive Wick Max", "35", start_row + 20, column=1),
+            "aggressive_minimum_body_percent": self._field(frame, "Aggressive Body %", "25", start_row + 20, column=4),
+            "aggressive_minimum_close_position": self._field(frame, "Aggressive Close Pos", "65", start_row + 21, column=1),
+            "aggressive_move_from_low_max_multiplier": self._field(frame, "Aggressive Move Max", "0.90", start_row + 21, column=4),
+            "aggressive_setup_score": self._field(frame, "Setup Forming Score", "40", start_row + 22, column=1),
+            "one_entry_attempt_per_candle": self._field(frame, "One Attempt/Candle", "true", start_row + 22, column=4),
+            "missed_limit_cooldown_candles": self._field(frame, "Missed Limit Cooldown", "0", start_row + 23, column=1),
+            "max_spread_points": self._field(frame, "Max Spread Points", "2.0", start_row + 23, column=4),
+            "chop_lookback_candles": self._field(frame, "Chop Lookback", "3", start_row + 24, column=1),
+            "chop_overlap_count": self._field(frame, "Chop Overlap Count", "2", start_row + 24, column=4),
+            "fast_ohlcv_entry_enabled": self._field(frame, "Fast OHLCV Entry", "true", start_row + 25, column=1),
+            "max_daily_loss": self._field(frame, "Max Daily Loss", "0", start_row + 26, column=1),
+            "max_daily_profit": self._field(frame, "Max Daily Profit", "0", start_row + 26, column=4),
+            "max_consecutive_losses": self._field(frame, "Max Loss Streak", "0", start_row + 27, column=1),
+            "square_off_time": self._field(frame, "Square Off Time", "15:20", start_row + 27, column=4),
+            "order_product": self._order_product_field(frame, "Order Product", "NRML", start_row + 28, column=1),
+            "stoploss_limit_buffer_points": self._field(frame, "Stoploss Limit Buffer", "2", start_row + 28, column=4),
+            "live_option_market_entry_as_limit_enabled": self._field(frame, "Market Entry As Limit", "false", start_row + 29, column=1),
+            "live_option_market_entry_limit_buffer_points": self._field(frame, "Market Entry Limit Buffer", "2", start_row + 29, column=4),
         }
         return fields
 
@@ -507,19 +475,7 @@ class SharedUIMixin:
         return dict(DEFAULT_SETTINGS)
 
     def _load_settings_profiles(self):
-        try:
-            with open(SETTINGS_PROFILE_PATH, "r", encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, json.JSONDecodeError):
-            data = {}
-        real_profile = data.get("real", {})
-        if not real_profile.get("zerodha_margin_fetched"):
-            real_profile = {**real_profile, "balance": "0"}
-        return {
-            "backtest": normalized_settings_profile(data.get("backtest", {})),
-            "paper": normalized_settings_profile(data.get("paper", {})),
-            "real": normalized_settings_profile(real_profile),
-        }
+        return load_settings_profiles(SETTINGS_PROFILE_PATH)
 
     def _profile_name_for_attr(self, attr_name: str) -> str:
         return {
@@ -529,11 +485,15 @@ class SharedUIMixin:
         }.get(attr_name, attr_name)
 
     def _save_settings_profile(self, attr_name, values):
-        os.makedirs(os.path.dirname(SETTINGS_PROFILE_PATH), exist_ok=True)
-        profiles = self._load_settings_profiles()
-        profiles[self._profile_name_for_attr(attr_name)] = dict(values)
-        with open(SETTINGS_PROFILE_PATH, "w", encoding="utf-8") as handle:
-            json.dump(profiles, handle, indent=2)
+        profile_name = self._profile_name_for_attr(attr_name)
+        saved = save_settings_profile(profile_name, values, SETTINGS_PROFILE_PATH)
+        if attr_name in {
+            "backtest_settings_values",
+            "paper_settings_values",
+            "real_settings_values",
+        }:
+            setattr(self, attr_name, saved)
+        return saved
 
     def _ensure_settings_values(self, attr_name):
         if not hasattr(self, attr_name):
@@ -545,53 +505,30 @@ class SharedUIMixin:
             value = setting_value(values, key)
             if key == "chart_interval":
                 value = self._interval_label(value)
+            if key == "trend_set":
+                value = self._normalise_trend_set(value)
             if key == "order_product":
                 value = self._normalise_order_product(value)
+            if key in BOOLEAN_SETTING_KEYS:
+                value = "Enabled" if self._setting_enabled(value) else "Disabled"
             self._set_field_value(field, str(value))
 
     def _settings_from_values(self, values):
-        values = {key: setting_value(values, key) for key in DEFAULT_SETTINGS}
-        return {
-            "balance": float(values["balance"]),
-            "lot_size": int(values["lot_size"]),
-            "max_trades": int(values["max_trades"]),
-            "profit_points": float(values["profit_points"]),
-            "safety_points": float(values["safety_points"]),
-            "entry_offset": float(values["entry_offset"]),
-            "time_exit": int(values["time_exit"]),
-            "cooldown": int(values["cooldown"]),
-            "chart_interval": self._normalise_interval(values["chart_interval"]),
-            "bullish_threshold": float(values["bullish_threshold"]),
-            "bearish_threshold": float(values["bearish_threshold"]),
-            "rsi_bull": float(values["rsi_bull"]),
-            "rsi_bear": float(values["rsi_bear"]),
-            "rsi_reversal_bullish": float(values.get("rsi_reversal_bullish", DEFAULT_SETTINGS["rsi_reversal_bullish"])),
-            "rsi_reversal_bearish": float(values.get("rsi_reversal_bearish", DEFAULT_SETTINGS["rsi_reversal_bearish"])),
-            "watch_buy_score": float(values.get("watch_buy_score", DEFAULT_SETTINGS["watch_buy_score"])),
-            "min_buy_score": float(values["min_buy_score"]),
-            "strong_buy_score": float(values.get("strong_buy_score", DEFAULT_SETTINGS["strong_buy_score"])),
-            "min_volume_ratio": float(values.get("min_volume_ratio", DEFAULT_SETTINGS["min_volume_ratio"])),
-            "min_option_volume": float(values.get("min_option_volume", DEFAULT_SETTINGS["min_option_volume"])),
-            "aggression_score_cap": float(values.get("aggression_score_cap", DEFAULT_SETTINGS["aggression_score_cap"])),
-            "compression_range_ratio": float(values.get("compression_range_ratio", DEFAULT_SETTINGS["compression_range_ratio"])),
-            "expansion_range_ratio": float(values.get("expansion_range_ratio", DEFAULT_SETTINGS["expansion_range_ratio"])),
-            "max_chase_range_ratio": float(values.get("max_chase_range_ratio", DEFAULT_SETTINGS["max_chase_range_ratio"])),
-            "failed_breakout_penalty": float(values.get("failed_breakout_penalty", DEFAULT_SETTINGS["failed_breakout_penalty"])),
-            "early_breakout_min_score": float(values.get("early_breakout_min_score", DEFAULT_SETTINGS["early_breakout_min_score"])),
-            "max_daily_loss": float(values["max_daily_loss"]),
-            "max_daily_profit": float(values["max_daily_profit"]),
-            "max_consecutive_losses": int(values["max_consecutive_losses"]),
-            "square_off_time": str(values["square_off_time"]).strip(),
-            "order_product": self._normalise_order_product(values.get("order_product", "NRML")),
-        }
+        return settings_from_values(values)
+
+    def _parse_setting_runtime_value(self, key, value):
+        return parse_runtime_setting_value(key, value)
+
+    def _setting_enabled(self, value):
+        return str(value or "").strip().lower() in {"1", "true", "yes", "on", "enabled"}
 
     def _open_settings_dialog(self, title, attr_name, on_save=None):
         current_values = dict(self._ensure_settings_values(attr_name))
 
         popup = tk.Toplevel(self.root)
         popup.title(title)
-        popup.geometry("760x720")
-        popup.minsize(700, 640)
+        popup.geometry("820x840")
+        popup.minsize(760, 720)
         popup.configure(bg=PALETTE["bg"])
         popup.transient(self.root)
         popup.grab_set()
@@ -603,7 +540,7 @@ class SharedUIMixin:
         self._populate_settings_fields(fields, current_values)
 
         actions = tk.Frame(body, bg=PALETTE["surface"])
-        actions.grid(row=20, column=0, columnspan=4, pady=(16, 0), sticky="w")
+        actions.grid(row=35, column=0, columnspan=4, pady=(16, 0), sticky="w")
 
         def save():
             try:
@@ -615,6 +552,8 @@ class SharedUIMixin:
                 key: (
                     self._interval_label(field.get())
                     if key == "chart_interval"
+                    else self._normalise_trend_set(field.get())
+                    if key == "trend_set"
                     else self._normalise_order_product(field.get())
                     if key == "order_product"
                     else field.get().strip()
@@ -641,6 +580,7 @@ class SharedUIMixin:
                 "Zerodha: not connected | Balance: not connected | "
                 f"Lots {values.get('lot_size')} | Max trades {values.get('max_trades')} | "
                 f"Target {values.get('profit_points')} | SL {values.get('safety_points')} | "
+                f"Trend Set {self._normalise_trend_set(values.get('trend_set', 'Auto'))} | "
                 f"Product {self._normalise_order_product(values.get('order_product', 'NRML'))}"
             )
         parts = [
@@ -649,49 +589,24 @@ class SharedUIMixin:
             f"Max trades {values.get('max_trades')}",
             f"Target {values.get('profit_points')}",
             f"SL {values.get('safety_points')}",
+            f"Trend Set {self._normalise_trend_set(values.get('trend_set', 'Auto'))}",
             f"RSI {values.get('rsi_bull')}/{values.get('rsi_bear')}",
             f"RSI reversal {values.get('rsi_reversal_bullish', DEFAULT_SETTINGS['rsi_reversal_bullish'])}/{values.get('rsi_reversal_bearish', DEFAULT_SETTINGS['rsi_reversal_bearish'])}",
-            f"Score {values.get('watch_buy_score', DEFAULT_SETTINGS['watch_buy_score'])}/{values.get('min_buy_score')}/{values.get('strong_buy_score', DEFAULT_SETTINGS['strong_buy_score'])}",
-            f"Vol {values.get('min_volume_ratio', DEFAULT_SETTINGS['min_volume_ratio'])} | Chase {values.get('max_chase_range_ratio', DEFAULT_SETTINGS['max_chase_range_ratio'])}x",
+            f"Reversal diff {values.get('bullish_reversal_condition', DEFAULT_SETTINGS['bullish_reversal_condition'])}/{values.get('bearish_reversal_condition', DEFAULT_SETTINGS['bearish_reversal_condition'])}",
+            f"Fast score {values.get('buy_limit_score_low')}/{values.get('market_entry_score')}",
+            f"Body/Close {values.get('minimum_body_percent')}%/{values.get('minimum_close_position')}%",
             f"Square-off {values.get('square_off_time')}",
             f"Product {self._normalise_order_product(values.get('order_product', 'NRML'))}",
         ]
         return " | ".join(parts)
 
     def _read_settings(self, fields):
-        return {
-            "balance": float(fields["balance"].get()),
-            "lot_size": int(fields["lot_size"].get()),
-            "max_trades": int(fields["max_trades"].get()),
-            "profit_points": float(fields["profit_points"].get()),
-            "safety_points": float(fields["safety_points"].get()),
-            "entry_offset": float(fields["entry_offset"].get()),
-            "time_exit": int(fields["time_exit"].get()),
-            "cooldown": int(fields["cooldown"].get()),
-            "chart_interval": self._normalise_interval(fields["chart_interval"].get()),
-            "bullish_threshold": float(fields["bullish_threshold"].get()),
-            "bearish_threshold": float(fields["bearish_threshold"].get()),
-            "rsi_bull": float(fields["rsi_bull"].get()),
-            "rsi_bear": float(fields["rsi_bear"].get()),
-            "rsi_reversal_bullish": float(fields["rsi_reversal_bullish"].get()),
-            "rsi_reversal_bearish": float(fields["rsi_reversal_bearish"].get()),
-            "min_buy_score": float(fields["min_buy_score"].get()),
-            "watch_buy_score": float(fields["watch_buy_score"].get()),
-            "strong_buy_score": float(fields["strong_buy_score"].get()),
-            "min_volume_ratio": float(fields["min_volume_ratio"].get()),
-            "min_option_volume": float(fields["min_option_volume"].get()),
-            "aggression_score_cap": float(fields["aggression_score_cap"].get()),
-            "compression_range_ratio": float(fields["compression_range_ratio"].get()),
-            "expansion_range_ratio": float(fields["expansion_range_ratio"].get()),
-            "max_chase_range_ratio": float(fields["max_chase_range_ratio"].get()),
-            "failed_breakout_penalty": float(fields["failed_breakout_penalty"].get()),
-            "early_breakout_min_score": float(fields["early_breakout_min_score"].get()),
-            "max_daily_loss": float(fields["max_daily_loss"].get()),
-            "max_daily_profit": float(fields["max_daily_profit"].get()),
-            "max_consecutive_losses": int(fields["max_consecutive_losses"].get()),
-            "square_off_time": fields["square_off_time"].get().strip(),
-            "order_product": self._normalise_order_product(fields["order_product"].get()),
+        parsed = {
+            key: self._parse_setting_runtime_value(key, field.get())
+            for key, field in fields.items()
         }
+        raise_for_fast_ohlcv_settings(parsed)
+        return parsed
 
     def _load_df(self, path_entry, instrument="", option_data=False, strike="", expiry="", option_type=""):
         path = path_entry.get()

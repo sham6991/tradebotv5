@@ -31,12 +31,12 @@ class LiveHistoryFetchTests(unittest.TestCase):
             [{"token": 123456, "tradingsymbol": "NIFTY26MAY25000CE"}],
             days=1,
             interval="3minute",
-            settings={"min_buy_score": 60},
+            settings={"buy_limit_score_low": 40},
         )
 
         self.assertFalse(nifty.empty)
         self.assertEqual(len(options), 1)
-        self.assertIn("Buy Score", options[0].columns)
+        self.assertIn("Early Score", options[0].columns)
         self.assertEqual(options[0].attrs["tradingsymbol"], "NIFTY26MAY25000CE")
 
 

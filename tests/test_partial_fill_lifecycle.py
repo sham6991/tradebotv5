@@ -32,7 +32,7 @@ def signal(option):
         "entry": 100,
         "entry_offset": -2,
         "entry_index": 0,
-        "score_row": {"Buy Score": 85, "Buy Entry": "BUY"},
+        "score_row": {"Early Score": 85, "Buy Entry": "BUY"},
     }
 
 
@@ -101,6 +101,9 @@ class FakeOrderManager:
     def available_margin(self):
         return 100000
 
+    def lot_size(self, tradingsymbol):
+        return 75
+
 
 def session_with_orders(fake_orders):
     option = option_frame()
@@ -124,6 +127,23 @@ def session_with_orders(fake_orders):
     session.zerodha = object()
     session.orders = fake_orders
     return session, option
+
+
+class MarketPartialEngine:
+    def __init__(self, option):
+        self.cooldown_until = -1
+        self.last_skip_reason = ""
+        self.option = option
+
+    def find_trade(self, nifty, options, i, settings):
+        data = signal(self.option)
+        data["entry_offset"] = 0
+        data["entry_order_type"] = "MARKET"
+        data["entry_type"] = "MARKET"
+        return data
+
+    def mark_trade_complete(self, exit_index):
+        self.cooldown_until = exit_index
 
 
 class PartialFillLifecycleTests(unittest.TestCase):
@@ -158,6 +178,38 @@ class PartialFillLifecycleTests(unittest.TestCase):
         self.assertEqual(session.open_position["quantity"], 25)
         self.assertEqual(session.open_position["entry_price"], 99.5)
         self.assertEqual([order["quantity"] for order in fake_orders.placed], [25, 25])
+
+    def test_partial_market_entry_cancels_remainder_before_opening_position(self):
+        fake_orders = FakeOrderManager({})
+        session, option = session_with_orders(fake_orders)
+        session.settings["enforce_market_hours"] = 0
+        session.settings["check_margin"] = 0
+        session.settings["entry_order_fill_timeout_seconds"] = 0.1
+        session.engine = MarketPartialEngine(option)
+
+        original_place_order = fake_orders.place_order
+
+        def place_order(side, tradingsymbol, quantity, product="NRML", order_type="MARKET", price=None, trigger_price=None):
+            result = original_place_order(side, tradingsymbol, quantity, product, order_type, price, trigger_price)
+            if side == "BUY" and order_type == "MARKET":
+                fake_orders.details_by_id[result["order_id"]].update({
+                    "status": "OPEN",
+                    "quantity": quantity,
+                    "filled_quantity": 25,
+                    "pending_quantity": quantity - 25,
+                    "average_price": 100,
+                    "is_partial": True,
+                })
+            return result
+
+        fake_orders.place_order = place_order
+
+        session._try_entry(0)
+
+        self.assertEqual(fake_orders.cancelled, ["P1"])
+        self.assertIsNotNone(session.open_position)
+        self.assertEqual(session.open_position["quantity"], 25)
+        self.assertEqual([order["side"] for order in fake_orders.placed], ["BUY", "SELL", "SELL"])
 
     def test_partial_exit_fill_activates_kill_switch_without_finalizing_trade(self):
         fake_orders = FakeOrderManager({

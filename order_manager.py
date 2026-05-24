@@ -1,17 +1,19 @@
+import time
+
+from order_state import classify_order_state, normalize_order_status
+from runtime_errors import classify_runtime_error
+
+
+CANCELLED_STATUSES = {"CANCELLED", "CANCELED"}
+CANCEL_PENDING_STATUSES = {"CANCEL PENDING", "CANCEL_PENDING"}
+CANCEL_RESOLVED_STATUSES = {"COMPLETE", "FILLED", "REJECTED", *CANCELLED_STATUSES}
+
+
 def classify_order_error(error):
-    text = str(error or "").strip()
-    lower = text.lower()
-    if not text:
-        return {"class": "", "retriable": False, "requires_reconciliation": False}
-    if any(pattern in lower for pattern in ("timed out", "timeout", "read timed", "504", "gateway")):
-        return {"class": "UNKNOWN_BROKER_STATE", "retriable": True, "requires_reconciliation": True}
-    if any(pattern in lower for pattern in ("connection", "network", "temporarily unavailable", "service unavailable", "503")):
-        return {"class": "BROKER_CONNECTION_ERROR", "retriable": True, "requires_reconciliation": False}
-    if any(pattern in lower for pattern in ("rejected", "insufficient", "margin", "invalid", "not allowed", "rms")):
-        return {"class": "BROKER_REJECTED", "retriable": False, "requires_reconciliation": False}
-    if "zerodha not connected" in lower:
-        return {"class": "LOCAL_VALIDATION_ERROR", "retriable": False, "requires_reconciliation": False}
-    return {"class": "BROKER_ERROR", "retriable": False, "requires_reconciliation": False}
+    classification = classify_runtime_error(error, context="order_placement")
+    if classification["class"] == "BROKER_MARGIN_ERROR":
+        classification = {**classification, "class": "BROKER_REJECTED"}
+    return classification
 
 
 class ZerodhaOrderManager:
@@ -49,6 +51,7 @@ class ZerodhaOrderManager:
                 "log_data": {},
                 "error": "ZERODHA NOT CONNECTED",
                 "error_class": classification["class"],
+                "error_category": classification["category"],
                 "retriable": classification["retriable"],
                 "requires_reconciliation": classification["requires_reconciliation"],
             }
@@ -70,6 +73,22 @@ class ZerodhaOrderManager:
                     "error": "",
                 }
             if order_type == "SL-M":
+                if self._looks_like_option_symbol(tradingsymbol):
+                    classification = classify_runtime_error(
+                        "SL-M is blocked for option stoploss orders; use SL with trigger and limit price.",
+                        context="order_placement",
+                    )
+                    return {
+                        "status": "FAILED: SL-M is blocked for option stoploss orders; use SL with trigger and limit price.",
+                        "order_id": "",
+                        "log_status": "",
+                        "log_data": {},
+                        "error": "SL-M is blocked for option stoploss orders; use SL with trigger and limit price.",
+                        "error_class": classification["class"],
+                        "error_category": classification["category"],
+                        "retriable": classification["retriable"],
+                        "requires_reconciliation": classification["requires_reconciliation"],
+                    }
                 order_id = self.zerodha.place_stoploss_market_order(
                     tradingsymbol=tradingsymbol,
                     transaction_type=side,
@@ -82,6 +101,22 @@ class ZerodhaOrderManager:
                     "order_id": order_id,
                     "log_status": "SL-M PLACED",
                     "log_data": {"quantity": quantity, "trigger_price": trigger_price},
+                    "error": "",
+                }
+            if order_type == "SL":
+                order_id = self.zerodha.place_stoploss_limit_order(
+                    tradingsymbol=tradingsymbol,
+                    transaction_type=side,
+                    quantity=quantity,
+                    trigger_price=trigger_price,
+                    price=price,
+                    product=product,
+                )
+                return {
+                    "status": f"{side} SL ORDER PLACED",
+                    "order_id": order_id,
+                    "log_status": "SL PLACED",
+                    "log_data": {"quantity": quantity, "trigger_price": trigger_price, "price": price},
                     "error": "",
                 }
 
@@ -107,24 +142,129 @@ class ZerodhaOrderManager:
                 "log_data": {},
                 "error": str(exc),
                 "error_class": classification["class"],
+                "error_category": classification["category"],
                 "retriable": classification["retriable"],
                 "requires_reconciliation": classification["requires_reconciliation"],
             }
 
-    def cancel_order(self, order_id):
+    def cancel_order(self, order_id, retries=2, retry_delay=0.2):
         if not self.is_live() or not self.zerodha or not order_id:
-            return {"cancelled": False, "error": ""}
+            return {"cancelled": False, "resolved": False, "status": "", "error": ""}
+
+        last_error = ""
+        status = self.order_status(order_id, fallback="UNKNOWN")
+        if status in CANCEL_RESOLVED_STATUSES:
+            return {"cancelled": status in CANCELLED_STATUSES, "accepted": False, "resolved": True, "status": status, "error": ""}
+        if status in CANCEL_PENDING_STATUSES:
+            return {"cancelled": False, "accepted": True, "resolved": False, "status": status, "error": ""}
+
+        attempts = max(1, int(retries or 0) + 1)
+        accepted = False
+        for attempt in range(attempts):
+            try:
+                self.zerodha.cancel_order(order_id)
+                accepted = True
+                status = self.order_status(order_id, fallback="UNKNOWN")
+                if status in CANCEL_RESOLVED_STATUSES:
+                    return {
+                        "cancelled": status in CANCELLED_STATUSES,
+                        "accepted": True,
+                        "resolved": True,
+                        "status": status,
+                        "error": "",
+                        "attempts": attempt + 1,
+                    }
+                if status in CANCEL_PENDING_STATUSES:
+                    return {
+                        "cancelled": False,
+                        "accepted": True,
+                        "resolved": False,
+                        "status": status,
+                        "error": "",
+                        "attempts": attempt + 1,
+                    }
+            except Exception as exc:
+                last_error = str(exc)
+                classification = classify_runtime_error(exc, context="order_cancel")
+                status = self.order_status(order_id, fallback="UNKNOWN")
+                if status in CANCEL_RESOLVED_STATUSES:
+                    return {
+                        "cancelled": status in CANCELLED_STATUSES,
+                        "accepted": accepted,
+                        "resolved": True,
+                        "status": status,
+                        "error": "",
+                        "attempts": attempt + 1,
+                        "error_class": classification["class"],
+                        "error_category": classification["category"],
+                    }
+                if status in CANCEL_PENDING_STATUSES:
+                    return {
+                        "cancelled": False,
+                        "accepted": True,
+                        "resolved": False,
+                        "status": status,
+                        "error": "",
+                        "attempts": attempt + 1,
+                        "error_class": classification["class"],
+                        "error_category": classification["category"],
+                    }
+                if attempt < attempts - 1 and retry_delay:
+                    time.sleep(float(retry_delay))
+
+        return {
+            "cancelled": False,
+            "accepted": accepted,
+            "resolved": False,
+            "status": status,
+            "error": last_error,
+            "attempts": attempts,
+            "error_class": classify_runtime_error(last_error, context="order_cancel")["class"] if last_error else "",
+            "error_category": classify_runtime_error(last_error, context="order_cancel")["category"] if last_error else "",
+        }
+
+    def modify_stoploss_trigger(self, order_id, trigger_price, quantity=None, price=None, order_type="SL"):
+        if not self.is_live() or not self.zerodha or not order_id:
+            return {"modified": False, "status": "", "error": ""}
         try:
-            self.zerodha.cancel_order(order_id)
-            return {"cancelled": True, "error": ""}
+            if str(order_type or "SL").upper() == "SL":
+                self.zerodha.modify_stoploss_limit_order(
+                    order_id=order_id,
+                    trigger_price=trigger_price,
+                    price=price,
+                    quantity=quantity,
+                )
+            else:
+                self.zerodha.modify_stoploss_market_order(
+                    order_id=order_id,
+                    trigger_price=trigger_price,
+                    quantity=quantity,
+                )
+            return {
+                "modified": True,
+                "status": "MODIFIED",
+                "error": "",
+                "trigger_price": trigger_price,
+                "price": price,
+            }
         except Exception as exc:
-            return {"cancelled": False, "error": str(exc)}
+            classification = classify_runtime_error(exc, context="order_modify")
+            return {
+                "modified": False,
+                "status": "FAILED",
+                "error": str(exc),
+                "error_class": classification["class"],
+                "error_category": classification["category"],
+                "trigger_price": trigger_price,
+                "price": price,
+            }
 
     def order_status(self, order_id, fallback="UNKNOWN"):
         if not self.is_live() or not self.zerodha or not order_id:
             return fallback
         status = self.zerodha.order_status(order_id)
-        return status if status and status != "UNKNOWN" else fallback
+        normalized = normalize_order_status(status)
+        return normalized if normalized and normalized != "UNKNOWN" else fallback
 
     def order_details(self, order_id, fallback_quantity=0, fallback_price=0):
         if not self.is_live() or not self.zerodha or not order_id:
@@ -140,7 +280,7 @@ class ZerodhaOrderManager:
             filled_quantity = self.filled_quantity(order_id, 0)
             total_quantity = int(fallback_quantity or filled_quantity or 0)
             pending_quantity = max(total_quantity - filled_quantity, 0)
-            return {
+            details = {
                 "order_id": str(order_id or ""),
                 "status": status,
                 "average_price": average_price,
@@ -151,15 +291,17 @@ class ZerodhaOrderManager:
                 "is_partial": filled_quantity > 0 and pending_quantity > 0,
                 "raw": {},
             }
+            details["classified_state"] = classify_order_state(details, role=self._role_from_details(details))
+            return details
 
         total_quantity = self._int_value(raw.get("quantity"), fallback_quantity)
         filled_quantity = self._int_value(raw.get("filled_quantity"), 0)
         pending_quantity = self._int_value(raw.get("pending_quantity"), max(total_quantity - filled_quantity, 0))
         cancelled_quantity = self._int_value(raw.get("cancelled_quantity"), 0)
         average_price = self._float_value(raw.get("average_price") or raw.get("price"), fallback_price)
-        status = str(raw.get("status") or "UNKNOWN").upper()
+        status = normalize_order_status(raw.get("status") or "UNKNOWN")
 
-        return {
+        details = {
             "order_id": str(raw.get("order_id") or order_id or ""),
             "status": status,
             "average_price": average_price,
@@ -170,6 +312,8 @@ class ZerodhaOrderManager:
             "is_partial": filled_quantity > 0 and pending_quantity > 0,
             "raw": raw,
         }
+        details["classified_state"] = classify_order_state(details, role=self._role_from_details(raw))
+        return details
 
     def average_price(self, order_id, fallback):
         if not self.is_live() or not self.zerodha or not order_id:
@@ -198,7 +342,7 @@ class ZerodhaOrderManager:
 
     def _empty_order_details(self, order_id, fallback_quantity, fallback_price):
         quantity = int(fallback_quantity or 0)
-        return {
+        details = {
             "order_id": str(order_id or ""),
             "status": "UNKNOWN",
             "average_price": float(fallback_price or 0),
@@ -209,6 +353,8 @@ class ZerodhaOrderManager:
             "is_partial": False,
             "raw": {},
         }
+        details["classified_state"] = classify_order_state(details, role="ENTRY")
+        return details
 
     def _int_value(self, value, fallback=0):
         if value in ("", None):
@@ -225,3 +371,13 @@ class ZerodhaOrderManager:
             return float(value)
         except (TypeError, ValueError):
             return float(fallback or 0)
+
+    def _role_from_details(self, details):
+        side = str(details.get("transaction_type") or details.get("side") or "").upper()
+        if side == "SELL":
+            return "EXIT"
+        return "ENTRY"
+
+    def _looks_like_option_symbol(self, tradingsymbol):
+        symbol = str(tradingsymbol or "").strip().upper()
+        return symbol.endswith(("CE", "PE")) and any(character.isdigit() for character in symbol)

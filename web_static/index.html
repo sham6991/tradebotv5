@@ -159,15 +159,21 @@
             <pre id="backtest-output">No backtest completed yet.</pre>
           </section>
           <form id="zerodha-backtest-form" class="panel zerodha-backtest-form">
-            <h2>Zerodha Date Range Optimizer</h2>
+            <h2>NIFTY Optimizer</h2>
             <label>Account
               <input name="mode_label" value="Backtest Live Data" readonly>
               <input type="hidden" name="mode" value="BACKTEST">
             </label>
             <label>NIFTY Token <input name="nifty_token"></label>
             <button type="button" data-zbt-action="fetch-nifty">Fetch NIFTY</button>
-            <label>Start Date <input type="date" name="start_date"></label>
-            <label>End Date <input type="date" name="end_date"></label>
+            <label>Date Range
+              <select name="date_range_months">
+                <option value="1">Last 1 Month</option>
+                <option value="2">Last 2 Months</option>
+                <option value="3" selected>Last 3 Months</option>
+                <option value="6">Last 6 Months</option>
+              </select>
+            </label>
             <label>Interval
               <select name="history_interval">
                 <option>1 min</option>
@@ -176,39 +182,13 @@
                 <option>5 min</option>
               </select>
             </label>
-            <div class="file-card">
-              <strong>CALL / CE</strong>
-              <label>Type
-                <select data-zbt-option="0" name="option_type"><option>CE</option><option>PE</option></select>
-              </label>
-              <label>Strike <input data-zbt-option="0" name="strike"></label>
-              <label>Expiry <input type="date" data-zbt-option="0" name="expiry"></label>
-              <label>Trading Symbol <input data-zbt-option="0" name="tradingsymbol"></label>
-              <label>Token <input data-zbt-option="0" name="token"></label>
-              <button type="button" data-zbt-action="fetch-option" data-zbt-option="0">Fetch CE</button>
-            </div>
-            <div class="file-card">
-              <strong>PUT / PE</strong>
-              <label>Type
-                <select data-zbt-option="1" name="option_type"><option>PE</option><option>CE</option></select>
-              </label>
-              <label>Strike <input data-zbt-option="1" name="strike"></label>
-              <label>Expiry <input type="date" data-zbt-option="1" name="expiry"></label>
-              <label>Trading Symbol <input data-zbt-option="1" name="tradingsymbol"></label>
-              <label>Token <input data-zbt-option="1" name="token"></label>
-              <button type="button" data-zbt-action="fetch-option" data-zbt-option="1">Fetch PE</button>
-            </div>
             <div class="actions wide">
-              <button type="submit" class="primary">Run Zerodha Optimizer</button>
+              <button type="submit" class="primary">Run NIFTY Optimizer</button>
             </div>
           </form>
           <section class="panel">
-            <h2>Zerodha Optimizer Output</h2>
-            <div class="actions">
-              <button type="button" data-apply-optimized="paper">Apply Latest To Paper</button>
-              <button type="button" data-apply-optimized="real" class="danger">Apply Latest To Real Money</button>
-            </div>
-            <pre id="zerodha-backtest-output">No Zerodha optimizer run yet.</pre>
+            <h2>NIFTY Optimizer Output</h2>
+            <pre id="zerodha-backtest-output">No NIFTY optimizer run yet.</pre>
           </section>
         </section>
 
@@ -300,7 +280,9 @@
           <h2 id="settings-title">Risk Settings</h2>
           <button value="cancel" class="ghost" type="submit">Close</button>
         </header>
-        <div id="settings-fields" class="settings-grid"></div>
+        <div id="settings-tabs" class="settings-tabs"></div>
+        <div id="settings-error" class="settings-error" role="alert" hidden></div>
+        <div id="settings-fields" class="settings-panels"></div>
         <footer>
           <button type="button" id="settings-defaults">Defaults</button>
           <button type="button" id="settings-save" class="primary">Save Settings</button>

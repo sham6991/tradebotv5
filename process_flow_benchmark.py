@@ -35,7 +35,7 @@ class BenchmarkEngine:
             "entry_index": entry_index,
             "target": entry + float(settings["profit_points"]),
             "stoploss": entry - float(settings["safety_points"]),
-            "score_row": {"Buy Score": 100, "Buy Entry": "BUY"},
+            "score_row": {"Early Score": 100, "Buy Entry": "BUY"},
         }
 
     def mark_trade_complete(self, exit_index):
@@ -83,7 +83,7 @@ def run_benchmark(total_ticks, batch_size):
         "bearish_threshold": -15,
         "rsi_bull": 55,
         "rsi_bear": 45,
-        "min_buy_score": 60,
+        "buy_limit_score_low": 40,
         "max_daily_loss": 0,
         "max_daily_profit": 0,
         "max_consecutive_losses": 0,

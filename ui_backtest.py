@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, cast
 from backtest import run_backtest
 from engine import parse_option_metadata_from_text
 from reporting import timestamped_file
-from ui_shared import normalized_settings_profile
+from settings_service import normalized_settings_profile
 from ui_theme import PALETTE
 
 if TYPE_CHECKING:

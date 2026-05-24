@@ -36,7 +36,7 @@ def signal(option=None):
         "signal_index": 4,
         "nifty_signal_index": 4,
         "entry_index": 5,
-        "score_row": {"Buy Score": 85, "Buy Entry": "BUY"},
+        "score_row": {"Early Score": 85, "Buy Entry": "BUY"},
     }
 
 
@@ -142,9 +142,13 @@ class AlertHookTests(unittest.TestCase):
 
         self.assertTrue(status.startswith("FAILED"))
         self.assertEqual(order_id, "")
-        self.assertEqual(alerts[-1]["code"], "ORDER_UNKNOWN_BROKER_STATE")
-        self.assertTrue(alerts[-1]["payload"]["requires_reconciliation"])
-        self.assertEqual(alerts[-1]["payload"]["error_class"], "UNKNOWN_BROKER_STATE")
+        codes = [alert["code"] for alert in alerts]
+        self.assertIn("ORDER_UNKNOWN_BROKER_STATE", codes)
+        self.assertEqual(alerts[-1]["code"], "KILL_SWITCH_ACTIVATED")
+        unknown_state_alert = next(alert for alert in alerts if alert["code"] == "ORDER_UNKNOWN_BROKER_STATE")
+        self.assertTrue(unknown_state_alert["payload"]["requires_reconciliation"])
+        self.assertEqual(unknown_state_alert["payload"]["error_class"], "UNKNOWN_BROKER_STATE")
+        self.assertTrue(session.risk_guard.kill_switch_active)
 
     def test_partial_exit_emits_alert_before_kill_switch(self):
         alerts = []

@@ -1,10 +1,14 @@
-from trading_core import TradingCore
+from backtest_runtime import BacktestTradingCore
 from engine import TradingEngine
 from config import LOT_SIZE
+from config_profile import apply_settings_profile, profile_from_settings
 from indicators import clean_and_add_indicators
-from strategy import BUY_SCORE_REPORT_COLUMNS, build_scoring_row, ensure_option_formula_columns
+from strategy import OPTION_ENTRY_REPORT_COLUMNS, build_scoring_row, ensure_option_formula_columns
 from reporting import format_datetime_value, format_time_columns, write_sqlite, validate_risk_engine_sqlite
 from datetime import datetime
+
+
+APP_STARTED_AT = datetime.now()
 
 
 def export_time(row):
@@ -61,69 +65,120 @@ def trim_to_common_datetime(nifty, options, settings=None):
 def score_formula_rows(settings):
     return [
         {
-            "Field": "Aggression Score",
-            "Formula": "Bullish Close Score + Volume Strength Score + Candle Body Strength Score + Breakout Score + Expansion Score",
+            "Field": "Early Score",
+            "Formula": "Price Stopped Falling + Green Candle + Previous High Attack + Volume Pickup, maximum 60 points",
             "Active Setting": "",
         },
         {
-            "Field": "Capped Aggression Score",
-            "Formula": "min(Aggression Score, aggression_score_cap). If cap <= 0, Aggression Score is used as-is.",
-            "Active Setting": settings.get("aggression_score_cap", ""),
+            "Field": "Main Fast Trigger",
+            "Formula": "Early Score >= BuyLimitScoreLow, green candle, High > PreviousHigh, trigger wick, recent low, volume, body, and close-position checks",
+            "Active Setting": f"{settings.get('buy_limit_score_low', '')}, {settings.get('trigger_upper_wick_max', '')}",
         },
         {
-            "Field": "Buy Score",
-            "Formula": "Capped Aggression Score + Higher Low Score + Compression Score + Failed Breakout Penalty + Bear Trap Penalty + Bull Trap penalty",
-            "Active Setting": "",
+            "Field": "Market Entry",
+            "Formula": "Main Fast Trigger + no rejection + Early Score >= MarketEntryScore + market body/close-position filters",
+            "Active Setting": f"{settings.get('market_entry_score', '')}, {settings.get('market_entry_minimum_body_percent', '')}, {settings.get('market_entry_minimum_close_position', '')}",
         },
         {
-            "Field": "Compression Score",
-            "Formula": "15 when Range Ratio < compression_range_ratio, else 0",
-            "Active Setting": settings.get("compression_range_ratio", ""),
+            "Field": "Buy Limit Entry",
+            "Formula": "Main Fast Trigger + no rejection + Early Score >= BuyLimitScoreLow and < MarketEntryScore",
+            "Active Setting": f"{settings.get('buy_limit_score_low', '')} to <{settings.get('market_entry_score', '')}",
         },
         {
-            "Field": "Expansion Score",
-            "Formula": "25 when Range Ratio > expansion_range_ratio, else 0",
-            "Active Setting": settings.get("expansion_range_ratio", ""),
+            "Field": "Buy Limit Price",
+            "Formula": "Close - min(max(AvgRange10 * BuyLimitOffsetMultiplier, MinimumOffset), MaximumOffset)",
+            "Active Setting": f"{settings.get('buy_limit_offset_multiplier', '')}, {settings.get('minimum_offset', '')}, {settings.get('maximum_offset', '')}",
         },
         {
-            "Field": "Failed Breakout Penalty",
-            "Formula": "failed_breakout_penalty when any prior 3 candles had high > previous high and Close Position Score < 0.5",
-            "Active Setting": settings.get("failed_breakout_penalty", ""),
+            "Field": "Rejection Filters",
+            "Formula": "Reject weak/red/stretched candles, failed recent low, hard upper wick, weak volume, weak body/close-position, gap spike, optional chop, or wide spread",
+            "Active Setting": f"{settings.get('hard_rejection_upper_wick_max', '')}, {settings.get('large_candle_multiplier', '')}, {settings.get('move_from_low_max_multiplier', '')}",
         },
         {
-            "Field": "Liquidity Filter",
-            "Formula": "PASS when Volume Ratio >= min_volume_ratio and volume >= min_option_volume",
-            "Active Setting": f"{settings.get('min_volume_ratio', '')}, {settings.get('min_option_volume', '')}",
+            "Field": "Backtest Limit Fill",
+            "Formula": "SIMPLE uses next Low <= limit; CONSERVATIVE also requires next Close >= limit and green next candle; STRICT does not test OHLC limits",
+            "Active Setting": settings.get("backtest_limit_fill_mode", ""),
         },
         {
-            "Field": "Chase Filter",
-            "Formula": "PASS when Average Range is unavailable, Range Ratio <= max_chase_range_ratio, or follow-through is strong",
-            "Active Setting": settings.get("max_chase_range_ratio", ""),
-        },
-        {
-            "Field": "Early Breakout Probability Score",
-            "Formula": "Compression Score + Volume Strength Score + Higher Low Score + Bullish Close Score + Upper Wick Shrink Score",
-            "Active Setting": settings.get("early_breakout_min_score", ""),
-        },
-        {
-            "Field": "High Probability Buy",
-            "Formula": "HIGH PROB BUY when Buy Score >= strong_buy_score, Early Breakout Probability Score >= early_breakout_min_score, and Momentum Acceleration Score > 0",
-            "Active Setting": f"{settings.get('strong_buy_score', '')}, {settings.get('early_breakout_min_score', '')}",
-        },
-        {
-            "Field": "Buy Entry",
-            "Formula": "BUY when Buy Score >= min_buy_score and both Liquidity Filter and Chase Filter pass",
-            "Active Setting": settings.get("min_buy_score", ""),
+            "Field": "Aggressive Live Entry",
+            "Formula": "Only before candle close when enabled, with stricter LTP, wick, move-from-low, body, close-position, volume, and rejection checks",
+            "Active Setting": f"{settings.get('aggressive_live_entry_enabled', '')}, {settings.get('aggressive_entry_score', '')}",
         },
     ]
 
 
+def git_commit_hash():
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=2,
+        )
+    except Exception:
+        return ""
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def max_drawdown_from_trades(trades, initial_balance):
+    peak = float(initial_balance or 0)
+    max_drawdown = 0.0
+    for trade in trades:
+        balance = trade.get("Total PnL", peak)
+        try:
+            balance = float(balance)
+        except (TypeError, ValueError):
+            continue
+        peak = max(peak, balance)
+        max_drawdown = max(max_drawdown, peak - balance)
+    return max_drawdown
+
+
+def backtest_run_metadata_rows(settings, core, save_path, sheet_names):
+    profile = profile_from_settings(settings)
+    trades = list(core.trades)
+    winning = sum(1 for trade in trades if float(trade.get("PnL", 0) or 0) > 0)
+    losing = sum(1 for trade in trades if float(trade.get("PnL", 0) or 0) < 0)
+    flat = len(trades) - winning - losing
+    initial_balance = float(settings.get("balance", 0) or 0)
+    metadata = [
+        ("Report Timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        ("App Start Timestamp", APP_STARTED_AT.strftime("%Y-%m-%d %H:%M:%S")),
+        ("Code Version / Git Commit", git_commit_hash()),
+        ("Settings Hash", profile.get("settings_hash", "")),
+        ("Settings Version", profile.get("settings_version", "")),
+        ("Settings Schema Version", profile.get("settings_schema_version", "")),
+        ("Profile Name", settings.get("profile_name", "backtest")),
+        ("Mode", "BACKTEST"),
+        ("Data Source", settings.get("data_source", "uploaded/server file")),
+        ("Chart Interval", settings.get("chart_interval", "")),
+        ("Broker Connected", "No"),
+        ("Backtest Fill Mode", settings.get("backtest_limit_fill_mode", "")),
+        ("Slippage Model", settings.get("market_entry_backtest_mode", "SIGNAL_CLOSE")),
+        ("Initial Balance", initial_balance),
+        ("Final Balance", core.balance),
+        ("Net PnL", core.balance - initial_balance),
+        ("Trade Count", len(trades)),
+        ("Winning Trades", winning),
+        ("Losing Trades", losing),
+        ("Flat Trades", flat),
+        ("Max Drawdown", max_drawdown_from_trades(trades, initial_balance)),
+        ("Export Path", save_path),
+        ("Sheet Guide", ", ".join(sheet_names)),
+    ]
+    return [{"Field": field, "Value": value} for field, value in metadata]
+
+
 def run_backtest(nifty, options, settings, save_path):
+    apply_settings_profile(settings)
     nifty, options = trim_to_common_datetime(nifty, options, settings)
 
     engine = TradingEngine(settings["cooldown"])
 
-    core = TradingCore(engine, mode="BACKTEST")
+    core = BacktestTradingCore(engine)
 
     core.balance = settings["balance"]
     core.lot_size = settings["lot_size"] * LOT_SIZE
@@ -142,6 +197,8 @@ def run_backtest(nifty, options, settings, save_path):
         rsi_bear = float(settings.get("rsi_bear", 45))
         rsi_reversal_bullish = float(settings.get("rsi_reversal_bullish", 70))
         rsi_reversal_bearish = float(settings.get("rsi_reversal_bearish", 20))
+        bullish_reversal_condition = float(settings.get("bullish_reversal_condition", -20))
+        bearish_reversal_condition = float(settings.get("bearish_reversal_condition", 10))
         score = build_scoring_row(
             nifty,
             i,
@@ -151,6 +208,8 @@ def run_backtest(nifty, options, settings, save_path):
             rsi_bear,
             rsi_reversal_bullish,
             rsi_reversal_bearish,
+            bullish_reversal_condition,
+            bearish_reversal_condition,
         )
         candle_rows.append({
             "Datetime": export_time(nifty_row),
@@ -234,7 +293,7 @@ def run_backtest(nifty, options, settings, save_path):
                 scored,
                 row_index,
                 data_kind="option",
-                min_buy_score=settings.get("min_buy_score", 75),
+                entry_score_threshold=settings.get("buy_limit_score_low", 40),
                 scoring_settings=settings,
                 include_calculations=True,
             )
@@ -247,7 +306,14 @@ def run_backtest(nifty, options, settings, save_path):
                 "Low": row.get("low", ""),
                 "Close": row.get("close", ""),
                 "Volume": row.get("volume", ""),
-                **{column: score_row.get(column, "") for column in BUY_SCORE_REPORT_COLUMNS},
+                **{column: score_row.get(column, "") for column in OPTION_ENTRY_REPORT_COLUMNS},
+                "Buy Setup": score_row.get("Buy Setup", ""),
+                "Entry Filters Passed": score_row.get("Entry Filters Passed", ""),
+                "Entry Block Reason": score_row.get("Entry Block Reason", ""),
+                "Early Score Calculation": score_row.get("Early Score Calculation", ""),
+                "Main Fast Trigger Calculation": score_row.get("Main Fast Trigger Calculation", ""),
+                "Rejection Calculation": score_row.get("Rejection Calculation", ""),
+                "Active Fast Settings": score_row.get("Active Fast Settings", ""),
                 "Sell Score": score_row.get("Sell Score", ""),
                 "Sell Entry": score_row.get("Sell Entry", ""),
             })
@@ -261,15 +327,34 @@ def run_backtest(nifty, options, settings, save_path):
     candles_df = format_time_columns(pd.DataFrame(candle_rows))
     skips_df = format_time_columns(pd.DataFrame(skip_rows))
     option_scores_df = format_time_columns(pd.DataFrame(option_score_rows))
+    entry_attempts_df = format_time_columns(pd.DataFrame(core.entry_attempts))
     score_formula_df = pd.DataFrame(score_formula_rows(settings))
     risk_df = format_time_columns(df)
 
+    sheet_names = [
+        "Run Metadata",
+        "Trades",
+        "CE Trades",
+        "PE Trades",
+        "Candles",
+        "Option Scores",
+        "Entry Attempts",
+        "Score Formula",
+        "Skips",
+        "Settings",
+        "Option Metadata",
+        "Risk Engine Trades",
+    ]
+    run_metadata_df = pd.DataFrame(backtest_run_metadata_rows(settings, core, save_path, sheet_names))
+
     with pd.ExcelWriter(save_path) as writer:
+        run_metadata_df.to_excel(writer, sheet_name="Run Metadata", index=False)
         trades_df.to_excel(writer, sheet_name="Trades", index=False)
         ce_trades.to_excel(writer, sheet_name="CE Trades", index=False)
         pe_trades.to_excel(writer, sheet_name="PE Trades", index=False)
         candles_df.to_excel(writer, sheet_name="Candles", index=False)
         option_scores_df.to_excel(writer, sheet_name="Option Scores", index=False)
+        entry_attempts_df.to_excel(writer, sheet_name="Entry Attempts", index=False)
         score_formula_df.to_excel(writer, sheet_name="Score Formula", index=False)
         skips_df.to_excel(writer, sheet_name="Skips", index=False)
         pd.DataFrame(settings_rows).to_excel(writer, sheet_name="Settings", index=False)
@@ -279,7 +364,9 @@ def run_backtest(nifty, options, settings, save_path):
     sql_path = save_path.replace(".xlsx", ".db")
     write_sqlite(sql_path, df, table_name="trades")
     write_sqlite(sql_path, option_scores_df, table_name="option_scores")
+    write_sqlite(sql_path, entry_attempts_df, table_name="entry_attempts")
     write_sqlite(sql_path, score_formula_df, table_name="score_formula")
+    write_sqlite(sql_path, run_metadata_df, table_name="run_metadata")
 
     backtest_run = [{
         "run_id": f"BACKTEST_{datetime.now().strftime('%Y%m%d_%H%M%S')}",

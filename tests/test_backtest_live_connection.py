@@ -49,7 +49,7 @@ class BacktestLiveConnectionTests(unittest.TestCase):
 
         self.assertEqual(app.fetch_nifty_token("BACKTEST")["token"], 256265)
 
-    def test_fetch_option_returns_token_alias_for_backtest_form(self):
+    def test_fetch_option_returns_token_alias(self):
         app = WebTradeBotApp()
         app.zerodha_clients_by_mode["BACKTEST"] = BacktestLiveClient()
 
@@ -61,6 +61,11 @@ class BacktestLiveConnectionTests(unittest.TestCase):
 
         self.assertEqual(contract["instrument_token"], 123456)
         self.assertEqual(contract["token"], 123456)
+
+    def test_nifty_optimizer_does_not_expose_profile_apply_method(self):
+        app = WebTradeBotApp()
+
+        self.assertFalse(hasattr(app, "apply_latest_optimizer_settings"))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,8 @@
 import unittest
 
 from execution_v2 import LivePaperSession
-from tests.test_strategy_regression import nifty_frame, option_frame, settings
+from tests.test_live_entry_active_candle import fast_option_frame
+from tests.test_strategy_regression import nifty_frame, settings
 
 
 class FilledMarketOrderManager:
@@ -31,6 +32,17 @@ class FilledMarketOrderManager:
         return fallback
 
     def order_details(self, order_id, fallback_quantity=0, fallback_price=0):
+        if str(order_id).startswith("ENTRY"):
+            return {
+                "order_id": order_id,
+                "status": "COMPLETE",
+                "quantity": fallback_quantity,
+                "filled_quantity": fallback_quantity,
+                "pending_quantity": 0,
+                "average_price": fallback_price,
+                "cancelled_quantity": 0,
+                "is_partial": False,
+            }
         return {
             "order_id": order_id,
             "status": "OPEN",
@@ -52,8 +64,8 @@ class LiveOrderUiUpdateTests(unittest.TestCase):
     def test_live_market_entry_emits_order_event_before_trade_snapshot(self):
         updates = []
         session = LivePaperSession(
-            nifty_frame("bearish", count=4),
-            [option_frame("CE", buy_score=20, count=4), option_frame("PE", buy_score=85, count=4)],
+            nifty_frame("bearish", count=11),
+            [fast_option_frame("CE"), fast_option_frame("PE", entry_type="market")],
             {1: "NIFTY", 2: "OPTION_0", 3: "OPTION_1"},
             settings(entry_offset=0, max_trades=1, lot_size=1, enforce_market_hours=0),
             save_path=None,
@@ -63,7 +75,7 @@ class LiveOrderUiUpdateTests(unittest.TestCase):
         )
         session.orders = FilledMarketOrderManager()
 
-        session._try_entry(1)
+        session._try_entry(10)
 
         self.assertGreaterEqual(len(updates), 2)
         self.assertEqual(updates[0]["order_event"]["Action"], "BUY")

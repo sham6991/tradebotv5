@@ -207,12 +207,16 @@ def _order_history_items(db_path, session_id):
     with closing(sqlite3.connect(db_path)) as conn:
         if not _table_exists(conn, "order_history"):
             return []
+        columns = _table_columns(conn, "order_history")
+        score_expr = "early_score"
+        if "early_score" not in columns and "buy_score" in columns:
+            score_expr = "buy_score"
         rows = conn.execute(
-            """
+            f"""
             SELECT id, timestamp, instrument, option_type, action, order_type,
                    quantity, ordered_quantity, filled_quantity, pending_quantity,
                    cancelled_quantity, is_partial_fill, order_status,
-                   entry_price, buy_score, exit_price, exit_reason,
+                   entry_price, {score_expr}, exit_price, exit_reason,
                    target_price, stop_loss_price, ltp_at_order_placement,
                    zerodha_order_id, parent_order_id, related_trade_id,
                    error_reason, data
@@ -240,7 +244,7 @@ def _order_history_items(db_path, session_id):
             "order_status": order_status,
             "status": order_status,
             "entry_price": entry_price,
-            "buy_score": buy_score,
+            "early_score": early_score,
             "exit_price": exit_price,
             "exit_reason": exit_reason,
             "target_price": target_price,
@@ -270,7 +274,7 @@ def _order_history_items(db_path, session_id):
             is_partial_fill,
             order_status,
             entry_price,
-            buy_score,
+            early_score,
             exit_price,
             exit_reason,
             target_price,
@@ -291,6 +295,10 @@ def _table_exists(conn, table_name):
         (table_name,),
     ).fetchone()
     return row is not None
+
+
+def _table_columns(conn, table_name):
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
 
 
 def load_settings_profile(db_path, session_id="", timeline=None):

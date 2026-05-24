@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime
 
 from sqlite_store import TradingStore
 
@@ -28,7 +29,7 @@ class TradingStoreOrderHistoryTests(unittest.TestCase):
                 "Is Partial Fill": "YES",
                 "Order Status": "OPEN",
                 "Entry Price": 100,
-                "Buy Score": 80,
+                "Early Score": 80,
                 "Zerodha Order ID": "OID1",
                 "Related Trade ID": "T1",
             })
@@ -97,10 +98,41 @@ class TradingStoreOrderHistoryTests(unittest.TestCase):
                 order_payload = conn.execute("SELECT data FROM order_history").fetchone()[0]
 
             self.assertTrue(session_row[0])
-            self.assertTrue(session_row[1].startswith("settings-v1-"))
-            self.assertEqual(session_row[2], 1)
+            self.assertTrue(session_row[1].startswith("settings-v2-"))
+            self.assertEqual(session_row[2], 2)
             self.assertIn(session_row[0], event_payload)
             self.assertIn(session_row[0], order_payload)
+
+    def test_logs_completed_candles_with_upsert(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            db_path = os.path.join(temp_dir, "session.db")
+            store = TradingStore(db_path, mode="PAPER", settings={"session_id": "S1"})
+
+            row = {
+                "datetime": datetime(2026, 5, 12, 9, 15),
+                "open": 100,
+                "high": 105,
+                "low": 99,
+                "close": 104,
+                "volume": 1000,
+            }
+            metadata = {
+                "instrument": "NIFTY25000CE",
+                "tradingsymbol": "NIFTY25000CE",
+                "option_type": "CE",
+            }
+            store.log_candle("OPTION_0", row, metadata)
+            store.log_candle("OPTION_0", {**row, "close": 106}, metadata)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                rows = conn.execute(
+                    """
+                    SELECT session_id, stream_name, instrument, option_type, candle_time, close
+                    FROM candles
+                    """
+                ).fetchall()
+
+        self.assertEqual(rows, [("S1", "OPTION_0", "NIFTY25000CE", "CE", "2026-05-12 09:15:00", 106)])
 
 
 if __name__ == "__main__":

@@ -31,6 +31,37 @@ class FeedStatusTests(unittest.TestCase):
         self.assertEqual(executor.feed_status, "connected")
         self.assertIsNone(executor.feed_reconnect_timer)
 
+    def test_feed_error_metrics_include_classification(self):
+        executor = Executor()
+
+        executor._handle_feed_error(503, "service unavailable")
+
+        metrics = executor.feed_metrics()
+        self.assertEqual(metrics["feed_error_category"], "network")
+        self.assertEqual(metrics["feed_error_class"], "BROKER_CONNECTION_ERROR")
+        executor._cancel_reconnect_timer()
+
+    def test_tick_enqueue_applies_backpressure_before_dropping(self):
+        executor = Executor()
+        executor.tick_queue_size = 1
+        executor.tick_queue_put_timeout = 1.0
+        processed = []
+
+        def on_ticks(ticks):
+            time.sleep(0.001)
+            processed.extend(ticks)
+
+        executor._start_tick_dispatcher(on_ticks)
+        try:
+            for index in range(100):
+                executor._enqueue_ticks([{"instrument_token": index, "last_price": index}])
+            executor.tick_queue.join()
+        finally:
+            executor._stop_tick_dispatcher()
+
+        self.assertEqual(len(processed), 100)
+        self.assertEqual(executor.feed_metrics()["dropped_batches"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

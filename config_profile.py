@@ -3,12 +3,18 @@ import json
 from datetime import date, datetime
 
 
-SETTINGS_SCHEMA_VERSION = 1
+SETTINGS_SCHEMA_VERSION = 2
 _VOLATILE_KEYS = {
     "session_id",
     "settings_hash",
     "settings_version",
     "settings_schema_version",
+    "zerodha_margin_fetched",
+    "broker_user_id",
+    "available_margin",
+    "used_margin",
+    "valid_until",
+    "fetched_at",
 }
 _SECRET_MARKERS = ("secret", "token", "password", "credential")
 

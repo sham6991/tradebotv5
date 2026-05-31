@@ -38,6 +38,13 @@ from session_persistence import SessionPersistenceMixin
 from session_audit import write_session_audit
 from sqlite_store import AsyncTradingStore, TradingStore
 from strategy import OPTION_ENTRY_REPORT_COLUMNS, append_option_formula_row, build_scoring_row, ensure_option_formula_columns
+from trailing_safeguard import (
+    build_safeguard_event,
+    initial_trailing_safeguard_state,
+    safeguard_prices,
+    should_apply_trailing_safeguard,
+    trailing_start_reached,
+)
 from trailing_stop import calculate_trailing_stop, trailing_settings
 from zerodha_client import ZerodhaClient
 
@@ -1286,6 +1293,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             "last_trailing_level": 0,
             "trailing_modification_count": 0,
             "trailing_modifications": [],
+            **initial_trailing_safeguard_state(signal, entry_price, self.settings),
             "quantity": filled_qty,
             "contract_lot_size": lot_size,
             "entry_order_id": entry_order_id,
@@ -1561,6 +1569,8 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
         position = self.open_position
         if not position or not position.get("trailing_sl_enabled"):
             return False
+        if trailing_start_reached(position.get("entry_price", 0), current, self.settings):
+            position["trailing_start_reached"] = True
         current_sl = float(position.get("current_sl_price", position.get("stoploss", 0)) or 0)
         update = calculate_trailing_stop(position.get("entry_price", 0), current_sl, current, self.settings)
         if not update:
@@ -1619,6 +1629,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
 
         position["current_sl_price"] = new_sl
         position["stoploss"] = new_sl
+        position["trailing_start_reached"] = True
         position["last_trailing_level"] = trailing_level
         position["trailing_modification_count"] = int(position.get("trailing_modification_count", 0) or 0) + 1
         self._record_trailing_modification(position, old_sl, new_sl, current, update, modify_status, timestamp)
@@ -1632,7 +1643,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             order_type="SL",
             quantity=position.get("quantity", ""),
             entry_price=position.get("entry_price", ""),
-            limit_price=self._stoploss_limit_price(new_sl) if self.mode == "LIVE" else "",
+            limit_price=self._stoploss_limit_price(new_sl),
             trigger_price=new_sl,
             target_price=position.get("target", ""),
             stoploss_price=new_sl,
@@ -1666,6 +1677,140 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             },
         )
 
+    def _modifiable_exit_order_statuses(self):
+        return {
+            "OPEN",
+            "TRIGGER PENDING",
+            "PENDING",
+            "OPEN PENDING",
+            "MODIFY PENDING",
+            "MODIFY VALIDATION PENDING",
+            "VALIDATION PENDING",
+            "PUT ORDER REQ RECEIVED",
+        }
+
+    def _apply_trailing_time_safeguard(self, current, current_index, timestamp=None):
+        position = self.open_position
+        if not position or not position.get("trailing_time_safeguard_enabled"):
+            return False
+        if trailing_start_reached(position.get("entry_price", 0), current, self.settings):
+            position["trailing_start_reached"] = True
+            return False
+        if not should_apply_trailing_safeguard(position, current_index):
+            return False
+
+        old_target = position.get("target", "")
+        old_sl = position.get("stoploss", position.get("current_sl_price", ""))
+        minimum_trigger = self._price_tick() if self.mode != "LIVE" else self._price_tick() * 2
+        new_target, new_sl = safeguard_prices(
+            position.get("entry_price", 0),
+            self.settings,
+            round_price=self._round_price,
+            minimum_price=minimum_trigger,
+        )
+        sl_limit_price = self._stoploss_limit_price(new_sl)
+        modify_status = "MODIFIED"
+
+        if self.mode == "LIVE":
+            target_order_id = position.get("target_order_id")
+            stoploss_order_id = position.get("stoploss_order_id")
+            if not target_order_id or not stoploss_order_id:
+                return False
+            modifiable = self._modifiable_exit_order_statuses()
+            target_status = self.orders.order_status(target_order_id, fallback="UNKNOWN")
+            stoploss_status = self.orders.order_status(stoploss_order_id, fallback="UNKNOWN")
+            if target_status not in modifiable or stoploss_status not in modifiable:
+                return False
+
+            target_result = self.orders.modify_limit_price(
+                target_order_id,
+                new_target,
+                quantity=position.get("quantity", ""),
+            )
+            stoploss_result = self.orders.modify_stoploss_trigger(
+                stoploss_order_id,
+                new_sl,
+                quantity=position.get("quantity", ""),
+                price=sl_limit_price,
+                order_type="SL",
+            )
+            if not target_result.get("modified") or not stoploss_result.get("modified"):
+                self._log_event(
+                    "ERROR",
+                    "Trailing time safeguard modification failed",
+                    {
+                        "target_order_id": target_order_id,
+                        "stoploss_order_id": stoploss_order_id,
+                        "target_error": target_result.get("error", ""),
+                        "stoploss_error": stoploss_result.get("error", ""),
+                    },
+                )
+                return False
+
+        position["target"] = new_target
+        position["stoploss"] = new_sl
+        position["current_sl_price"] = new_sl
+        position["trailing_time_safeguard_applied"] = True
+        event = build_safeguard_event(
+            format_datetime_value(timestamp or datetime.now()),
+            old_target,
+            new_target,
+            old_sl,
+            new_sl,
+            current,
+            current_index,
+            modify_status,
+        )
+        modifications = list(position.get("trailing_time_safeguard_modifications") or [])
+        modifications.append(event)
+        position["trailing_time_safeguard_modifications"] = modifications
+        self._log_event(
+            "INFO",
+            "Trailing time safeguard update",
+            {
+                "trade_no": position.get("trade_no", ""),
+                "instrument": position.get("signal", {}).get("instrument", ""),
+                **event,
+            },
+        )
+        self._save_open_position()
+        self._emit_order_event(
+            position["signal"],
+            position.get("trade_no", self.trade_count + 1),
+            "SELL",
+            modify_status,
+            order_id=position.get("target_order_id", ""),
+            order_type="LIMIT",
+            quantity=position.get("quantity", ""),
+            entry_price=position.get("entry_price", ""),
+            limit_price=new_target,
+            target_price=new_target,
+            stoploss_price=new_sl,
+            exit_reason="TRAILING TIME SAFEGUARD MODIFIED",
+            remarks=f"Target tightened from {old_target} to {new_target}",
+            parent_order_id=position.get("entry_order_id", ""),
+            timestamp=timestamp,
+        )
+        self._emit_order_event(
+            position["signal"],
+            position.get("trade_no", self.trade_count + 1),
+            "SELL",
+            modify_status,
+            order_id=position.get("stoploss_order_id", ""),
+            order_type="SL",
+            quantity=position.get("quantity", ""),
+            entry_price=position.get("entry_price", ""),
+            limit_price=sl_limit_price,
+            trigger_price=new_sl,
+            target_price=new_target,
+            stoploss_price=new_sl,
+            exit_reason="TRAILING TIME SAFEGUARD MODIFIED",
+            remarks=f"Stoploss tightened from {old_sl} to {new_sl}",
+            parent_order_id=position.get("entry_order_id", ""),
+            timestamp=timestamp,
+        )
+        return True
+
     def _check_live_exit(self, i):
         position = self.open_position
         if not position:
@@ -1681,6 +1826,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
         current = float(option.iloc[i]["close"])
         position["peak_price"] = max(position["peak_price"], current)
         self._apply_trailing_stop(current, self._row_time(option, i))
+        self._apply_trailing_time_safeguard(current, i, self._row_time(option, i))
         elapsed = i - position["entry_index"]
         reason = None
         has_target_order = self.mode == "LIVE" and bool(position.get("target_order_id"))
@@ -1705,6 +1851,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             return
         position["peak_price"] = max(position.get("peak_price", position["entry_price"]), current)
         self._apply_trailing_stop(current, timestamp)
+        self._apply_trailing_time_safeguard(current, self._current_position_index(position), timestamp)
         has_target_order = self.mode == "LIVE" and bool(position.get("target_order_id"))
         has_stoploss_order = self.mode == "LIVE" and bool(position.get("stoploss_order_id"))
         if current >= position["target"] and not has_target_order:
@@ -1712,6 +1859,13 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
         elif current <= position["stoploss"] and not has_stoploss_order:
             reason = "TRAILING_STOPLOSS" if float(position.get("stoploss", 0) or 0) > float(position.get("initial_stoploss_price", 0) or 0) else "STOPLOSS"
             self._close_position(len(position["signal"]["option"]) - 1, reason, current, timestamp)
+
+    def _current_position_index(self, position):
+        try:
+            option = self.options[int(position.get("option_index", 0))]
+            return len(option) - 1
+        except (TypeError, ValueError, IndexError):
+            return len(position.get("signal", {}).get("option", [])) - 1
 
     def _check_protective_exit_orders(self, i, exit_time_override=None, force=False):
         position = self.open_position
@@ -1996,12 +2150,37 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             self._cancel_exit_order(position.get("stoploss_order_id"), "STOPLOSS", reason)
             if self._check_protective_exit_orders(i, exit_time_override, force=True):
                 return None
-            exit_status, exit_order_id = self._place_order("SELL", position["signal"], position["quantity"])
+            exit_order_type, simulated_limit_price, simulated_trigger_price = self._simulated_close_order_fields(
+                position,
+                reason,
+                fallback_exit_price,
+            )
+            order_price = simulated_limit_price if simulated_limit_price not in ("", None) else None
+            order_trigger_price = simulated_trigger_price if simulated_trigger_price not in ("", None) else None
+            if reason not in {"TIME_EXIT"}:
+                order_price = None
+                order_trigger_price = None
+            exit_status, exit_order_id = self._place_order(
+                "SELL",
+                position["signal"],
+                position["quantity"],
+                order_type=exit_order_type if reason == "TIME_EXIT" else "MARKET",
+                price=order_price,
+                trigger_price=order_trigger_price,
+            )
             if exit_status.startswith("FAILED"):
                 if position.get("last_exit_failure_status") != exit_status:
                     position["last_exit_failure_status"] = exit_status
                     self._save_open_position()
-                    self._record_exit_failure(position, i, reason, exit_status)
+                    self._record_exit_failure(
+                        position,
+                        i,
+                        reason,
+                        exit_status,
+                        order_type=exit_order_type,
+                        limit_price=simulated_limit_price,
+                        trigger_price=simulated_trigger_price,
+                    )
                 return None
             exit_price = self._actual_order_price(exit_order_id, fallback_exit_price)
             exit_quantity = self._actual_order_quantity(exit_order_id, position["quantity"])
@@ -2042,7 +2221,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             "buy_order_id": position["entry_order_id"],
             "target_order_id": position.get("target_order_id", ""),
             "stoploss_order_id": position.get("stoploss_order_id", ""),
-            "stoploss_order_type": "SL" if self.mode == "LIVE" else "",
+            "stoploss_order_type": "SL" if self.mode == "LIVE" or (self.mode != "LIVE" and reason in {"STOPLOSS", "TRAILING_STOPLOSS"}) else "",
             "slm_order_id": position.get("stoploss_order_id", ""),
             "final_pnl": pnl,
             "order_cancel_status": "not_required" if self.mode != "LIVE" else "",
@@ -2066,10 +2245,12 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             "SELL",
             exit_status,
             order_id=exit_order_id,
-            order_type="MARKET",
+            order_type=exit_order_type,
             quantity=exit_quantity,
             entry_price=position["entry_price"],
             exit_price=exit_price,
+            limit_price=simulated_limit_price,
+            trigger_price=simulated_trigger_price,
             target_price=position.get("target", ""),
             stoploss_price=position.get("stoploss", ""),
             exit_reason=reason,
@@ -2080,6 +2261,20 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             self.on_trade(trade, self.balance)
         self._refresh_live_trade_snapshot(final_trade=trade)
         return trade
+
+    def _simulated_close_order_fields(self, position, reason, fallback_exit_price=None):
+        if reason == "TIME_EXIT":
+            return self._time_exit_close_order_fields(fallback_exit_price)
+        if self.mode == "LIVE" or reason not in {"STOPLOSS", "TRAILING_STOPLOSS"}:
+            return "MARKET", "", ""
+        trigger_price = position.get("stoploss", "")
+        limit_price = self._stoploss_limit_price(trigger_price) if trigger_price not in ("", None) else ""
+        return "SL", limit_price, trigger_price
+
+    def _time_exit_close_order_fields(self, fallback_exit_price):
+        trigger_price = self._round_price(fallback_exit_price)
+        limit_price = self._stoploss_limit_price(trigger_price)
+        return "SL", limit_price, trigger_price
 
     def _finalize_position_from_exit_order(self, i, reason, exit_order_id, exit_status, fallback_exit_price, exit_time_override=None):
         position = self.open_position
@@ -2187,9 +2382,16 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             "trailing_step_points": position.get("trailing_step_points", ""),
             "trailing_lock_points": position.get("trailing_lock_points", ""),
             "trailing_modifications": list(position.get("trailing_modifications") or []),
+            "trailing_start_reached": position.get("trailing_start_reached", False),
+            "trailing_time_safeguard_enabled": position.get("trailing_time_safeguard_enabled", False),
+            "trailing_time_safeguard_applied": position.get("trailing_time_safeguard_applied", False),
+            "trailing_time_safeguard_candles": position.get("trailing_time_safeguard_candles", ""),
+            "trailing_time_safeguard_target_points": position.get("trailing_time_safeguard_target_points", ""),
+            "trailing_time_safeguard_stoploss_points": position.get("trailing_time_safeguard_stoploss_points", ""),
+            "trailing_time_safeguard_modifications": list(position.get("trailing_time_safeguard_modifications") or []),
         }
 
-    def _record_exit_failure(self, position, i, reason, status):
+    def _record_exit_failure(self, position, i, reason, status, order_type="MARKET", limit_price="", trigger_price=""):
         trade = {
             "Trade No": position["trade_no"],
             "Type": position["signal"].get("type", ""),
@@ -2227,10 +2429,12 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             "SELL",
             status,
             order_id="",
-            order_type="MARKET",
+            order_type=order_type,
             quantity=position.get("quantity", ""),
             entry_price=position.get("entry_price", ""),
             exit_price="",
+            limit_price=limit_price,
+            trigger_price=trigger_price,
             exit_reason=f"EXIT FAILED: {reason}",
             remarks=status,
             parent_order_id=position.get("entry_order_id", ""),
@@ -2791,6 +2995,8 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             "Decision Reason": score_row.get("Decision Reason", "") if side == "BUY" else "",
             "Rejection Reason": score_row.get("Rejection Reason", "") if side == "BUY" else "",
             "Exit Price": exit_price if side == "SELL" else "",
+            "Limit Price": limit_price,
+            "Trigger Price": trigger_price,
             "Exit Reason": exit_reason if side == "SELL" else "",
             "Target Price": target_price,
             "Stop Loss Price": stoploss_price,

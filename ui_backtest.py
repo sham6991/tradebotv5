@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 from backtest import run_backtest
 from engine import parse_option_metadata_from_text
 from reporting import timestamped_file
+from result_paths import result_category_folder
 from settings_service import normalized_settings_profile
 from ui_theme import PALETTE
 
@@ -128,7 +129,7 @@ class BacktestViewMixin(_BacktestViewBase):
             settings["lot_size"] = settings["lot_size"]
 
             path = os.path.join(
-                RESULT_FOLDER,
+                result_category_folder(RESULT_FOLDER, "backtest"),
                 f"backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             )
 

@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import messagebox, scrolledtext, ttk
 
 from reporting import timestamped_file
+from result_paths import result_category_folder
 
 if TYPE_CHECKING:
     from execution_v2 import Executor
@@ -763,8 +764,8 @@ class LiveRuntimeMixin:
             )
             token_map = self._live_token_map()
             self.current_token_map = token_map
-            paper_file = timestamped_file("paper_trading", RESULT_FOLDER)
-            real_file = timestamped_file("real_trading", RESULT_FOLDER)
+            paper_file = timestamped_file("paper_trading", result_category_folder(RESULT_FOLDER, "paper_trading"))
+            real_file = timestamped_file("real_money_trading", result_category_folder(RESULT_FOLDER, "real_money_trading"))
 
             if self.live_mode == "PAPER":
                 self.executor.start_live_paper_trading(

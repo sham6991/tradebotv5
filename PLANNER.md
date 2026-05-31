@@ -4,6 +4,156 @@ Date created: 2026-05-18
 
 `BLUEPRINT.md` remains the base document for project structure, architecture, safety rules, and current behavior. This planner is only for dated work queues and should be updated as planned jobs are completed or moved.
 
+## 2026-05-27 Next Improvement Queue
+
+### Priority 1 - Clean Up Legacy Backtest Connection Surface - Completed 2026-05-27
+
+Primary goal:
+
+Remove remaining user-facing and API-level confusion from the old third Zerodha connection mode now that Virtual/Paper is the shared data connection for paper trading, Backtest Live optimizer, and Market Cue Analyzer.
+
+Scope:
+
+- Keep only two visible Zerodha connection concepts:
+  - Virtual/Paper Data
+  - Real Money
+- Remove or deprecate the legacy `BACKTEST` connection object from `/api/status` if no compatibility caller still needs it.
+- Keep Backtest Live optimizer using the Virtual/Paper Zerodha client.
+- Keep Market Cue Analyzer using the Virtual/Paper Zerodha client.
+- Update tests that still name `BACKTEST` as a separate connection, while preserving backward-compatible request aliases only where needed.
+- Update README/BLUEPRINT wording if the public API/status shape changes.
+
+Guardrails:
+
+- Do not change strategy signals, Fast OHLCV scoring, entry/exit logic, live order placement, paper simulation behavior, or Zerodha credential handling.
+- Do not add any new Zerodha login flow.
+- Do not break existing Paper or Real Money start flows.
+- Do not connect Market Cue output to automatic order placement.
+
+Verification required:
+
+```powershell
+python -B -m py_compile web_app.py web_static\app.js
+python -B -m unittest tests.test_backtest_live_connection tests.test_web_app_feed_inputs tests.test_live_start_safety
+python -B -m unittest discover -s tests
+node --check web_static\app.js
+```
+
+Completion notes:
+
+- Removed the legacy `BACKTEST` connection object from `/api/status` and account margin payloads.
+- Kept `BACKTEST` and `VIRTUAL` as backward-compatible request aliases for the shared `PAPER` connection.
+- Updated Backtest Live optimizer usage to require the Virtual/Paper Zerodha connection.
+- Updated user-facing Zerodha labels to show two concepts only: Virtual/Paper Data and Real Money.
+- Preserved Market Cue Analyzer and Backtest Live optimizer routing through the Virtual/Paper Zerodha client.
+- No strategy signals, Fast OHLCV scoring, entry/exit logic, paper simulation behavior, live order placement, or credential flow were changed.
+- Verified with:
+  - `python -m unittest tests.test_backtest_live_connection tests.test_web_app_feed_inputs tests.test_live_start_safety`
+  - `python -m py_compile web_app.py`
+  - `node --check web_static\app.js`
+  - `python -m unittest discover -s tests`
+  - project-wide `python -m py_compile`
+  - `RUN_CANDLE_BUILDER_STRESS=1 python -m unittest tests.test_candle_builder_stress`
+  - local web restart and HTTP smoke checks for `/`, `/api/status`, `/api/settings`, `/api/market-cue/history`, and `/api/market-cue/latest-bias`
+
+### Priority 2 - Add Pre-Trade Readiness Panel
+
+Primary goal:
+
+Add one compact readiness panel before Paper/Real start that shows whether the system is ready to trade.
+
+Checklist items:
+
+- Zerodha connection status.
+- Fresh network health.
+- Recovery state safe.
+- Settings profile valid.
+- Market Cue report freshness/reliability.
+- Paper-first guard status for real-money trading.
+
+Guardrails:
+
+- Read-only panel only.
+- Must not place, modify, cancel, or square off orders.
+- Must not change strategy decisions or live start behavior unless explicitly wired as a later blocking rule.
+
+### Priority 3 - Separate Runtime Settings From Committed Settings
+
+Primary goal:
+
+Reduce noisy git diffs from runtime values such as paper balance and temporary UI/session fields.
+
+Scope:
+
+- Move mutable runtime values to an ignored runtime file or SQLite runtime table.
+- Keep stable strategy/profile settings in `data/settings_profiles.json`.
+- Migrate current values carefully without deleting user settings.
+
+### Priority 4 - Add Real NSE CSV Fixtures For Market Cue
+
+Primary goal:
+
+Make the NSE FII/DII parser resistant to official CSV format changes.
+
+Scope:
+
+- Add sample fixture CSVs for:
+  - NSE only FII/DII report.
+  - Combined NSE+BSE+MSEI FII/DII report.
+- Cover header/footer variations and renamed buy/sell/net columns.
+- Keep samples free of secrets and generated report data.
+
+### Priority 5 - Add Frontend Smoke Tests
+
+Primary goal:
+
+Catch UI regressions before manual testing.
+
+Scope:
+
+- Load `/`.
+- Switch between dashboard, market cue, backtest, paper, live, replay, and Zerodha views.
+- Verify required buttons/forms exist.
+- Verify there are exactly two Zerodha auth forms.
+- Verify Market Cue controls render without missing IDs.
+
+### Priority 6 - Add One-Command Release Check Script
+
+Primary goal:
+
+Create one command that runs the normal hard-test path and prints a short pass/fail summary.
+
+Candidate command:
+
+```powershell
+python tools\release_check.py
+```
+
+Checks:
+
+- Full unit test discovery.
+- Optional stress test flag support.
+- Project-wide Python compile.
+- Frontend JS syntax check.
+- Frontend selector integrity check.
+- Local web/API smoke checks.
+
+### Priority 7 - Improve Market Cue Freshness Badges
+
+Primary goal:
+
+Make it visually impossible to confuse fresh, partial, stale, cached, or manual data.
+
+Scope:
+
+- Add top-level freshness badge:
+  - Fresh
+  - Partial
+  - Stale
+  - Manual
+- Add per-row source badges for fresh/stale/cached/manual/fallback.
+- Surface confidence penalties in the UI.
+
 ## 2026-05-19 Planned Job - Completed 2026-05-22
 
 ### Primary Goal
@@ -302,4 +452,71 @@ python -B -m unittest tests.test_live_start_safety tests.test_preflight tests.te
 python -B -m unittest discover -s tests
 python -B process_flow_benchmark.py
 python -B tick_storm_benchmark.py
+```
+
+## 2026-05-25 Completed Improvement - Paper SL-Limit Exit Fidelity
+
+### Primary Goal
+
+Make PAPER stoploss and trailing-stoploss exits model Zerodha option SL-limit behavior more faithfully, so paper reports do not label stoploss exits as market exits.
+
+### Completion Notes
+
+- LIVE_ZERODHA order placement remains unchanged: real protective stoploss exits use SELL `SL` orders with trigger and limit price, never `SL-M`.
+- PAPER stoploss and trailing-stoploss close events now emit simulated `SL` instead of `MARKET`.
+- PAPER stoploss and trailing-stoploss order-history rows now include simulated trigger and SL-limit prices.
+- Paper fill model remains reporting-only for this improvement: the trade exits at current paper LTP when the virtual stoploss is touched, while the order event records the equivalent simulated `SL` trigger/limit intent.
+- Paper trailing-stoploss modification events also include the simulated SL-limit price for audit clarity.
+- Added regression coverage for paper trailing stoploss modification followed by stoploss exit, proving the final order-history event is `SL` with trigger and limit prices.
+
+### Guardrails
+
+- No strategy, Fast OHLCV scoring, entry decision, or trailing formula changes.
+- No changes to real-money Zerodha placement, modification, cancellation, retry, idempotency, or protective-order OCO behavior.
+- Do not make paper exits call Zerodha or any broker adapter.
+- Preserve existing paper balance and trade-count behavior unless stricter SL-limit simulation explicitly requires a documented escaped-stop state.
+
+### Verification Performed
+
+```powershell
+python -B -m unittest tests.test_live_entry_active_candle
+python -B -m unittest tests.test_order_manager
+python -B -m unittest tests.test_strategy_regression
+python -B -m unittest tests.test_closed_trade_ui_state tests.test_sqlite_store_order_history
+python -B -m unittest discover -s tests
+```
+
+## 2026-05-25 Completed Improvement - Trailing Start Time Safeguard
+
+### Primary Goal
+
+Add a trailing-stop safeguard that tightens exits if a trade does not reach trailing-start profit within five candles from the signal-generation candle.
+
+### Completion Notes
+
+- Added `trailing_safeguard.py` so the timing/price rule is isolated from Fast OHLCV strategy decisions and the existing trailing-stop formula.
+- The safeguard is active only when trailing stoploss is enabled.
+- The five-candle clock starts from `signal_index`.
+- If price reaches `entry_price + trailing_start_points` before the five-candle deadline, the safeguard is nullified for that trade.
+- If price does not reach trailing start by the deadline:
+  - target is tightened to `entry_price + 5`.
+  - stoploss trigger is tightened to `entry_price - 5`.
+  - LIVE_ZERODHA stoploss limit price is still calculated from the configured `stoploss_limit_buffer_points`.
+- BACKTEST applies the safeguard inside the exit simulator before target/stop touch checks on the first eligible candle.
+- PAPER updates virtual target/stoploss and records simulated modification events.
+- LIVE_ZERODHA modifies the existing target SELL LIMIT and stoploss SELL SL orders; it does not cancel/recreate protective orders.
+
+### Guardrails
+
+- No Fast OHLCV scoring, entry decision, or strategy filter changes.
+- No change to the existing trailing-start/step/lock formula.
+- No live order placement side/product/quantity/idempotency changes.
+- No SL-M path added for Zerodha option stoploss orders.
+
+### Verification Performed
+
+```powershell
+python -B -m unittest tests.test_live_entry_active_candle
+python -B -m unittest tests.test_strategy_regression
+python -B -m unittest tests.test_order_manager
 ```

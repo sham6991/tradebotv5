@@ -228,6 +228,27 @@ class ZerodhaClient:
             payload["validity"] = validity
         return self.kite.modify_order(**payload)
 
+    def modify_limit_order(
+        self,
+        order_id,
+        price,
+        variety=None,
+        quantity=None,
+        order_type=None,
+        validity=None,
+    ):
+        payload = {
+            "variety": variety or self.kite.VARIETY_REGULAR,
+            "order_id": order_id,
+            "order_type": order_type or getattr(self.kite, "ORDER_TYPE_LIMIT", "LIMIT"),
+            "price": float(price),
+        }
+        if quantity not in ("", None):
+            payload["quantity"] = int(quantity)
+        if validity not in ("", None):
+            payload["validity"] = validity
+        return self.kite.modify_order(**payload)
+
     def place_equity_market_order(self, tradingsymbol, transaction_type, quantity):
         return self.place_market_order(
             tradingsymbol=tradingsymbol,

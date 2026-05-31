@@ -2,6 +2,13 @@ from datetime import datetime
 
 from fast_ohlcv_entry import backtest_limit_fill_status
 from strategy import OPTION_ENTRY_REPORT_COLUMNS, option_score_calculation_details
+from trailing_safeguard import (
+    build_safeguard_event,
+    initial_trailing_safeguard_state,
+    safeguard_prices,
+    should_apply_trailing_safeguard,
+    trailing_start_reached,
+)
 from trailing_stop import calculate_trailing_stop, trailing_settings
 
 
@@ -169,6 +176,9 @@ class BacktestTradingCore:
             "trailing_step_points": exit_result["trailing_step_points"],
             "trailing_lock_points": exit_result["trailing_lock_points"],
             "trailing_modifications": exit_result["trailing_modifications"],
+            "trailing_start_reached": exit_result["trailing_start_reached"],
+            "trailing_time_safeguard_applied": exit_result["trailing_time_safeguard_applied"],
+            "trailing_time_safeguard_modifications": exit_result["trailing_time_safeguard_modifications"],
             "same_candle_target_ignored": exit_result["same_candle_target_ignored"],
             "entry_candle_high": exit_result["entry_candle_high"],
             "entry_candle_low": exit_result["entry_candle_low"],
@@ -247,6 +257,8 @@ class BacktestTradingCore:
         current_sl_price = initial_stoploss_price
         trailing_config = trailing_settings(settings)
         trailing_modifications = []
+        trailing_safeguard_state = initial_trailing_safeguard_state(signal, entry_price, settings)
+        trailing_safeguard_modifications = []
         time_exit_candles = max(1, int(settings.get("time_exit", 10)))
 
         entry_row = option.iloc[entry_index]
@@ -277,6 +289,9 @@ class BacktestTradingCore:
                 "trailing_step_points": trailing_config["step_points"],
                 "trailing_lock_points": trailing_config["lock_points"],
                 "trailing_modifications": trailing_modifications,
+                "trailing_start_reached": trailing_safeguard_state["trailing_start_reached"],
+                "trailing_time_safeguard_applied": trailing_safeguard_state["trailing_time_safeguard_applied"],
+                "trailing_time_safeguard_modifications": trailing_safeguard_modifications,
                 "same_candle_target_ignored": same_candle_target_ignored,
                 "entry_candle_high": entry_candle_high,
                 "entry_candle_low": entry_candle_low,
@@ -290,10 +305,13 @@ class BacktestTradingCore:
             open_price = float(row.get("open", row.get("close", 0)))
             high_price = float(row["high"])
             low_price = float(row["low"])
+            if trailing_start_reached(entry_price, high_price, settings):
+                trailing_safeguard_state["trailing_start_reached"] = True
             trailing_update = calculate_trailing_stop(entry_price, current_sl_price, high_price, settings)
             if trailing_update:
                 old_sl = current_sl_price
                 current_sl_price = float(trailing_update["new_sl_price"])
+                trailing_safeguard_state["trailing_start_reached"] = True
                 trailing_modifications.append({
                     "timestamp": self._row_time(option, j),
                     "old_sl_price": old_sl,
@@ -302,6 +320,21 @@ class BacktestTradingCore:
                     "unrealized_profit_points": trailing_update["profit"],
                     "modify_status": "BACKTEST",
                 })
+            if should_apply_trailing_safeguard(trailing_safeguard_state, j):
+                old_target = target_price
+                old_sl = current_sl_price
+                target_price, current_sl_price = safeguard_prices(entry_price, settings)
+                trailing_safeguard_state["trailing_time_safeguard_applied"] = True
+                trailing_safeguard_modifications.append(build_safeguard_event(
+                    self._row_time(option, j),
+                    old_target,
+                    target_price,
+                    old_sl,
+                    current_sl_price,
+                    high_price,
+                    j,
+                    "BACKTEST",
+                ))
 
             target_touched = high_price >= target_price
             stop_touched = low_price <= current_sl_price
@@ -336,6 +369,9 @@ class BacktestTradingCore:
             "trailing_step_points": trailing_config["step_points"],
             "trailing_lock_points": trailing_config["lock_points"],
             "trailing_modifications": trailing_modifications,
+            "trailing_start_reached": trailing_safeguard_state["trailing_start_reached"],
+            "trailing_time_safeguard_applied": trailing_safeguard_state["trailing_time_safeguard_applied"],
+            "trailing_time_safeguard_modifications": trailing_safeguard_modifications,
             "same_candle_target_ignored": same_candle_target_ignored,
             "entry_candle_high": entry_candle_high,
             "entry_candle_low": entry_candle_low,

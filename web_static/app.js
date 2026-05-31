@@ -3,15 +3,22 @@ const state = {
   labels: {},
   activeSettingsProfile: "backtest",
   defaults: {},
+  marketCueRaw: null,
+  marketCueAnalysis: null,
+  marketCueUploadedFlow: null,
+  marketCueOverrides: [],
+  lastStatus: null,
+  redirectUrl: "",
 };
 
 const titles = {
   dashboard: "Dashboard",
+  "market-cue": "Indian Market Cue Analyzer",
   backtest: "Backtest Mode",
-  paper: "Paper Trading Desk",
+  paper: "Virtual/Paper Trading Desk",
   live: "Zerodha Live Trading",
   replay: "Session Replay",
-  zerodha: "Zerodha URLs",
+  zerodha: "Connections",
 };
 
 const settingOrder = [
@@ -209,6 +216,132 @@ function setMoneyText(selector, value, tone = false) {
   if (tone) setMoneyTone(node, value);
 }
 
+function shortTime(value) {
+  return value ? String(value) : "";
+}
+
+function recentTimestamp(value, maxAgeMs = 5 * 60 * 1000) {
+  if (!value) return false;
+  const parsed = Date.parse(String(value).replace(" ", "T"));
+  if (!Number.isFinite(parsed)) return false;
+  return Date.now() - parsed <= maxAgeMs;
+}
+
+function hasFailedStep(rows) {
+  return (rows || []).some(row => String(row?.status || "").trim().toUpperCase() === "FAILED");
+}
+
+function setCard(selector, title, detail = "") {
+  const card = typeof selector === "string" ? $(selector) : selector;
+  if (!card) return;
+  const strong = $("strong", card);
+  const small = $("small", card);
+  if (strong) strong.textContent = title || "-";
+  if (small) small.textContent = detail || "";
+}
+
+function renderReadiness(target, items) {
+  const node = typeof target === "string" ? $(target) : target;
+  if (!node) return;
+  node.textContent = "";
+  items.forEach(item => {
+    const row = document.createElement("div");
+    row.className = `readiness-item readiness-${item.state}`;
+    const title = document.createElement("strong");
+    title.textContent = item.label;
+    const detail = document.createElement("span");
+    detail.textContent = item.detail;
+    row.append(title, detail);
+    node.appendChild(row);
+  });
+}
+
+function percentText(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? `${number.toFixed(2)}%` : "-";
+}
+
+function renderMarketCue(result) {
+  const scoring = result?.scoring || {};
+  const raw = result?.raw_data || state.marketCueRaw || {};
+  const validation = result?.validated_data || {};
+  const flow = raw.institutional_flow || {};
+  $("#cue-bias").textContent = scoring.bias || "Not Analyzed";
+  $("#cue-confidence").textContent = scoring.confidence !== undefined ? `${scoring.confidence}%` : "-";
+  $("#cue-risk").textContent = scoring.risk_level || "-";
+  $("#cue-score").textContent = scoring.final_score ?? "-";
+  $("#cue-reliability").textContent = validation.data_reliability || "-";
+  $("#cue-fii").textContent = money(flow.fii_net);
+  $("#cue-dii").textContent = money(flow.dii_net);
+  setMoneyTone($("#cue-fii"), flow.fii_net);
+  setMoneyTone($("#cue-dii"), flow.dii_net);
+  $("#cue-flow-date").textContent = flow.data_date || "-";
+  $("#cue-flow-source").textContent = `${flow.source || "NSE"} ${flow.scope || ""}`.trim();
+  $("#cue-flow-status").textContent = flow.status || "-";
+  $("#cue-flow-mode").textContent = flow.fetch_mode || "-";
+
+  const sourceRows = [];
+  Object.values(raw.indian_market || {}).forEach(row => sourceRows.push({
+    cue_name: row.name,
+    source: row.source,
+    value: row.value,
+    percent_change: percentText(row.percent_change),
+    last_updated: row.timestamp,
+    status: row.status,
+    warning: row.warning || "",
+  }));
+  Object.values(raw.global_market || {}).forEach(row => sourceRows.push({
+    cue_name: row.name,
+    source: row.source,
+    value: row.value,
+    percent_change: percentText(row.percent_change),
+    last_updated: row.timestamp,
+    status: row.status,
+    warning: row.warning || "",
+  }));
+  if (flow.source) {
+    sourceRows.push({
+      cue_name: "FII/DII",
+      source: flow.source,
+      value: `FII ${flow.fii_net ?? "-"} / DII ${flow.dii_net ?? "-"}`,
+      percent_change: "",
+      last_updated: flow.data_date || "",
+      status: flow.status || "",
+      warning: (flow.warnings || []).join("; "),
+    });
+  }
+  renderTable("#cue-source-table", sourceRows, ["cue_name", "source", "value", "percent_change", "last_updated", "status", "warning"]);
+  renderTable("#cue-score-table", scoring.contributions || [], ["category", "name", "score", "value"]);
+  $("#cue-report-output").textContent = result?.report_text || result?.report?.report_text || JSON.stringify(raw.source_status || {}, null, 2);
+  setMarketCueActions();
+}
+
+function renderMarketCueHistory(data) {
+  const rows = (data?.reports || []).map(row => ({
+    id: row.id,
+    created_at: row.created_at,
+    bias: row.bias,
+    score: row.final_score,
+    confidence: row.confidence,
+    risk_level: row.risk_level,
+    nifty: row.nifty_ltp,
+    banknifty: row.banknifty_ltp,
+    fii: row.fii_value,
+    dii: row.dii_value,
+    reliability: row.data_reliability,
+  }));
+  renderTable("#cue-history-table", rows);
+  const status = $("#cue-history-status");
+  if (status) status.textContent = rows.length ? `${rows.length} saved reports shown. Maximum history is 60 reports.` : "No saved reports yet.";
+}
+
+function setMarketCueActions() {
+  const save = $("#cue-save");
+  const analyze = $("#cue-analyze");
+  if (save) save.disabled = !state.marketCueAnalysis;
+  if (analyze) analyze.disabled = !(state.marketCueRaw && state.marketCueUploadedFlow);
+}
+
 function accountBalanceText(mode, margin, connection) {
   if (mode === "PAPER") return money(margin?.available ?? 0);
   if (!connection?.connected) return connectionText(connection);
@@ -390,15 +523,27 @@ async function loadSettings() {
   state.defaults = { ...(data.defaults || data.profiles?.backtest || {}) };
 }
 
+function updateBacktestSourceView() {
+  const form = $("#backtest-form");
+  if (!form) return;
+  const source = form.elements.data_source?.value || "manual";
+  $all("[data-backtest-source]", form).forEach(node => {
+    node.hidden = node.dataset.backtestSource !== source;
+  });
+  $all("[data-backtest-manual]", form).forEach(node => {
+    node.hidden = source !== "manual";
+  });
+}
+
 function buildLiveViews() {
   $all(".live-view").forEach(view => {
     const mode = view.dataset.mode;
     const profile = mode === "LIVE" ? "real" : "paper";
     $(".live-layout", view).innerHTML = `
       <section class="panel live-contracts">
-        <h2>${mode === "LIVE" ? "Real Trading" : "Paper Trading"} Contracts</h2>
+        <h2>${mode === "LIVE" ? "Real Trading" : "Virtual/Paper Trading"} Contracts</h2>
         <div class="live-account-card">
-          <span>${mode === "LIVE" ? "Available Margin" : "Paper Balance"}</span>
+          <span>${mode === "LIVE" ? "Available Margin" : "Virtual/Paper Balance"}</span>
           <strong data-field="account_balance">Not Connected</strong>
           <small data-field="account_time"></small>
           <div class="account-actions">
@@ -430,11 +575,25 @@ function buildLiveViews() {
           <button type="button" data-action="stop">Stop</button>
           <button type="button" data-action="square-off">Square Off</button>
           <button type="button" data-action="kill-switch" class="danger">Kill Switch</button>
+          <small class="live-action-note" data-field="action_note">Connect and load contracts before starting.</small>
         </div>
       </section>
-      <section class="panel">
+      <section class="panel live-status-panel">
         <h2>${mode} Status</h2>
-        <pre data-field="mode_status">Waiting for connection.</pre>
+        <div class="live-status-alert" data-field="status_alert" hidden></div>
+        <div class="account-grid live-status-grid">
+          <div><span>Connection</span><strong data-field="connection_status">Not Connected</strong><small data-field="connection_detail"></small></div>
+          <div><span>Margin</span><strong data-field="margin_status">-</strong><small data-field="margin_detail"></small></div>
+          <div><span>Feed</span><strong data-field="feed_status">Stopped</strong><small data-field="feed_detail"></small></div>
+          <div><span>Session</span><strong data-field="session_status">Idle</strong><small data-field="session_detail"></small></div>
+          <div><span>Network</span><strong data-field="network_status">Not Run</strong><small data-field="network_detail"></small></div>
+          <div><span>Recovery</span><strong data-field="recovery_status">Not Checked</strong><small data-field="recovery_detail"></small></div>
+        </div>
+        <div class="readiness-strip" data-field="readiness_strip"></div>
+        <details class="raw-details">
+          <summary>Raw status details</summary>
+          <pre data-field="mode_status">Waiting for connection.</pre>
+        </details>
       </section>
       <section class="panel tick-tabs">
         <h2>Ticks</h2>
@@ -463,6 +622,123 @@ function buildLiveViews() {
       </section>
     `;
   });
+}
+
+function livePayloadReady(view) {
+  const payload = collectLivePayload(view);
+  return Boolean(
+    payload.nifty_token &&
+    payload.options.every(option => option.tradingsymbol && option.token)
+  );
+}
+
+function liveReadiness(data, view) {
+  const mode = view.dataset.mode;
+  const connection = data.connections?.[mode] || {};
+  const margin = data.account_margins?.[mode] || {};
+  const network = data.network_health?.[mode] || {};
+  const recovery = data.recovery_status?.[mode] || {};
+  const tokensReady = livePayloadReady(view);
+  const connected = Boolean(connection.connected);
+  const networkReady = mode !== "LIVE" || (
+    recentTimestamp(network.checked_at) &&
+    String(network.status || "").trim().toUpperCase() === "CONNECTED" &&
+    !hasFailedStep(network.steps)
+  );
+  const recoveryReady = mode !== "LIVE" || (
+    recentTimestamp(recovery.checked_at) &&
+    String(recovery.severity || "").trim().toUpperCase() === "GOOD" &&
+    String(recovery.status || "").trim().toUpperCase() === "SAFE TO TRADE"
+  );
+  const marginReady = mode !== "LIVE" || (
+    Number(margin.available) > 0 &&
+    !String(margin.error || "").trim()
+  );
+  const feedReady = connected && tokensReady;
+  const startReady = feedReady && networkReady && recoveryReady && marginReady;
+  const items = [
+    {
+      label: "Connection",
+      state: connected ? "ok" : "bad",
+      detail: connected ? connectionText(connection) : "Connect this mode first",
+    },
+    {
+      label: "Contracts",
+      state: tokensReady ? "ok" : "bad",
+      detail: tokensReady ? "NIFTY, CE, and PE ready" : "Fetch or enter tokens",
+    },
+  ];
+  if (mode === "LIVE") {
+    items.push(
+      {
+        label: "Network",
+        state: networkReady ? "ok" : "bad",
+        detail: networkReady ? `${network.quality || "Good"} at ${shortTime(network.checked_at)}` : "Run fresh LIVE health check",
+      },
+      {
+        label: "Recovery",
+        state: recoveryReady ? "ok" : "bad",
+        detail: recoveryReady ? recovery.status || "Safe To Trade" : "Run fresh LIVE recovery check",
+      },
+      {
+        label: "Margin",
+        state: marginReady ? "ok" : "bad",
+        detail: marginReady ? money(margin.available) : "Fresh LIVE margin required",
+      }
+    );
+  }
+  return { connected, tokensReady, feedReady, startReady, items };
+}
+
+function renderLiveStatus(data, view) {
+  const mode = view.dataset.mode;
+  const connection = data.connections?.[mode] || {};
+  const margin = data.account_margins?.[mode] || {};
+  const feed = data.feed || {};
+  const session = data.session_summary || {};
+  const network = data.network_health?.[mode] || {};
+  const recovery = data.recovery_status?.[mode] || {};
+  const readiness = liveReadiness(data, view);
+
+  setCard($(`[data-field="connection_status"]`, view)?.parentElement, connectionText(connection), connection.login_at || connection.label || "");
+  setCard($(`[data-field="margin_status"]`, view)?.parentElement, accountBalanceText(mode, margin, connection), margin.updated_at || margin.error || "");
+  setCard($(`[data-field="feed_status"]`, view)?.parentElement, humanText(feed.feed_status || "stopped"), feed.last_feed_event || feed.last_tick_received_at || "");
+  const sessionLabel = session.mode === mode ? (session.session_status || (session.session_id ? "trading started" : "Idle")) : "Idle";
+  setCard($(`[data-field="session_status"]`, view)?.parentElement, sessionLabel, `PnL ${money(session.session_pnl ?? 0)} | Trades ${session.session_trade_count || 0}`);
+  setCard($(`[data-field="network_status"]`, view)?.parentElement, network.status || "Not Run", network.message || shortTime(network.checked_at));
+  setCard($(`[data-field="recovery_status"]`, view)?.parentElement, recovery.status || "Not Checked", recovery.summary || shortTime(recovery.checked_at));
+  renderReadiness($(`[data-field="readiness_strip"]`, view), readiness.items);
+
+  const alertNode = $(`[data-field="status_alert"]`, view);
+  const status = data.status || "";
+  const latestAlert = (data.alerts || []).slice(-1)[0];
+  const alertText = latestAlert?.message || latestAlert?.reason || "";
+  const shouldShowStatus = data.current_mode === mode && /(failed|blocked|error|kill switch)/i.test(status);
+  const message = shouldShowStatus ? status : alertText;
+  if (alertNode) {
+    alertNode.textContent = message || "";
+    alertNode.hidden = !message;
+  }
+
+  const startFeed = $(`[data-action="start-feed"]`, view);
+  const startLive = $(`[data-action="start-live"]`, view);
+  const stop = $(`[data-action="stop"]`, view);
+  const squareOff = $(`[data-action="square-off"]`, view);
+  const killSwitch = $(`[data-action="kill-switch"]`, view);
+  if (startFeed) startFeed.disabled = !readiness.feedReady;
+  if (startLive) startLive.disabled = !readiness.startReady;
+  const feedActive = data.current_mode === mode && String(feed.feed_status || "").toLowerCase() !== "stopped";
+  const hasOrders = Boolean((data.active_orders || []).length || Object.keys(data.live_trade || {}).length);
+  if (stop) stop.disabled = !feedActive;
+  if (squareOff) squareOff.disabled = !hasOrders;
+  if (killSwitch) killSwitch.disabled = !(readiness.connected || feedActive || hasOrders);
+  const note = $(`[data-field="action_note"]`, view);
+  if (note) {
+    if (!readiness.connected) note.textContent = `Connect ${mode} before starting feed or trading.`;
+    else if (!readiness.tokensReady) note.textContent = "Fetch or enter NIFTY, CE, and PE contracts before starting.";
+    else if (!readiness.startReady && mode === "LIVE") note.textContent = "Run fresh LIVE health and recovery checks before real-money start.";
+    else note.textContent = mode === "LIVE" ? "LIVE readiness complete." : "Paper desk is ready to start.";
+  }
 }
 
 function collectLivePayload(view) {
@@ -498,6 +774,7 @@ function collectZerodhaBacktestPayload(form) {
 }
 
 async function handleLiveAction(button) {
+  if (button.disabled) return;
   const view = button.closest(".live-view");
   const mode = view.dataset.mode;
   const action = button.dataset.action;
@@ -511,6 +788,7 @@ async function handleLiveAction(button) {
   if (action === "refresh-margin") {
     const data = await api("/api/zerodha/margin", { mode });
     toast(data.error || "Balance refreshed");
+    await refreshStatus();
     return;
   }
   if (action === "disconnect") {
@@ -532,26 +810,31 @@ async function handleLiveAction(button) {
   if (action === "start-feed") {
     await api("/api/live/start-feed", payload);
     toast("Feed connecting");
+    await refreshStatus();
     return;
   }
   if (action === "start-live") {
-    await api("/api/live/start", payload);
-    toast(`${mode} worker started`);
+    const data = await api("/api/live/start", payload);
+    toast(data.message || `${mode} worker starting`);
+    await refreshStatus();
     return;
   }
   if (action === "stop") {
     await api("/api/live/stop", {});
     toast("Stopped");
+    await refreshStatus();
     return;
   }
   if (action === "square-off") {
     const data = await api("/api/live/square-off", {});
     toast(data.message || "Square-off requested");
+    await refreshStatus();
     return;
   }
   if (action === "kill-switch") {
     const data = await api("/api/live/kill-switch", {});
     toast(data.reason || "Kill switch activated");
+    await refreshStatus();
     return;
   }
   if (action === "open-candles") {
@@ -570,6 +853,14 @@ async function handleZerodhaBacktestAction(button) {
     toast("NIFTY token fetched");
     return;
   }
+}
+
+function showLiveActionError(button, error) {
+  const view = button.closest(".live-view");
+  const alertNode = $(`[data-field="status_alert"]`, view);
+  if (!alertNode) return;
+  alertNode.textContent = error.message || "Action failed";
+  alertNode.hidden = false;
 }
 
 async function runNetworkHealthCheck() {
@@ -602,10 +893,58 @@ async function runRecoveryCheck() {
   }
 }
 
+async function fetchMarketCues() {
+  $("#cue-report-output").textContent = "Fetching Zerodha and global market cues. Upload NSE FII/DII CSV before analyzing...";
+  state.marketCueAnalysis = null;
+  setMarketCueActions();
+  const data = await api("/api/market-cue/fetch", {});
+  state.marketCueRaw = data;
+  if (state.marketCueUploadedFlow) state.marketCueRaw.institutional_flow = state.marketCueUploadedFlow;
+  renderMarketCue({ raw_data: state.marketCueRaw, report_text: "Fetched market cues. Upload NSE FII/DII CSV, then click Analyze." });
+  toast("Market cues fetched");
+}
+
+async function analyzeMarketCues(extraPayload = {}) {
+  if (!state.marketCueRaw) {
+    toast("Fetch market cues before analyzing");
+    return;
+  }
+  if (!state.marketCueUploadedFlow && !extraPayload.manual_fii_dii) {
+    toast("Upload NSE FII/DII CSV before analyzing");
+    return;
+  }
+  $("#cue-report-output").textContent = "Analyzing market cues...";
+  const payload = { raw_data: state.marketCueRaw, ...extraPayload };
+  if (state.marketCueUploadedFlow && !payload.institutional_flow) payload.institutional_flow = state.marketCueUploadedFlow;
+  if (state.marketCueOverrides.length && !payload.manual_overrides) payload.manual_overrides = state.marketCueOverrides;
+  const data = await api("/api/market-cue/analyze", payload);
+  state.marketCueRaw = data.raw_data;
+  state.marketCueAnalysis = data;
+  renderMarketCue(data);
+  toast(`Market cue: ${data.scoring?.bias || "analyzed"}`);
+}
+
+async function saveMarketCueReport() {
+  if (!state.marketCueAnalysis) {
+    toast("Analyze market cues before saving");
+    return;
+  }
+  const data = await api("/api/market-cue/save", { analysis: state.marketCueAnalysis });
+  toast(`Market cue report saved #${data.report_id} in results/market_cue`);
+  await loadMarketCueHistory();
+}
+
+async function loadMarketCueHistory() {
+  const data = await api("/api/market-cue/history");
+  renderMarketCueHistory(data);
+  $("#cue-history-table")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
 async function refreshStatus() {
   const data = await api("/api/status");
+  state.lastStatus = data;
   $("#status-line").textContent = data.status || "Ready";
-  $("#redirect-url").value = data.urls.redirect;
+  state.redirectUrl = data.urls.redirect || "";
   $("#zerodha-redirect-copy").value = data.urls.redirect;
   $("#feed-status").textContent = humanText(data.feed.feed_status || "stopped");
   $("#ticks-rate").textContent = Math.round(data.feed.ticks_per_second || 0);
@@ -614,7 +953,7 @@ async function refreshStatus() {
   const realMargin = data.account_margins?.LIVE || {};
   const paperMargin = data.account_margins?.PAPER || {};
   const session = data.session_summary || {};
-  $("#real-margin").textContent = money(realMargin.available);
+  $("#real-margin").textContent = realMargin.error ? realMargin.error : money(realMargin.available);
   $("#paper-margin").textContent = money(paperMargin.available ?? 0);
   $("#dash-real-margin").textContent = realMargin.error ? realMargin.error : money(realMargin.available);
   $("#dash-real-margin-time").textContent = realMargin.updated_at || "";
@@ -624,7 +963,6 @@ async function refreshStatus() {
   $("#dash-order-count").textContent = (data.active_orders?.length || 0) + (data.order_history?.length || 0);
   $("#paper-connection").textContent = connectionText(data.connections.PAPER);
   $("#live-connection").textContent = connectionText(data.connections.LIVE);
-  $("#backtest-connection").textContent = connectionText(data.connections.BACKTEST);
   renderNetworkHealth(data.network_health || {});
   renderRecoveryStatus(data.recovery_status || {});
   $("#latest-result").textContent = JSON.stringify(data.last_backtest || data.last_replay?.summary || {}, null, 2);
@@ -642,6 +980,7 @@ async function refreshStatus() {
     const connection = data.connections?.[view.dataset.mode] || {};
     $(`[data-field="account_balance"]`, view).textContent = accountBalanceText(view.dataset.mode, margin, connection);
     $(`[data-field="account_time"]`, view).textContent = margin.updated_at || "";
+    renderLiveStatus(data, view);
     ["NIFTY", "CE", "PE"].forEach(name => {
       const rateNode = $(`[data-rate="${name}"]`, view);
       if (rateNode) rateNode.textContent = `${data.tick_rates?.[name] || 0}/s`;
@@ -693,9 +1032,32 @@ function bindForms() {
         .catch(error => toast(error.message));
     }
     const liveButton = event.target.closest(".live-view [data-action]");
-    if (liveButton) handleLiveAction(liveButton).catch(error => toast(error.message));
+    if (liveButton) handleLiveAction(liveButton).catch(error => {
+      showLiveActionError(liveButton, error);
+      toast(error.message);
+    });
     const zerodhaBacktestButton = event.target.closest("[data-zbt-action]");
     if (zerodhaBacktestButton) handleZerodhaBacktestAction(zerodhaBacktestButton).catch(error => toast(error.message));
+  });
+
+  document.addEventListener("input", event => {
+    const view = event.target.closest(".live-view");
+    if (view && state.lastStatus) renderLiveStatus(state.lastStatus, view);
+  });
+
+  document.addEventListener("change", event => {
+    const view = event.target.closest(".live-view");
+    if (view && state.lastStatus) renderLiveStatus(state.lastStatus, view);
+    if (event.target.closest("#backtest-form [name='data_source']")) updateBacktestSourceView();
+  });
+
+  $("#copy-redirect-url").addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(state.redirectUrl || $("#zerodha-redirect-copy").value);
+      toast("Redirect URL copied");
+    } catch (_error) {
+      toast(state.redirectUrl || $("#zerodha-redirect-copy").value || "Redirect URL unavailable");
+    }
   });
 
   $("#settings-defaults").addEventListener("click", () => {
@@ -739,12 +1101,79 @@ function bindForms() {
   $("#recovery-mode").addEventListener("change", () => {
     refreshStatus().catch(error => toast(error.message));
   });
+  $("#cue-fetch").addEventListener("click", () => fetchMarketCues().catch(error => {
+    $("#cue-report-output").textContent = error.message;
+    toast(error.message);
+  }));
+  $("#cue-refresh").addEventListener("click", () => fetchMarketCues().catch(error => toast(error.message)));
+  $("#cue-analyze").addEventListener("click", () => analyzeMarketCues().catch(error => {
+    $("#cue-report-output").textContent = error.message;
+    toast(error.message);
+  }));
+  $("#cue-save").addEventListener("click", () => saveMarketCueReport().catch(error => toast(error.message)));
+  $("#cue-history").addEventListener("click", () => loadMarketCueHistory().catch(error => toast(error.message)));
+
+  $("#cue-upload-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const data = await api("/api/market-cue/upload-fii-dii", form);
+      state.marketCueUploadedFlow = data;
+      state.marketCueAnalysis = null;
+      $("#cue-upload-output").textContent = JSON.stringify(data, null, 2);
+      if (state.marketCueRaw) {
+        state.marketCueRaw.institutional_flow = data;
+        renderMarketCue({ raw_data: state.marketCueRaw, report_text: "NSE FII/DII CSV parsed. Click Analyze to generate the report." });
+      }
+      setMarketCueActions();
+      toast(`NSE CSV parsed: ${data.status}`);
+    } catch (error) {
+      $("#cue-upload-output").textContent = error.message;
+      toast(error.message);
+    }
+  });
+
+  $("#cue-manual-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const manual_fii_dii = {
+      fii_net: form.get("fii_net"),
+      dii_net: form.get("dii_net"),
+      data_date: form.get("data_date"),
+      reason: form.get("reason"),
+    };
+    analyzeMarketCues({ manual_fii_dii }).catch(error => {
+      $("#cue-report-output").textContent = error.message;
+      toast(error.message);
+    });
+  });
+
+  $("#cue-override-form").addEventListener("submit", async event => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const field_name = String(form.get("field_name") || "").trim();
+    if (!field_name) {
+      toast("Enter an override field name");
+      return;
+    }
+    state.marketCueOverrides.push({
+      field_name,
+      override_value: form.get("override_value"),
+      reason: form.get("reason"),
+    });
+    analyzeMarketCues({ manual_overrides: state.marketCueOverrides }).catch(error => {
+      $("#cue-report-output").textContent = error.message;
+      toast(error.message);
+    });
+  });
 
   $("#backtest-form").addEventListener("submit", async event => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     form.set("settings", JSON.stringify(currentSettings("backtest")));
-    $("#backtest-output").textContent = "Running backtest...";
+    $("#backtest-output").textContent = form.get("data_source") === "zerodha"
+      ? "Fetching Zerodha candles and running backtest..."
+      : "Running backtest...";
     try {
       const data = await api("/api/backtest/run", form);
       $("#backtest-output").textContent = JSON.stringify(data, null, 2);
@@ -808,14 +1237,17 @@ function bindForms() {
   });
 
   $all("input[readonly]").forEach(input => input.addEventListener("click", () => input.select()));
+  updateBacktestSourceView();
 }
 
 async function boot() {
   bindNavigation();
   buildLiveViews();
   bindForms();
+  setMarketCueActions();
   await loadSettings();
   await refreshStatus();
+  loadMarketCueHistory().catch(() => {});
   setInterval(() => refreshStatus().catch(() => {}), 1500);
 }
 

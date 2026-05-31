@@ -37,11 +37,13 @@ REPLAY_COLUMNS = (
 def latest_replay_database(result_folder=RESULT_FOLDER):
     if not result_folder or not os.path.isdir(result_folder):
         return ""
-    candidates = [
-        os.path.join(result_folder, name)
-        for name in os.listdir(result_folder)
-        if name.lower().endswith(".db")
-    ]
+    candidates = []
+    for root, _dirs, files in os.walk(result_folder):
+        candidates.extend(
+            os.path.join(root, name)
+            for name in files
+            if name.lower().endswith(".db")
+        )
     if not candidates:
         return ""
     return max(candidates, key=os.path.getmtime)

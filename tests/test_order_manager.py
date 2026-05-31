@@ -81,6 +81,12 @@ class FakeZerodha:
         self.orders_by_id[order_id]["price"] = kwargs["price"]
         return order_id
 
+    def modify_limit_order(self, **kwargs):
+        self.calls.append(("MODIFY_LIMIT", kwargs))
+        order_id = kwargs["order_id"]
+        self.orders_by_id[order_id]["price"] = kwargs["price"]
+        return order_id
+
     def order_status(self, order_id):
         return self.status_by_id.get(order_id, "UNKNOWN")
 
@@ -260,6 +266,19 @@ class ZerodhaOrderManagerTests(unittest.TestCase):
         self.assertEqual(fake.calls[-1][1]["order_id"], stoploss["order_id"])
         self.assertEqual(fake.calls[-1][1]["trigger_price"], 105)
         self.assertEqual(fake.calls[-1][1]["price"], 103)
+
+    def test_live_modifies_existing_limit_price(self):
+        fake = FakeZerodha()
+        manager = ZerodhaOrderManager(fake, mode="LIVE", default_lot_size=75)
+        target = manager.place_order("SELL", "NIFTY25000CE", 50, order_type="LIMIT", price=120)
+
+        result = manager.modify_limit_price(target["order_id"], 105, quantity=50)
+
+        self.assertTrue(result["modified"])
+        self.assertEqual(fake.calls[-1][0], "MODIFY_LIMIT")
+        self.assertEqual(fake.calls[-1][1]["order_id"], target["order_id"])
+        self.assertEqual(fake.calls[-1][1]["price"], 105)
+        self.assertEqual(fake.calls[-1][1]["quantity"], 50)
 
     def test_place_failure_is_returned_not_raised(self):
         fake = FakeZerodha()

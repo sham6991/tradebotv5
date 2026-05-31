@@ -21,15 +21,15 @@ class BacktestLiveClient:
 
 
 class BacktestLiveConnectionTests(unittest.TestCase):
-    def test_backtest_live_connection_blocks_real_live_login(self):
+    def test_virtual_connection_blocks_real_live_login(self):
         app = WebTradeBotApp()
-        app.zerodha_clients_by_mode["BACKTEST"] = BacktestLiveClient()
+        app.zerodha_clients_by_mode["PAPER"] = BacktestLiveClient()
 
         self.assertTrue(app.connection_status("LIVE")["blocked"])
-        with self.assertRaisesRegex(ValueError, "Backtest Live Data is already connected"):
+        with self.assertRaisesRegex(ValueError, "Virtual/Paper Data is already connected"):
             app.start_login({"mode": "LIVE", "api_key": "key", "api_secret": "secret"})
 
-    def test_real_live_connection_blocks_backtest_live_login(self):
+    def test_real_live_connection_blocks_virtual_login(self):
         app = WebTradeBotApp()
         app.zerodha_clients_by_mode["LIVE"] = BacktestLiveClient()
 
@@ -40,18 +40,26 @@ class BacktestLiveConnectionTests(unittest.TestCase):
     def test_backtest_optimizer_must_use_backtest_live_mode(self):
         app = WebTradeBotApp()
 
-        with self.assertRaisesRegex(ValueError, "Backtest Live Data"):
+        with self.assertRaisesRegex(ValueError, "Virtual/Paper Zerodha"):
             app.run_live_backtest_optimizer_job({"mode": "LIVE"})
 
-    def test_backtest_live_fetch_uses_backtest_connection(self):
+    def test_status_payload_exposes_only_two_zerodha_connections(self):
         app = WebTradeBotApp()
-        app.zerodha_clients_by_mode["BACKTEST"] = BacktestLiveClient()
+        payload = app.status_payload()
+
+        self.assertEqual(set(payload["connections"]), {"PAPER", "LIVE"})
+        self.assertEqual(set(payload["account_margins"]), {"PAPER", "LIVE"})
+        self.assertNotIn("BACKTEST", payload["connections"])
+
+    def test_backtest_live_fetch_uses_virtual_connection(self):
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["PAPER"] = BacktestLiveClient()
 
         self.assertEqual(app.fetch_nifty_token("BACKTEST")["token"], 256265)
 
     def test_fetch_option_returns_token_alias(self):
         app = WebTradeBotApp()
-        app.zerodha_clients_by_mode["BACKTEST"] = BacktestLiveClient()
+        app.zerodha_clients_by_mode["PAPER"] = BacktestLiveClient()
 
         contract = app.fetch_option_contract("BACKTEST", {
             "option_type": "CE",

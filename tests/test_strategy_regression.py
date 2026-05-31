@@ -582,6 +582,37 @@ class StrategyRegressionTests(unittest.TestCase):
         self.assertEqual(core.trades[0]["current_sl_price"], 120)
         self.assertEqual(core.trades[0]["trailing_modifications"][0]["new_sl_price"], 120)
 
+    def test_backtest_trailing_time_safeguard_tightens_after_five_signal_candles(self):
+        option = exit_option_frame([
+            {"open": 100, "high": 105, "low": 96, "close": 101},
+            {"open": 101, "high": 106, "low": 96, "close": 102},
+            {"open": 102, "high": 106, "low": 96, "close": 103},
+            {"open": 103, "high": 106, "low": 96, "close": 104},
+            {"open": 104, "high": 106, "low": 96, "close": 104},
+            {"open": 104, "high": 106, "low": 96, "close": 104},
+        ])
+
+        core = fixed_exit_core(
+            option,
+            {
+                "trailing_sl_enabled": True,
+                "profit_points": 20,
+                "safety_points": 10,
+                "time_exit": 10,
+                "trailing_start_points": 10,
+                "trailing_step_points": 5,
+                "trailing_lock_points": 5,
+            },
+        )
+
+        self.assertEqual(core.trades[0]["Reason"], "TARGET")
+        self.assertEqual(core.trades[0]["Exit"], 105)
+        self.assertEqual(core.trades[0]["Target Price"], 105)
+        self.assertEqual(core.trades[0]["current_sl_price"], 95)
+        self.assertTrue(core.trades[0]["trailing_time_safeguard_applied"])
+        self.assertFalse(core.trades[0]["trailing_start_reached"])
+        self.assertEqual(core.trades[0]["trailing_time_safeguard_modifications"][0]["new_target_price"], 105)
+
     def test_backtest_blocks_further_entries_after_two_stoplosses(self):
         engine = TradingEngine(cooldown=0)
         core = BacktestTradingCore(engine)

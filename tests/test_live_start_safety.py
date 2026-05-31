@@ -96,6 +96,30 @@ class LiveStartSafetyTests(unittest.TestCase):
         self.assertEqual(result["status"], "Do Not Start New Trade")
         self.assertIn("RESTORED_KILL_SWITCH_ACTIVE", {item["code"] for item in result["findings"]})
 
+    def test_recovery_state_reads_live_subfolder_before_legacy_root(self):
+        import web_app
+
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            original_results = web_app.RESULT_FOLDER
+            web_app.RESULT_FOLDER = temp_dir
+            try:
+                live_dir = os.path.join(temp_dir, "real_money_trading")
+                os.makedirs(live_dir)
+                subfolder_path = os.path.join(live_dir, "live_open_position.json")
+                with open(subfolder_path, "w", encoding="utf-8") as handle:
+                    json.dump({"trade_no": "SUBFOLDER"}, handle)
+                with open(os.path.join(temp_dir, "live_open_position.json"), "w", encoding="utf-8") as handle:
+                    json.dump({"trade_no": "LEGACY"}, handle)
+
+                app = web_app.WebTradeBotApp()
+                position = app.read_recovery_json("LIVE", "open_position")
+                rows = app.recovery_file_rows("LIVE")
+            finally:
+                web_app.RESULT_FOLDER = original_results
+
+        self.assertEqual(position["trade_no"], "SUBFOLDER")
+        self.assertIn(subfolder_path, {row["path"] for row in rows})
+
 
 if __name__ == "__main__":
     unittest.main()

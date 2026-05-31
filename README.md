@@ -47,6 +47,15 @@ Postback is disabled. Live order status, average price, fill quantity, pending
 quantity, cancellations, and rejections continue to be refreshed through the
 existing polling and reconciliation flow.
 
+## Indian Market Cue Analyzer
+
+The web app includes a report-only `Market Cue` view for NIFTY 50 and BANK NIFTY
+opening analysis. It uses the existing Virtual/Paper Zerodha connection, plus
+`yfinance` global cues and NSE FII/DII CSV data. It never places, modifies, or
+cancels orders.
+
+More details are in `MARKET_CUE_README.md`.
+
 The previous desktop UI is still available for comparison:
 
 ```powershell

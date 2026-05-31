@@ -22,6 +22,24 @@ class ReplayUiHelperTests(unittest.TestCase):
 
             self.assertEqual(latest_replay_database(temp_dir), newer)
 
+    def test_latest_replay_database_searches_result_subfolders(self):
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as temp_dir:
+            paper_dir = os.path.join(temp_dir, "paper_trading")
+            real_dir = os.path.join(temp_dir, "real_money_trading")
+            os.makedirs(paper_dir)
+            os.makedirs(real_dir)
+            older = os.path.join(paper_dir, "paper_trading_20260528.db")
+            newer = os.path.join(real_dir, "real_money_trading_20260528.db")
+            for path in (older, newer):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("")
+            old_time = time.time() - 10
+            new_time = time.time()
+            os.utime(older, (old_time, old_time))
+            os.utime(newer, (new_time, new_time))
+
+            self.assertEqual(latest_replay_database(temp_dir), newer)
+
     def test_replay_table_row_formats_event_item(self):
         row = replay_table_row({
             "kind": "event",

@@ -259,6 +259,32 @@ class ZerodhaOrderManager:
                 "price": price,
             }
 
+    def modify_limit_price(self, order_id, price, quantity=None):
+        if not self.is_live() or not self.zerodha or not order_id:
+            return {"modified": False, "status": "", "error": ""}
+        try:
+            self.zerodha.modify_limit_order(
+                order_id=order_id,
+                price=price,
+                quantity=quantity,
+            )
+            return {
+                "modified": True,
+                "status": "MODIFIED",
+                "error": "",
+                "price": price,
+            }
+        except Exception as exc:
+            classification = classify_runtime_error(exc, context="order_modify")
+            return {
+                "modified": False,
+                "status": "FAILED",
+                "error": str(exc),
+                "error_class": classification["class"],
+                "error_category": classification["category"],
+                "price": price,
+            }
+
     def order_status(self, order_id, fallback="UNKNOWN"):
         if not self.is_live() or not self.zerodha or not order_id:
             return fallback

@@ -97,6 +97,7 @@ class LiveTrailingOrders:
 class LiveProtectiveOrders:
     def __init__(self):
         self.placed = []
+        self.modified = []
         self.next_id = 1
 
     def place_order(self, side, tradingsymbol, quantity, product="NRML", order_type="MARKET", price=None, trigger_price=None):
@@ -135,6 +136,20 @@ class LiveProtectiveOrders:
             "is_partial": False,
             "raw": {},
         }
+
+    def modify_limit_price(self, order_id, price, quantity=None):
+        self.modified.append(("LIMIT", order_id, price, quantity))
+        return {"modified": True, "status": "MODIFIED", "error": "", "price": price}
+
+    def modify_stoploss_trigger(self, order_id, trigger_price, quantity=None, price=None, order_type="SL"):
+        self.modified.append(("SL", order_id, trigger_price, quantity, price, order_type))
+        return {"modified": True, "status": "MODIFIED", "error": "", "trigger_price": trigger_price, "price": price}
+
+    def average_price(self, order_id, fallback):
+        return fallback
+
+    def filled_quantity(self, order_id, fallback):
+        return fallback
 
 
 class LiveEntryActiveCandleTests(unittest.TestCase):
@@ -251,6 +266,90 @@ class LiveEntryActiveCandleTests(unittest.TestCase):
         self.assertIsNone(session.open_position)
         self.assertEqual(session.trades[-1]["Reason"], "TRAILING_STOPLOSS")
         self.assertEqual(session.trades[-1]["Exit"], 110)
+        self.assertEqual(session.trades[-1]["stoploss_order_type"], "SL")
+        self.assertEqual(session.order_history[-1]["Order Type"], "SL")
+        self.assertEqual(session.order_history[-1]["Limit Price"], 108)
+        self.assertEqual(session.order_history[-1]["Trigger Price"], 110)
+        self.assertEqual(session.order_history[-1]["Exit Reason"], "TRAILING_STOPLOSS")
+        self.assertFalse(session.trades[-1]["trailing_time_safeguard_applied"])
+
+    def test_paper_trailing_time_safeguard_tightens_target_and_sl_when_start_not_reached(self):
+        test_settings = settings(
+            profit_points=20,
+            safety_points=10,
+            trailing_sl_enabled=True,
+            trailing_start_points=10,
+            trailing_step_points=5,
+            trailing_lock_points=5,
+        )
+        option = fast_option_frame("CE")
+        session = LivePaperSession(
+            nifty_frame("bullish", count=len(option)),
+            [option],
+            {1: "NIFTY", 2: "OPTION_0"},
+            test_settings,
+            save_path=None,
+            mode="PAPER",
+        )
+        session._open_position_from_fill(signal(option), 1, "", 100, 1)
+
+        session._check_live_exit_price(104, datetime(2026, 5, 12, 9, 30))
+
+        self.assertIsNotNone(session.open_position)
+        self.assertEqual(session.open_position["target"], 105)
+        self.assertEqual(session.open_position["stoploss"], 95)
+        self.assertTrue(session.open_position["trailing_time_safeguard_applied"])
+        self.assertEqual(session.order_history[-2]["Order Type"], "LIMIT")
+        self.assertEqual(session.order_history[-2]["Limit Price"], 105)
+        self.assertEqual(session.order_history[-1]["Order Type"], "SL")
+        self.assertEqual(session.order_history[-1]["Trigger Price"], 95)
+        self.assertEqual(session.order_history[-1]["Limit Price"], 93)
+
+    def test_paper_time_exit_records_sell_sl_with_ltp_trigger_and_buffer_limit(self):
+        test_settings = settings(time_exit=1, stoploss_limit_buffer_points=2)
+        option = fast_option_frame("CE")
+        session = LivePaperSession(
+            nifty_frame("bullish", count=len(option)),
+            [option],
+            {1: "NIFTY", 2: "OPTION_0"},
+            test_settings,
+            save_path=None,
+            mode="PAPER",
+        )
+        session._open_position_from_fill(signal(option), 1, "", 100, 1)
+
+        session._check_live_exit(1)
+
+        self.assertIsNone(session.open_position)
+        self.assertEqual(session.trades[-1]["Reason"], "TIME_EXIT")
+        self.assertEqual(session.order_history[-1]["Order Type"], "SL")
+        self.assertEqual(session.order_history[-1]["Trigger Price"], 101)
+        self.assertEqual(session.order_history[-1]["Limit Price"], 99)
+
+    def test_live_time_exit_places_sell_sl_with_ltp_trigger_and_buffer_limit(self):
+        test_settings = settings(time_exit=1, stoploss_limit_buffer_points=2)
+        option = fast_option_frame("CE")
+        session = LivePaperSession(
+            nifty_frame("bullish", count=len(option)),
+            [option],
+            {1: "NIFTY", 2: "OPTION_0"},
+            test_settings,
+            save_path=None,
+            mode="LIVE",
+            zerodha=None,
+        )
+        fake_orders = LiveProtectiveOrders()
+        session.orders = fake_orders
+        session._open_position_from_fill(signal(option), 75, "B1", 100, 75)
+
+        session._check_live_exit(1)
+
+        self.assertIsNone(session.open_position)
+        self.assertEqual(session.trades[-1]["Reason"], "TIME_EXIT")
+        self.assertEqual(fake_orders.placed[-1]["side"], "SELL")
+        self.assertEqual(fake_orders.placed[-1]["order_type"], "SL")
+        self.assertEqual(fake_orders.placed[-1]["trigger_price"], 101)
+        self.assertEqual(fake_orders.placed[-1]["price"], 99)
 
     def test_live_trailing_stop_modifies_existing_sl_order_only(self):
         test_settings = settings(
@@ -305,6 +404,39 @@ class LiveEntryActiveCandleTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(fake_orders.modified, [("S1", 110, 75, 108, "SL")])
         self.assertEqual(session.open_position["stoploss"], 110)
+
+    def test_live_trailing_time_safeguard_modifies_existing_target_and_sl_orders(self):
+        test_settings = settings(
+            profit_points=20,
+            safety_points=10,
+            trailing_sl_enabled=True,
+            trailing_start_points=10,
+            trailing_step_points=5,
+            trailing_lock_points=5,
+        )
+        option = fast_option_frame("CE")
+        session = LivePaperSession(
+            nifty_frame("bullish", count=len(option)),
+            [option],
+            {1: "NIFTY", 2: "OPTION_0"},
+            test_settings,
+            save_path=None,
+            mode="LIVE",
+            zerodha=object(),
+        )
+        fake_orders = LiveProtectiveOrders()
+        session.orders = fake_orders
+
+        session._open_position_from_fill(signal(option), 75, "B1", 100, 75)
+        changed = session._apply_trailing_time_safeguard(104, 5, datetime(2026, 5, 12, 9, 30))
+
+        self.assertTrue(changed)
+        self.assertEqual(session.open_position["target"], 105)
+        self.assertEqual(session.open_position["stoploss"], 95)
+        self.assertEqual(fake_orders.modified, [
+            ("LIMIT", "O1", 105, 75),
+            ("SL", "O2", 95, 75, 93, "SL"),
+        ])
 
     def test_live_protective_stoploss_uses_sl_trigger_and_limit_buffer(self):
         test_settings = settings(profit_points=20, safety_points=10, stoploss_limit_buffer_points=2)

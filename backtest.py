@@ -155,7 +155,7 @@ def backtest_run_metadata_rows(settings, core, save_path, sheet_names):
         ("Mode", "BACKTEST"),
         ("Data Source", settings.get("data_source", "uploaded/server file")),
         ("Chart Interval", settings.get("chart_interval", "")),
-        ("Broker Connected", "No"),
+        ("Broker Connected", settings.get("broker_connected", "No")),
         ("Backtest Fill Mode", settings.get("backtest_limit_fill_mode", "")),
         ("Slippage Model", settings.get("market_entry_backtest_mode", "SIGNAL_CLOSE")),
         ("Initial Balance", initial_balance),

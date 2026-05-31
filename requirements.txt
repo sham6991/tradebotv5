@@ -3,3 +3,12 @@ keyring
 numpy
 openpyxl
 pandas
+fastapi
+uvicorn
+jinja2
+requests
+beautifulsoup4
+yfinance
+python-dotenv
+sqlalchemy
+python-multipart

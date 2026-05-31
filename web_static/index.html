@@ -18,11 +18,12 @@
         </div>
         <nav>
           <button class="nav active" data-view="dashboard">Dashboard</button>
+          <button class="nav" data-view="market-cue">Market Cue</button>
           <button class="nav" data-view="backtest">Backtest</button>
           <button class="nav" data-view="paper">Paper Desk</button>
           <button class="nav" data-view="live">Live Trading</button>
           <button class="nav" data-view="replay">Session Replay</button>
-          <button class="nav" data-view="zerodha">Zerodha URLs</button>
+          <button class="nav" data-view="zerodha">Connections</button>
         </nav>
       </aside>
 
@@ -37,7 +38,8 @@
             <div><span>Paper Balance</span><strong id="paper-margin">0.00</strong></div>
           </div>
           <div class="url-strip">
-            <label>Redirect <input id="redirect-url" readonly></label>
+            <span>Redirect URL</span>
+            <button type="button" id="copy-redirect-url">Copy</button>
           </div>
         </header>
 
@@ -53,7 +55,7 @@
             <h2>Account Snapshot</h2>
             <div class="account-grid">
               <div><span>Real Money Balance</span><strong id="dash-real-margin">Not Connected</strong><small id="dash-real-margin-time"></small></div>
-              <div><span>Paper Trading Balance</span><strong id="dash-paper-margin">0.00</strong><small id="dash-paper-margin-time"></small></div>
+              <div><span>Virtual/Paper Balance</span><strong id="dash-paper-margin">0.00</strong><small id="dash-paper-margin-time"></small></div>
               <div><span>Orders</span><strong id="dash-order-count">0</strong><small>active and recent order rows</small></div>
               <div><span>Order Refresh</span><strong>Polling</strong><small>status, fill qty, average price</small></div>
             </div>
@@ -104,9 +106,8 @@
             <section class="panel">
               <h2>Zerodha Connection</h2>
               <div class="connection-grid">
-                <div><span>Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
+                <div><span>Virtual/Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
                 <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
-                <div><span>Backtest Live Data</span><strong id="backtest-connection">Not Connected</strong></div>
               </div>
             </section>
             <section class="panel">
@@ -124,29 +125,134 @@
           </section>
         </section>
 
+        <section id="market-cue" class="view">
+          <div class="metrics cue-metrics">
+            <article><span>Overall Bias</span><strong id="cue-bias">Not Analyzed</strong></article>
+            <article><span>Confidence</span><strong id="cue-confidence">-</strong></article>
+            <article><span>Risk Level</span><strong id="cue-risk">-</strong></article>
+            <article><span>Final Score</span><strong id="cue-score">-</strong></article>
+            <article><span>Data Reliability</span><strong id="cue-reliability">-</strong></article>
+          </div>
+          <section class="panel market-cue-actions">
+            <h2>Indian Market Cue Analyzer</h2>
+            <div class="actions">
+              <button type="button" id="cue-fetch" class="primary">Fetch Market Cues</button>
+              <button type="button" id="cue-analyze" disabled>Analyze</button>
+              <button type="button" id="cue-save" disabled>Save Report</button>
+              <button type="button" id="cue-history">View History</button>
+              <button type="button" id="cue-refresh">Refresh Data</button>
+            </div>
+            <p class="note">Uses the Virtual/Paper Zerodha connection and your uploaded NSE FII/DII CSV. This module is report-only and cannot place orders.</p>
+          </section>
+          <div class="grid two">
+            <section class="panel">
+              <h2>Institutional Flow</h2>
+              <div class="account-grid cue-flow-grid">
+                <div><span>FII/FPI Net</span><strong id="cue-fii">-</strong><small>INR crores</small></div>
+                <div><span>DII Net</span><strong id="cue-dii">-</strong><small>INR crores</small></div>
+                <div><span>Data Date</span><strong id="cue-flow-date">-</strong><small id="cue-flow-source">NSE</small></div>
+                <div><span>Status</span><strong id="cue-flow-status">-</strong><small id="cue-flow-mode">Upload required</small></div>
+              </div>
+            </section>
+            <form id="cue-upload-form" class="panel">
+              <h2>Upload NSE FII/DII CSV</h2>
+              <p class="note">Upload the NSE FII/DII CSV for every analysis. Auto-download is disabled.</p>
+              <label>CSV type
+                <select name="scope_hint">
+                  <option value="combined" selected>Combined NSE+BSE+MSEI</option>
+                  <option value="nse_only">NSE only</option>
+                </select>
+              </label>
+              <label>CSV file <input type="file" name="csv_file" accept=".csv"></label>
+              <div class="actions">
+                <button type="submit">Upload CSV</button>
+              </div>
+              <pre id="cue-upload-output">No manual CSV uploaded.</pre>
+            </form>
+          </div>
+          <form id="cue-manual-form" class="panel form-grid">
+            <h2>Manual FII/DII Fallback</h2>
+            <label>FII/FPI Net <input name="fii_net" placeholder="-2407.87"></label>
+            <label>DII Net <input name="dii_net" placeholder="1361.43"></label>
+            <label>Data Date <input type="date" name="data_date"></label>
+            <label>Reason <input name="reason" placeholder="Manual values from source"></label>
+            <div class="actions wide">
+              <button type="submit">Use Manual Flow</button>
+            </div>
+          </form>
+          <form id="cue-override-form" class="panel form-grid">
+            <h2>Manual Override</h2>
+            <label>Field <input name="field_name" placeholder="NIFTY 50.previous_close"></label>
+            <label>Override Value <input name="override_value" placeholder="22500"></label>
+            <label class="wide">Reason <input name="reason" placeholder="Corrected from broker terminal"></label>
+            <div class="actions wide">
+              <button type="submit">Apply Override</button>
+            </div>
+          </form>
+          <section class="panel">
+            <h2>Source Status</h2>
+            <div class="table-wrap"><table id="cue-source-table"></table></div>
+          </section>
+          <div class="grid two">
+            <section class="panel">
+              <h2>Scoring Breakdown</h2>
+              <div class="table-wrap tall"><table id="cue-score-table"></table></div>
+            </section>
+            <section class="panel">
+              <h2>Report</h2>
+              <pre id="cue-report-output">Fetch and analyze market cues to generate a report.</pre>
+            </section>
+          </div>
+          <section class="panel">
+            <h2>History</h2>
+            <p class="note" id="cue-history-status">Click View History to load saved reports. Maximum history is 60 reports.</p>
+            <div class="table-wrap"><table id="cue-history-table"></table></div>
+          </section>
+        </section>
+
         <section id="backtest" class="view">
           <form id="backtest-form" class="panel upload-form">
             <h2>Dataset And Contract Metadata</h2>
+            <div class="source-toggle wide" id="backtest-source-toggle">
+              <label><input type="radio" name="data_source" value="manual" checked> Manual Upload</label>
+              <label><input type="radio" name="data_source" value="zerodha"> Zerodha Historical</label>
+            </div>
+            <div class="file-card wide zerodha-history-card" data-backtest-source="zerodha" hidden>
+              <strong>Zerodha Historical Data</strong>
+              <label>Trade Date <input type="date" name="trade_date"></label>
+              <label>Interval
+                <select name="history_interval">
+                  <option>1 min</option>
+                  <option>2 min</option>
+                  <option selected>3 min</option>
+                  <option>5 min</option>
+                </select>
+              </label>
+              <label>Account <input value="Virtual/Paper Zerodha" readonly></label>
+            </div>
             <div class="file-card">
               <strong>NIFTY</strong>
-              <label>Excel/CSV file <input type="file" name="nifty_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
-              <label>Or server path <input name="nifty_path" placeholder="C:\path\to\nifty.xlsx"></label>
+              <label data-backtest-manual>Excel/CSV file <input type="file" name="nifty_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
+              <label data-backtest-manual>Or server path <input name="nifty_path" placeholder="C:\path\to\nifty.xlsx"></label>
+              <small data-backtest-source="zerodha" hidden>Fetched automatically from Virtual/Paper Zerodha.</small>
             </div>
             <div class="file-card">
               <strong>CALL / CE</strong>
-              <label>Excel/CSV file <input type="file" name="call_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
-              <label>Or server path <input name="call_path"></label>
-              <label>Tradingsymbol <input name="call_symbol" value="NIFTY_CE"></label>
+              <label data-backtest-manual>Excel/CSV file <input type="file" name="call_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
+              <label data-backtest-manual>Or server path <input name="call_path"></label>
+              <label data-backtest-manual>Tradingsymbol <input name="call_symbol" value="NIFTY_CE"></label>
               <label>Strike <input name="call_strike"></label>
               <label>Expiry <input type="date" name="call_expiry"></label>
+              <small data-backtest-source="zerodha" hidden>Contract is resolved from strike and expiry.</small>
             </div>
             <div class="file-card">
               <strong>PUT / PE</strong>
-              <label>Excel/CSV file <input type="file" name="put_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
-              <label>Or server path <input name="put_path"></label>
-              <label>Tradingsymbol <input name="put_symbol" value="NIFTY_PE"></label>
+              <label data-backtest-manual>Excel/CSV file <input type="file" name="put_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
+              <label data-backtest-manual>Or server path <input name="put_path"></label>
+              <label data-backtest-manual>Tradingsymbol <input name="put_symbol" value="NIFTY_PE"></label>
               <label>Strike <input name="put_strike"></label>
               <label>Expiry <input type="date" name="put_expiry"></label>
+              <small data-backtest-source="zerodha" hidden>Contract is resolved from strike and expiry.</small>
             </div>
             <div class="actions wide">
               <button type="button" data-settings="backtest">Risk Settings</button>
@@ -161,8 +267,8 @@
           <form id="zerodha-backtest-form" class="panel zerodha-backtest-form">
             <h2>NIFTY Optimizer</h2>
             <label>Account
-              <input name="mode_label" value="Backtest Live Data" readonly>
-              <input type="hidden" name="mode" value="BACKTEST">
+              <input name="mode_label" value="Virtual Zerodha" readonly>
+              <input type="hidden" name="mode" value="PAPER">
             </label>
             <label>NIFTY Token <input name="nifty_token"></label>
             <button type="button" data-zbt-action="fetch-nifty">Fetch NIFTY</button>
@@ -236,11 +342,11 @@
         <section id="zerodha" class="view">
           <div class="grid two">
             <form class="panel auth-form" data-mode="PAPER">
-              <h2>Paper Data Login</h2>
+              <h2>Virtual/Paper Data Login</h2>
               <label>API key <input name="api_key" autocomplete="off"></label>
               <label>API secret <input name="api_secret" type="password"></label>
               <div class="actions">
-                <button class="primary" type="submit">Connect Paper Data</button>
+                <button class="primary" type="submit">Connect Virtual/Paper</button>
                 <button type="button" data-disconnect-mode="PAPER">Disconnect</button>
               </div>
             </form>
@@ -253,18 +359,9 @@
                 <button type="button" data-disconnect-mode="LIVE">Disconnect</button>
               </div>
             </form>
-            <form class="panel auth-form" data-mode="BACKTEST">
-              <h2>Backtest Live Data Login</h2>
-              <label>API key <input name="api_key" autocomplete="off"></label>
-              <label>API secret <input name="api_secret" type="password"></label>
-              <div class="actions">
-                <button class="primary" type="submit">Connect Backtest Live</button>
-                <button type="button" data-disconnect-mode="BACKTEST">Disconnect</button>
-              </div>
-            </form>
           </div>
           <section class="panel">
-            <h2>Zerodha App Settings</h2>
+            <h2>Redirect Settings</h2>
             <div class="copy-list">
               <label>Redirect URL <input id="zerodha-redirect-copy" readonly></label>
             </div>

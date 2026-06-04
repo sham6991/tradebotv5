@@ -498,7 +498,7 @@ class LivePaperSession:
         normalized = {
             "trade_id": trade.get("trade_id") or f"{self.session_id}_{self.trade_count + 1}",
             "mode": self.mode,
-            "strategy_name": self.settings.get("strategy_name", "tradebotV3_livepaper"),
+            "strategy_name": self.settings.get("strategy_name", "tradebotV5_livepaper"),
             "strategy_version": self.settings.get("strategy_version", "1.0"),
             "entry_time": trade.get("Entry Time"),
             "exit_time": trade.get("Exit Time"),
@@ -536,7 +536,7 @@ class LivePaperSession:
                     "session_id": self.session_id,
                     "started_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "ended_at": None,
-                    "strategy_name": self.settings.get("strategy_name", "tradebotV3_livepaper"),
+                    "strategy_name": self.settings.get("strategy_name", "tradebotV5_livepaper"),
                     "strategy_version": self.settings.get("strategy_version", "1.0"),
                     "initial_balance": self.settings.get("balance", 0),
                     "final_balance": self.balance,

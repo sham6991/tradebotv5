@@ -14,7 +14,7 @@ from ui_zerodha_auth import ZerodhaAuthMixin
 class TradeBotUI(BacktestViewMixin, LiveViewMixin, LiveRuntimeMixin, ReplayViewMixin, ZerodhaAuthMixin, SharedUIMixin):
     def __init__(self, root):
         self.root = root
-        self.root.title("TradeBotV3 Control Center")
+        self.root.title("TradeBotV5 Control Center")
         self.root.geometry("1360x900")
         self.root.minsize(1180, 760)
         self.root.configure(bg=PALETTE["bg"])

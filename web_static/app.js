@@ -996,14 +996,22 @@ function connectionText(connection) {
   return `${connection.user_name || "Connected"}${suffix}`;
 }
 
+function activateView(viewName) {
+  const target = titles[viewName] ? viewName : "dashboard";
+  $all(".nav[data-view]").forEach(item => item.classList.toggle("active", item.dataset.view === target));
+  $all(".view").forEach(view => view.classList.toggle("active", view.id === target));
+  $("#view-title").textContent = titles[target] || "TradeBot";
+}
+
 function bindNavigation() {
-  $all(".nav").forEach(button => {
+  $all(".nav[data-view]").forEach(button => {
     button.addEventListener("click", () => {
-      $all(".nav").forEach(item => item.classList.toggle("active", item === button));
-      $all(".view").forEach(view => view.classList.toggle("active", view.id === button.dataset.view));
-      $("#view-title").textContent = titles[button.dataset.view] || "TradeBot";
+      window.location.hash = button.dataset.view;
+      activateView(button.dataset.view);
     });
   });
+  window.addEventListener("hashchange", () => activateView(window.location.hash.replace("#", "")));
+  activateView(window.location.hash.replace("#", ""));
 }
 
 function bindForms() {

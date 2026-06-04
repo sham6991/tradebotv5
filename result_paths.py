@@ -7,6 +7,8 @@ RESULT_FOLDER = os.path.join(BASE_DIR, "results")
 RESULT_CATEGORY_FOLDERS = {
     "backtest": "backtest",
     "backtest_live": "backtest_live",
+    "backtest_risk_setting_optimizer": "backtest risk setting optimizer",
+    "backtest_trading_tab_optimizer": "backtest trading tab optimizer",
     "market_cue": "market_cue",
     "paper_trading": "paper_trading",
     "real_money_trading": "real_money_trading",

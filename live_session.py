@@ -1103,6 +1103,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             self._cancel_pending_timer(pending)
             self.pending_entry = None
             self._clear_pending_entry()
+            self._emit_pending_entry_cancelled(pending, "TIME EXHAUSTION CANCELLATION")
             return
         status = self.orders.order_status(pending["order_id"], fallback="UNKNOWN")
         details = self.orders.order_details(
@@ -1153,24 +1154,15 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             return
 
         cancel_status = "TIME EXHAUSTION CANCELLATION"
+        cancel_confirmed = False
         if self.mode == "LIVE" and self.zerodha:
             cancelled = self.orders.cancel_order(pending["order_id"])
             if cancelled["cancelled"]:
                 self._log_order(pending["order_id"], "BUY", "CANCELLED", {"reason": cancel_status})
-                self._emit_order_event(
-                    pending["signal"],
-                    self.trade_count + 1,
-                    "BUY",
-                    "CANCELLED",
-                    order_id=pending["order_id"],
-                    order_type="LIMIT",
-                    quantity=pending.get("quantity", ""),
-                    limit_price=pending.get("limit_price", ""),
-                    remarks=cancel_status,
-                )
+                cancel_confirmed = True
             else:
-                cancel_status = f"TIME EXHAUSTION CANCELLATION: CANCEL FAILED {cancelled['error']}"
-                self._log_event("ERROR", cancel_status, {"order_id": pending["order_id"]})
+                self._handle_pending_entry_cancel_not_confirmed(pending, i, cancel_status, cancelled)
+                return
         signal = dict(pending["signal"])
         signal["entry_order_id"] = pending["order_id"]
         self._record_rejected_entry(signal, i, cancel_status)
@@ -1178,6 +1170,86 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
         self._cancel_pending_timer(pending)
         self.pending_entry = None
         self._clear_pending_entry()
+        if cancel_confirmed:
+            self._emit_pending_entry_cancelled(pending, cancel_status)
+
+    def _emit_pending_entry_cancelled(self, pending, remarks, status="CANCELLED"):
+        self._emit_order_event(
+            pending.get("signal", {}),
+            self.trade_count + 1,
+            "BUY",
+            status,
+            order_id=pending.get("order_id", ""),
+            order_type="LIMIT",
+            quantity=pending.get("quantity", ""),
+            limit_price=pending.get("limit_price", ""),
+            remarks=remarks,
+            keep_active=False,
+        )
+
+    def _handle_pending_entry_cancel_not_confirmed(self, pending, i, cancel_status, cancel_result):
+        order_id = pending.get("order_id", "")
+        status = cancel_result.get("status", "")
+        details = self.orders.order_details(
+            order_id,
+            fallback_quantity=pending.get("quantity", 0),
+            fallback_price=pending.get("limit_price", 0),
+        )
+        if status and normalize_order_status(details.get("status")) == "UNKNOWN":
+            details["status"] = status
+            details["classified_state"] = classify_order_state(details, role="ENTRY")
+        classification = details.get("classified_state") or classify_order_state(details, role="ENTRY")
+        entry_state = classification["state"]
+
+        if self._handle_partial_pending_entry(pending, details, i, details.get("status") or status):
+            return
+        if entry_state == "ENTRY_FILLED":
+            entry_price = details.get("average_price") or self._actual_order_price(order_id, pending["limit_price"])
+            filled_qty = details.get("filled_quantity") or self._actual_order_quantity(order_id, pending["quantity"])
+            self._open_position_from_fill(
+                pending["signal"],
+                pending["contract_lot_size"],
+                order_id,
+                entry_price,
+                filled_qty,
+            )
+            self._cancel_pending_timer(pending)
+            self.pending_entry = None
+            self._clear_pending_entry()
+            return
+        if entry_state in {"ENTRY_CANCELLED_EMPTY", "ENTRY_REJECTED"}:
+            signal = dict(pending["signal"])
+            signal["entry_order_id"] = order_id
+            terminal_status = details.get("status") or status or "CANCELLED"
+            self._record_rejected_entry(signal, i, f"ENTRY {entry_state}")
+            self._mark_missed_limit_cooldown(pending)
+            self._cancel_pending_timer(pending)
+            self.pending_entry = None
+            self._clear_pending_entry()
+            self._emit_pending_entry_cancelled(pending, cancel_status, status=terminal_status)
+            return
+
+        pending["cancel_requested_at"] = datetime.now()
+        pending["cancel_status"] = status or entry_state
+        self._save_pending_entry()
+        message = (
+            f"{cancel_status}: cancel not terminal; keeping pending entry under monitoring"
+        )
+        payload = {
+            "order_id": order_id,
+            "status": status,
+            "entry_state": entry_state,
+            "accepted": cancel_result.get("accepted", False),
+            "resolved": cancel_result.get("resolved", False),
+            "error": cancel_result.get("error", ""),
+            "attempts": cancel_result.get("attempts", ""),
+        }
+        self._log_event("WARN" if cancel_result.get("accepted") else "ERROR", message, payload)
+        if not cancel_result.get("accepted"):
+            self.activate_kill_switch(
+                f"UNKNOWN_CANCEL_STATE after pending entry timeout for {order_id}; manual reconciliation required"
+            )
+        self._emit_live_log_update(force=True)
 
     def _paper_pending_entry_filled(self, pending):
         current_ltp = self._current_ltp(pending.get("option_index"))
@@ -3016,12 +3088,13 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             for active_key, row in list(self.active_orders.items()):
                 if row.get("Trade ID") == trade_id:
                     del self.active_orders[active_key]
-        if keep_active and normalized_status not in {"CANCELLED", "REJECTED"}:
+        terminal_inactive = normalized_status in {"CANCELLED", "REJECTED"}
+        if terminal_inactive:
+            self.active_orders.pop(key, None)
+        elif keep_active:
             if not is_closing_completion:
                 self.active_orders[key] = active_row
         elif key in self.active_orders:
-            self.active_orders[key] = active_row
-        if normalized_status in {"CANCELLED", "REJECTED"}:
             self.active_orders[key] = active_row
 
         self.order_history.append(history_row)

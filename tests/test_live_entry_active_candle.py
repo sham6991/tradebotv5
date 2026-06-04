@@ -152,6 +152,53 @@ class LiveProtectiveOrders:
         return fallback
 
 
+class LivePendingCancelOrders:
+    def __init__(self, cancel_result=None, details=None):
+        self.cancelled = []
+        self.cancel_result = cancel_result
+        self.details = details or {
+            "E1": {
+                "order_id": "E1",
+                "status": "OPEN",
+                "quantity": 75,
+                "filled_quantity": 0,
+                "pending_quantity": 75,
+                "cancelled_quantity": 0,
+                "average_price": 100,
+                "is_partial": False,
+                "raw": {},
+            }
+        }
+
+    def order_status(self, order_id, fallback="UNKNOWN"):
+        return self.details.get(order_id, {}).get("status", fallback)
+
+    def order_details(self, order_id, fallback_quantity=0, fallback_price=0):
+        details = dict(self.details.get(order_id, {}))
+        details.setdefault("order_id", order_id)
+        details.setdefault("status", self.order_status(order_id, fallback="OPEN"))
+        details.setdefault("quantity", fallback_quantity)
+        details.setdefault("filled_quantity", 0)
+        details.setdefault("pending_quantity", fallback_quantity)
+        details.setdefault("cancelled_quantity", 0)
+        details.setdefault("average_price", fallback_price)
+        details.setdefault("is_partial", False)
+        details.setdefault("raw", {})
+        return details
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
+        if self.cancel_result is not None:
+            result = dict(self.cancel_result)
+            if result.get("status"):
+                self.details[order_id]["status"] = result["status"]
+            return result
+        self.details[order_id]["status"] = "CANCELLED"
+        self.details[order_id]["pending_quantity"] = 0
+        self.details[order_id]["cancelled_quantity"] = self.details[order_id]["quantity"]
+        return {"cancelled": True, "error": "", "status": "CANCELLED"}
+
+
 class LiveEntryActiveCandleTests(unittest.TestCase):
     def test_live_paper_uses_signal_candle_close_for_market_entry(self):
         test_settings = settings(entry_offset=0, max_trades=1, lot_size=1)
@@ -185,6 +232,7 @@ class LiveEntryActiveCandleTests(unittest.TestCase):
             lot_size=1,
             pending_entry_timeout_seconds=30,
         )
+        updates = []
         nifty = nifty_frame("bearish", count=11)
         ce = fast_option_frame("CE")
         pe = fast_option_frame("PE", entry_type="limit")
@@ -195,6 +243,7 @@ class LiveEntryActiveCandleTests(unittest.TestCase):
             test_settings,
             save_path=None,
             mode="PAPER",
+            on_order_update=updates.append,
         )
 
         session._try_entry(10)
@@ -202,11 +251,145 @@ class LiveEntryActiveCandleTests(unittest.TestCase):
         self.assertIsNotNone(session.pending_entry)
         self.assertIsNone(session.open_position)
         self.assertEqual(session.pending_entry["limit_price"], 102)
+        self.assertEqual(len(session.active_orders), 1)
 
         session._check_pending_entry(10, force_timeout=True)
 
         self.assertIsNone(session.pending_entry)
         self.assertIsNone(session.open_position)
+        self.assertEqual(session.active_orders, {})
+        self.assertEqual(session.order_history[-1]["Action"], "CANCEL ORDER")
+        self.assertEqual(session.order_history[-1]["Order Status"], "CANCELLED")
+        self.assertEqual(session.order_history[-1]["Error / Rejection Reason"], "TIME EXHAUSTION CANCELLATION")
+        self.assertEqual(updates[-1]["active_orders"], [])
+        self.assertFalse(updates[-1]["health"]["pending_entry"])
+
+    def test_live_limit_timeout_removes_confirmed_cancel_from_active_orders(self):
+        updates = []
+        option = fast_option_frame("CE")
+        session = LivePaperSession(
+            nifty_frame("bullish", count=11),
+            [option, fast_option_frame("PE")],
+            {1: "NIFTY", 2: "OPTION_0", 3: "OPTION_1"},
+            settings(max_trades=1, lot_size=1, pending_entry_timeout_seconds=30),
+            save_path=None,
+            mode="PAPER",
+            on_order_update=updates.append,
+        )
+        fake_orders = LivePendingCancelOrders()
+        entry_signal = signal(option)
+        entry_signal["entry_order_type"] = "LIMIT"
+        session.mode = "LIVE"
+        session.zerodha = object()
+        session.orders = fake_orders
+        session.pending_entry = {
+            "signal": entry_signal,
+            "option_index": 0,
+            "order_id": "E1",
+            "quantity": 75,
+            "contract_lot_size": 75,
+            "limit_price": 100,
+            "placed_at": datetime.now() - timedelta(seconds=31),
+            "placed_index": 0,
+        }
+        session._record_pending_entry_order(entry_signal, 0, "OPEN", "E1", 75, 75)
+
+        session._check_pending_entry(0, force_timeout=True)
+
+        self.assertEqual(fake_orders.cancelled, ["E1"])
+        self.assertIsNone(session.pending_entry)
+        self.assertEqual(session.active_orders, {})
+        self.assertEqual(session.order_history[-1]["Order Status"], "CANCELLED")
+        self.assertEqual(updates[-1]["active_orders"], [])
+        self.assertFalse(updates[-1]["health"]["pending_entry"])
+
+    def test_live_limit_timeout_keeps_pending_entry_when_cancel_unresolved(self):
+        updates = []
+        option = fast_option_frame("CE")
+        session = LivePaperSession(
+            nifty_frame("bullish", count=11),
+            [option, fast_option_frame("PE")],
+            {1: "NIFTY", 2: "OPTION_0", 3: "OPTION_1"},
+            settings(max_trades=1, lot_size=1, pending_entry_timeout_seconds=30),
+            save_path=None,
+            mode="PAPER",
+            on_order_update=updates.append,
+        )
+        fake_orders = LivePendingCancelOrders(
+            cancel_result={"cancelled": False, "accepted": True, "resolved": False, "status": "OPEN", "error": ""}
+        )
+        entry_signal = signal(option)
+        entry_signal["entry_order_type"] = "LIMIT"
+        session.mode = "LIVE"
+        session.zerodha = object()
+        session.orders = fake_orders
+        session.pending_entry = {
+            "signal": entry_signal,
+            "option_index": 0,
+            "order_id": "E1",
+            "quantity": 75,
+            "contract_lot_size": 75,
+            "limit_price": 100,
+            "placed_at": datetime.now() - timedelta(seconds=31),
+            "placed_index": 0,
+        }
+        session._record_pending_entry_order(entry_signal, 0, "OPEN", "E1", 75, 75)
+
+        session._check_pending_entry(0, force_timeout=True)
+
+        self.assertEqual(fake_orders.cancelled, ["E1"])
+        self.assertIsNotNone(session.pending_entry)
+        self.assertFalse(session.risk_guard.kill_switch_active)
+        self.assertEqual(len(session.active_orders), 1)
+        self.assertTrue(updates[-1]["health"]["pending_entry"])
+        self.assertEqual(updates[-1]["active_orders"][0]["Order Status"], "OPEN")
+
+    def test_live_limit_timeout_keeps_pending_entry_and_blocks_when_cancel_fails(self):
+        updates = []
+        option = fast_option_frame("CE")
+        session = LivePaperSession(
+            nifty_frame("bullish", count=11),
+            [option, fast_option_frame("PE")],
+            {1: "NIFTY", 2: "OPTION_0", 3: "OPTION_1"},
+            settings(max_trades=1, lot_size=1, pending_entry_timeout_seconds=30),
+            save_path=None,
+            mode="PAPER",
+            on_order_update=updates.append,
+        )
+        fake_orders = LivePendingCancelOrders(
+            cancel_result={
+                "cancelled": False,
+                "accepted": False,
+                "resolved": False,
+                "status": "UNKNOWN",
+                "error": "network timeout",
+            }
+        )
+        entry_signal = signal(option)
+        entry_signal["entry_order_type"] = "LIMIT"
+        session.mode = "LIVE"
+        session.zerodha = object()
+        session.orders = fake_orders
+        session.pending_entry = {
+            "signal": entry_signal,
+            "option_index": 0,
+            "order_id": "E1",
+            "quantity": 75,
+            "contract_lot_size": 75,
+            "limit_price": 100,
+            "placed_at": datetime.now() - timedelta(seconds=31),
+            "placed_index": 0,
+        }
+        session._record_pending_entry_order(entry_signal, 0, "OPEN", "E1", 75, 75)
+
+        session._check_pending_entry(0, force_timeout=True)
+
+        self.assertEqual(fake_orders.cancelled, ["E1"])
+        self.assertIsNotNone(session.pending_entry)
+        self.assertTrue(session.risk_guard.kill_switch_active)
+        self.assertEqual(len(session.active_orders), 1)
+        self.assertTrue(updates[-1]["health"]["pending_entry"])
+        self.assertIn("UNKNOWN_CANCEL_STATE", session.risk_guard.kill_switch_reason)
 
     def test_live_paper_limit_entry_fills_from_ltp_without_next_candle(self):
         test_settings = settings(

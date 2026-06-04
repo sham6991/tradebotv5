@@ -14,8 +14,9 @@ except ImportError:
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 AUTH_STORE_PATH = os.path.join(BASE_DIR, "data", "zerodha_auth.json")
-DEFAULT_REDIRECT_URL = "http://127.0.0.1:8006/zerodha/callback"
-KEYRING_SERVICE = "TradeBotV3 Zerodha"
+DEFAULT_REDIRECT_URL = "http://127.0.0.1:8007/zerodha/callback"
+KEYRING_SERVICE = "TradeBotV5 Zerodha"
+LEGACY_KEYRING_SERVICES = tuple(f"TradeBotV{version} Zerodha" for version in (4, 3))
 
 
 class ZerodhaAuthStore:
@@ -89,7 +90,12 @@ class ZerodhaAuthStore:
             return ""
         if isinstance(value, str) and value.startswith("keyring:") and keyring is not None:
             try:
-                return keyring.get_password(KEYRING_SERVICE, value[8:]) or ""
+                key_name = value[8:]
+                for service in (KEYRING_SERVICE, *LEGACY_KEYRING_SERVICES):
+                    token = keyring.get_password(service, key_name)
+                    if token:
+                        return token
+                return ""
             except Exception:
                 return ""
         if isinstance(value, str) and value.startswith("b64:"):
@@ -129,7 +135,7 @@ class ZerodhaCallbackServer:
                 request_token = (params.get("request_token") or [""])[0]
                 if status == "success" and request_token:
                     outer.request_token = request_token
-                    body = b"Request token received. You can return to TradeBotV3."
+                    body = b"Request token received. You can return to TradeBotV5."
                     self.send_response(200)
                     self.send_header("Content-Type", "text/plain")
                     self.send_header("Content-Length", str(len(body)))
@@ -139,7 +145,7 @@ class ZerodhaCallbackServer:
                     return
 
                 outer.error = "Zerodha callback did not include a successful request_token."
-                body = b"Zerodha login callback failed. Return to TradeBotV3."
+                body = b"Zerodha login callback failed. Return to TradeBotV5."
                 self.send_response(400)
                 self.send_header("Content-Type", "text/plain")
                 self.send_header("Content-Length", str(len(body)))

@@ -244,7 +244,7 @@ class TradingStore:
             "session_id": session_id,
             "started_at": self._now(),
             "ended_at": None,
-            "strategy_name": self.settings.get("strategy_name", "tradebotV3_livepaper"),
+            "strategy_name": self.settings.get("strategy_name", "tradebotV5_livepaper"),
             "strategy_version": self.settings.get("strategy_version", "1.0"),
             **self.settings_profile,
             "initial_balance": initial_balance,
@@ -443,7 +443,7 @@ class TradingStore:
         return {
             "trade_id": trade.get("trade_id") or f"{mode}_{trade.get('Trade No', 0)}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}",
             "mode": mode,
-            "strategy_name": self.settings.get("strategy_name", "tradebotV3_livepaper"),
+            "strategy_name": self.settings.get("strategy_name", "tradebotV5_livepaper"),
             "strategy_version": self.settings.get("strategy_version", "1.0"),
             "entry_time": format_datetime_value(trade.get("Entry Time")),
             "exit_time": format_datetime_value(trade.get("Exit Time")),

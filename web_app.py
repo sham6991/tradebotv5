@@ -21,8 +21,10 @@ from engine import parse_option_metadata_from_text
 from event_replay import build_session_replay, format_replay_report
 from execution_v2 import Executor
 from indicators import clean_and_add_indicators
+from intraday.web_routes import IntradayWebRoutes
 from live_backtest_optimizer import date_range_from_months, run_live_backtest_optimizer
 from market_cue import MarketCueService
+from options_auto.web_routes import OptionsAutoWebRoutes
 from parity_replay import build_parity_report
 from position_reconciler import PositionReconciler
 from reporting import timestamped_file
@@ -30,6 +32,8 @@ from result_paths import live_result_category, result_category_folder, unique_pa
 from runtime_errors import classify_runtime_error
 import settings_service
 from strategy import ensure_option_formula_columns
+from trade_settings_optimizer import OptimizerStopped, run_risk_settings_optimizer
+from trading_tab_optimizer import run_trading_tab_optimizer
 from ui_replay import REPLAY_FILTERS, latest_replay_database, replay_table_row
 from settings_service import DEFAULT_SETTINGS, SETTING_LABELS, SETTINGS_PROFILE_PATH
 from zerodha_auth import DEFAULT_REDIRECT_URL, ZerodhaAuthStore
@@ -41,7 +45,7 @@ RESULT_FOLDER = os.path.join(BASE_DIR, "results")
 STATIC_DIR = os.path.join(BASE_DIR, "web_static")
 UPLOAD_DIR = os.path.join(BASE_DIR, "data", "uploads")
 WEB_HOST = "127.0.0.1"
-WEB_PORT = 8006
+WEB_PORT = 8007
 WEB_REDIRECT_PATH = "/zerodha/callback"
 ZERODHA_MODES = {"PAPER", "LIVE"}
 ZERODHA_MODE_ALIASES = {"BACKTEST": "PAPER", "VIRTUAL": "PAPER"}
@@ -210,7 +214,17 @@ class WebTradeBotApp:
         self.trades = []
         self.last_backtest = None
         self.last_replay = None
+        self.optimizer_progress = {
+            "risk_settings": self.empty_optimizer_progress("risk_settings", "Risk Settings Optimizer"),
+            "trading_tab": self.empty_optimizer_progress("trading_tab", "Trading Tab Optimizer"),
+        }
+        self.optimizer_stop_events = {
+            "risk_settings": threading.Event(),
+            "trading_tab": threading.Event(),
+        }
         self.market_cue = MarketCueService(kite_client_provider=self.virtual_zerodha_client)
+        self.intraday_routes = IntradayWebRoutes(self, RESULT_FOLDER)
+        self.options_auto_routes = OptionsAutoWebRoutes(self, RESULT_FOLDER)
 
     @property
     def base_url(self):
@@ -227,6 +241,156 @@ class WebTradeBotApp:
     def set_status(self, text):
         with self.lock:
             self.status = text
+
+    def empty_optimizer_progress(self, kind, label):
+        return {
+            "kind": kind,
+            "label": label,
+            "active": False,
+            "stage": "",
+            "message": "Idle",
+            "percent": 0,
+            "completed": 0,
+            "total": 0,
+            "started_at": "",
+            "updated_at": "",
+            "completed_at": "",
+            "error": "",
+            "stop_requested": False,
+        }
+
+    def start_optimizer_progress(self, kind, label, message):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if kind in self.optimizer_stop_events:
+            self.optimizer_stop_events[kind].clear()
+        with self.lock:
+            self.optimizer_progress[kind] = {
+                **self.empty_optimizer_progress(kind, label),
+                "active": True,
+                "stage": "Starting",
+                "message": message,
+                "started_at": now,
+                "updated_at": now,
+                "stop_requested": False,
+            }
+            self.status = message
+
+    def update_optimizer_progress(self, kind, update):
+        update = dict(update or {})
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            current = dict(self.optimizer_progress.get(kind) or self.empty_optimizer_progress(kind, kind))
+            current.update(update)
+            current["active"] = True
+            current["updated_at"] = update.get("updated_at") or now
+            current["error"] = ""
+            current["stop_requested"] = bool(self.optimizer_stop_events.get(kind) and self.optimizer_stop_events[kind].is_set())
+            self.optimizer_progress[kind] = current
+            label = current.get("label") or kind
+            percent = float(current.get("percent") or 0)
+            self.status = f"{label}: {percent:.1f}% - {current.get('message', '')}"
+
+    def finish_optimizer_progress(self, kind, message):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            current = dict(self.optimizer_progress.get(kind) or self.empty_optimizer_progress(kind, kind))
+            current.update({
+                "active": False,
+                "stage": "Complete",
+                "message": message,
+                "percent": 100,
+                "completed_at": now,
+                "updated_at": now,
+                "error": "",
+                "stop_requested": False,
+            })
+            self.optimizer_progress[kind] = current
+            if kind in self.optimizer_stop_events:
+                self.optimizer_stop_events[kind].clear()
+            self.status = message
+
+    def stop_optimizer_progress(self, kind, message):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            current = dict(self.optimizer_progress.get(kind) or self.empty_optimizer_progress(kind, kind))
+            current.update({
+                "active": False,
+                "stage": "Stopped",
+                "message": message,
+                "updated_at": now,
+                "completed_at": now,
+                "error": "",
+                "stop_requested": True,
+            })
+            self.optimizer_progress[kind] = current
+            if kind in self.optimizer_stop_events:
+                self.optimizer_stop_events[kind].clear()
+            self.status = message
+
+    def fail_optimizer_progress(self, kind, message):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            current = dict(self.optimizer_progress.get(kind) or self.empty_optimizer_progress(kind, kind))
+            current.update({
+                "active": False,
+                "stage": "Failed",
+                "message": message,
+                "updated_at": now,
+                "completed_at": now,
+                "error": message,
+                "stop_requested": False,
+            })
+            self.optimizer_progress[kind] = current
+            if kind in self.optimizer_stop_events:
+                self.optimizer_stop_events[kind].clear()
+            self.status = message
+
+    def optimizer_progress_callback(self, kind):
+        return lambda update: self.update_optimizer_progress(kind, update)
+
+    def optimizer_stop_requested_callback(self, kind):
+        return lambda: bool(self.optimizer_stop_events.get(kind) and self.optimizer_stop_events[kind].is_set())
+
+    def normalise_optimizer_kind(self, value):
+        text = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "risk": "risk_settings",
+            "risk_setting": "risk_settings",
+            "risk_settings": "risk_settings",
+            "trade": "trading_tab",
+            "trading": "trading_tab",
+            "trading_tab": "trading_tab",
+            "trade_tab": "trading_tab",
+        }
+        if text not in aliases:
+            raise ValueError("Optimizer kind must be risk_settings or trading_tab.")
+        return aliases[text]
+
+    def request_optimizer_stop(self, payload):
+        kind = self.normalise_optimizer_kind((payload or {}).get("kind") or (payload or {}).get("optimizer"))
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        event = self.optimizer_stop_events[kind]
+        event.set()
+        with self.lock:
+            current = dict(self.optimizer_progress.get(kind) or self.empty_optimizer_progress(kind, kind))
+            if not current.get("active"):
+                current.update({
+                    "stage": "Stopped",
+                    "message": f"{current.get('label', kind)} is not running.",
+                    "updated_at": now,
+                    "stop_requested": False,
+                })
+                event.clear()
+            else:
+                current.update({
+                    "stage": "Stopping",
+                    "message": f"Stop requested for {current.get('label', kind)}...",
+                    "updated_at": now,
+                    "stop_requested": True,
+                })
+            self.optimizer_progress[kind] = current
+            self.status = current["message"]
+            return {"kind": kind, "progress": current, "message": current["message"]}
 
     def auth_label(self, mode):
         mode = ZERODHA_MODE_ALIASES.get(str(mode or "").upper(), str(mode or "").upper())
@@ -374,6 +538,7 @@ class WebTradeBotApp:
                 "session_summary": self.session_summary,
                 "network_health": self.network_health,
                 "recovery_status": self.recovery_status,
+                "optimizer_progress": self.optimizer_progress,
                 "alerts": self.alerts[-50:],
                 "trades": self.trades[-100:],
                 "last_backtest": self.last_backtest,
@@ -391,8 +556,9 @@ class WebTradeBotApp:
             steps.extend([
                 self.measure_network_step("Zerodha Profile", client.profile),
                 self.measure_network_step("Zerodha Margin", client.available_margin),
-                self.measure_network_step("Zerodha Order Book", client.orders),
             ])
+            if mode == "LIVE":
+                steps.append(self.measure_network_step("Zerodha Order Book", client.orders))
         else:
             steps.append({
                 "name": f"{self.auth_label(mode)} Login",
@@ -1032,6 +1198,116 @@ class WebTradeBotApp:
             self.set_status(f"Backtest failed: {exc}")
             raise
 
+    def run_risk_settings_optimizer_job(self, payload):
+        self.start_optimizer_progress("risk_settings", "Risk Settings Optimizer", "Starting risk settings optimizer...")
+        payload = self.normalise_backtest_payload(payload)
+        settings_values = payload.get("settings") or load_settings_profiles()["backtest"]
+        settings = settings_from_values(settings_values)
+        data_source = self.backtest_data_source(payload)
+        try:
+            if data_source == "zerodha":
+                self.update_optimizer_progress("risk_settings", {"stage": "Data", "message": "Fetching Zerodha candles...", "percent": 0})
+                self.set_status("Fetching Zerodha candles for risk settings optimizer...")
+                nifty, options, source_metadata = self.load_zerodha_backtest_data(payload, settings)
+                settings = {
+                    **settings,
+                    "data_source": source_metadata["data_source_label"],
+                    "broker_connected": "Yes (Virtual/Paper Zerodha)",
+                    "chart_interval": source_metadata["interval"],
+                    "start_date": source_metadata["from"],
+                    "end_date": source_metadata["to"],
+                }
+            else:
+                self.update_optimizer_progress("risk_settings", {"stage": "Data", "message": "Loading uploaded/server candles...", "percent": 0})
+                nifty, options, source_metadata = self.load_manual_backtest_data(payload)
+                settings = {
+                    **settings,
+                    "data_source": "uploaded/server file",
+                    "broker_connected": "No",
+                }
+            optimizer_folder = result_folder("backtest_risk_setting_optimizer")
+            self.set_status("Running backtest risk settings optimizer...")
+            result = run_risk_settings_optimizer(
+                nifty,
+                options,
+                settings,
+                optimizer_folder,
+                source_metadata=source_metadata,
+                optimizer_config=payload.get("optimizer") or {},
+                progress_callback=self.optimizer_progress_callback("risk_settings"),
+                stop_requested=self.optimizer_stop_requested_callback("risk_settings"),
+            )
+            with self.lock:
+                self.last_backtest = result
+            self.finish_optimizer_progress("risk_settings", f"Risk settings optimizer complete: {result['runs']} runs")
+            return result
+        except OptimizerStopped as exc:
+            message = str(exc)
+            self.stop_optimizer_progress("risk_settings", message)
+            return {
+                "stopped": True,
+                "message": message,
+                "progress": self.optimizer_progress.get("risk_settings"),
+            }
+        except Exception as exc:
+            self.fail_optimizer_progress("risk_settings", f"Risk settings optimizer failed: {exc}")
+            raise
+
+    def run_trading_tab_optimizer_job(self, payload):
+        self.start_optimizer_progress("trading_tab", "Trading Tab Optimizer", "Starting Trading tab optimizer...")
+        payload = self.normalise_backtest_payload(payload)
+        settings_values = payload.get("settings") or load_settings_profiles()["backtest"]
+        settings = settings_from_values(settings_values)
+        data_source = self.backtest_data_source(payload)
+        try:
+            if data_source == "zerodha":
+                self.update_optimizer_progress("trading_tab", {"stage": "Data", "message": "Fetching Zerodha candles...", "percent": 0})
+                self.set_status("Fetching Zerodha candles for Trading tab optimizer...")
+                nifty, options, source_metadata = self.load_zerodha_backtest_data(payload, settings)
+                settings = {
+                    **settings,
+                    "data_source": source_metadata["data_source_label"],
+                    "broker_connected": "Yes (Virtual/Paper Zerodha)",
+                    "chart_interval": source_metadata["interval"],
+                    "start_date": source_metadata["from"],
+                    "end_date": source_metadata["to"],
+                }
+            else:
+                self.update_optimizer_progress("trading_tab", {"stage": "Data", "message": "Loading uploaded/server candles...", "percent": 0})
+                nifty, options, source_metadata = self.load_manual_backtest_data(payload)
+                settings = {
+                    **settings,
+                    "data_source": "uploaded/server file",
+                    "broker_connected": "No",
+                }
+            optimizer_folder = result_folder("backtest_trading_tab_optimizer")
+            self.set_status("Running backtest Trading tab optimizer...")
+            result = run_trading_tab_optimizer(
+                nifty,
+                options,
+                settings,
+                optimizer_folder,
+                source_metadata=source_metadata,
+                optimizer_config=payload.get("optimizer") or {},
+                progress_callback=self.optimizer_progress_callback("trading_tab"),
+                stop_requested=self.optimizer_stop_requested_callback("trading_tab"),
+            )
+            with self.lock:
+                self.last_backtest = result
+            self.finish_optimizer_progress("trading_tab", f"Trading tab optimizer complete: {result['runs']} runs")
+            return result
+        except OptimizerStopped as exc:
+            message = str(exc)
+            self.stop_optimizer_progress("trading_tab", message)
+            return {
+                "stopped": True,
+                "message": message,
+                "progress": self.optimizer_progress.get("trading_tab"),
+            }
+        except Exception as exc:
+            self.fail_optimizer_progress("trading_tab", f"Trading tab optimizer failed: {exc}")
+            raise
+
     def backtest_data_source(self, payload):
         source = str(payload.get("data_source") or payload.get("source") or "manual").strip().lower()
         source = source.replace("-", "_").replace(" ", "_")
@@ -1664,6 +1940,10 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.send_static_file("index.html")
         if path.startswith("/static/"):
             return self.send_static_file(path[len("/static/"):])
+        if self.app_state.options_auto_routes.can_handle_get(path):
+            return self.app_state.options_auto_routes.handle_get(self, path, parsed)
+        if self.app_state.intraday_routes.can_handle_get(path):
+            return self.app_state.intraday_routes.handle_get(self, path, parsed)
         if path == "/api/status":
             return self.send_json(self.app_state.status_payload())
         if path == "/api/candles":
@@ -1704,6 +1984,10 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         payload = self.read_payload()
+        if self.app_state.options_auto_routes.can_handle_post(path):
+            return self.app_state.options_auto_routes.handle_post(self, path, payload)
+        if self.app_state.intraday_routes.can_handle_post(path):
+            return self.app_state.intraday_routes.handle_post(self, path, payload)
         if path == "/api/settings/apply-backtest-live":
             return self.send_json({
                 "profiles": apply_backtest_settings_to_live(payload.get("settings") or payload),
@@ -1720,6 +2004,12 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.send_json({"profile": profile, "values": values})
         if path == "/api/backtest/run":
             return self.send_json(self.app_state.run_backtest_job(payload))
+        if path == "/api/backtest/risk-optimize":
+            return self.send_json(self.app_state.run_risk_settings_optimizer_job(payload))
+        if path == "/api/backtest/trading-optimize":
+            return self.send_json(self.app_state.run_trading_tab_optimizer_job(payload))
+        if path == "/api/backtest/optimizer-stop":
+            return self.send_json(self.app_state.request_optimizer_stop(payload))
         if path == "/api/backtest/zerodha-optimize":
             return self.send_json(self.app_state.run_live_backtest_optimizer_job(payload))
         if path == "/api/market-cue/fetch":

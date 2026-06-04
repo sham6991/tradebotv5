@@ -1,8 +1,8 @@
-# TradeBotV4 Blueprint
+# TradeBotV5 Blueprint
 
 Date: 2026-05-21
 
-TradeBotV4 is a private Python trading research and execution workspace for NIFTY option backtesting, NIFTY RSI reversal optimization, paper trading, Zerodha live trading, session replay, order lifecycle audit, and recovery/safety checks.
+TradeBotV5 is a private Python trading research and execution workspace for NIFTY option backtesting, NIFTY RSI reversal optimization, paper trading, Zerodha live trading, session replay, order lifecycle audit, and recovery/safety checks.
 
 This repository must remain private. Do not commit broker credentials, access tokens, generated reports, SQLite databases, CSV uploads, virtual environments, caches, or live-session state files.
 
@@ -18,10 +18,10 @@ This repository must remain private. Do not commit broker credentials, access to
 
 ## Current Project State
 
-- Local project folder: `tradebotV4`
-- New private GitHub target: `https://github.com/sham6991/tradebotV4`
-- Default local web URL: `http://127.0.0.1:8006`
-- Zerodha redirect URL: `http://127.0.0.1:8006/zerodha/callback`
+- Local project folder: `tradebotV5`
+- New private GitHub target: `https://github.com/sham6991/tradebotV5`
+- Default local web URL: `http://127.0.0.1:8007`
+- Zerodha redirect URL: `http://127.0.0.1:8007/zerodha/callback`
 - Postback remains disabled; order status, fill quantity, pending quantity, cancellation, rejection, and average price are refreshed by strict polling, optional KiteTicker order updates where available, and full broker reconciliation.
 
 ## Entry Points
@@ -31,7 +31,7 @@ This repository must remain private. Do not commit broker credentials, access to
   - delegates to `web_app.main()`.
 - `Start TradeBot Web.bat`
   - Windows launcher for the local web app.
-  - reuses an already-running server on `127.0.0.1:8006`, or starts one in a visible server window, waits for readiness, then opens the browser.
+  - reuses an already-running server on `127.0.0.1:8007`, or starts one in a visible server window, waits for readiness, then opens the browser.
 - `web_app.py`
   - HTTP server, API routes, Zerodha login callback, backtest runner, live/paper session control, replay loading, recovery center, and network health checks.
 - `web_static/index.html`
@@ -680,13 +680,13 @@ Before publishing, confirm:
 
 ## GitHub Checkpoint
 
-This TradeBotV4 snapshot is intended to be published as a new private GitHub project:
+This TradeBotV5 snapshot is intended to be published as a new private GitHub project:
 
 - Owner: `sham6991`
-- Repository: `tradebotV4`
+- Repository: `tradebotV5`
 - Visibility: private
 - Initial branch: current local branch unless renamed before publish.
-- Previous remote before V4 publish: `https://github.com/sham6991/tradebotV3.git`
+- Previous remote before V5 publish: legacy TradeBot repository.
 
 ## Commercial Implementation Backlog
 
@@ -762,7 +762,7 @@ Completed from this section on 2026-05-21:
 11. Add performance benchmark thresholds.
     - Turn candle-builder, tick-storm, process-flow, and scoring benchmarks into pass/fail checks with reasonable thresholds.
     - Use them before optimizing or changing live decision-path code.
-12. Rename remaining user-facing `TradeBotV3` strings in auth/keyring text if a clean V4 identity is required.
+12. Rename remaining user-facing legacy TradeBot strings in auth/keyring text if a clean V5 identity is required.
 13. Run a real paper/live trial latency review before further decision-path optimization.
 14. Run the full test suite after the web/backtest baseline is committed:
     ```powershell

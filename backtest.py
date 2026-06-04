@@ -238,7 +238,7 @@ def run_backtest(nifty, options, settings, save_path):
         return {
             "trade_id": trade.get("trade_id") or f"BACKTEST_{trade.get('Trade No', 0)}_{datetime.now().strftime('%Y%m%d%H%M%S')}",
             "mode": "BACKTEST",
-            "strategy_name": settings.get("strategy_name", "tradebotV3_backtest"),
+            "strategy_name": settings.get("strategy_name", "tradebotV5_backtest"),
             "strategy_version": settings.get("strategy_version", "1.0"),
             "entry_time": trade.get("Entry Time"),
             "exit_time": trade.get("Exit Time"),
@@ -372,7 +372,7 @@ def run_backtest(nifty, options, settings, save_path):
         "run_id": f"BACKTEST_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         "started_at": settings.get("start_date", ""),
         "ended_at": settings.get("end_date", ""),
-        "strategy_name": settings.get("strategy_name", "tradebotV3_backtest"),
+        "strategy_name": settings.get("strategy_name", "tradebotV5_backtest"),
         "strategy_version": settings.get("strategy_version", "1.0"),
         "data_start_date": settings.get("start_date", ""),
         "data_end_date": settings.get("end_date", ""),

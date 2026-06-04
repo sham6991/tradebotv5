@@ -23,6 +23,14 @@ class ResultFolderTests(unittest.TestCase):
                     web_app.result_folder("backtest"),
                     os.path.join(temp_dir, "backtest"),
                 )
+                self.assertEqual(
+                    web_app.result_folder("backtest_risk_setting_optimizer"),
+                    os.path.join(temp_dir, "backtest risk setting optimizer"),
+                )
+                self.assertEqual(
+                    web_app.result_folder("backtest_trading_tab_optimizer"),
+                    os.path.join(temp_dir, "backtest trading tab optimizer"),
+                )
             finally:
                 web_app.RESULT_FOLDER = original_results
 

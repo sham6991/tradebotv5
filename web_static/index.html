@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>TradeBotV4 Web Control Center</title>
+    <title>TradeBotV5 Web Control Center</title>
     <link rel="stylesheet" href="/static/app.css">
   </head>
   <body>
@@ -12,7 +12,7 @@
         <div class="brand">
           <span class="brand-mark">TB</span>
           <div>
-            <strong>TradeBotV4</strong>
+            <strong>TradeBotV5</strong>
             <small>Web Control Center</small>
           </div>
         </div>
@@ -22,6 +22,8 @@
           <button class="nav" data-view="backtest">Backtest</button>
           <button class="nav" data-view="paper">Paper Desk</button>
           <button class="nav" data-view="live">Live Trading</button>
+          <a class="nav nav-link" href="/options-auto">Options Auto</a>
+          <a class="nav nav-link nav-intraday" href="/intraday">Intraday Stocks Terminal</a>
           <button class="nav" data-view="replay">Session Replay</button>
           <button class="nav" data-view="zerodha">Connections</button>
         </nav>
@@ -59,6 +61,20 @@
               <div><span>Orders</span><strong id="dash-order-count">0</strong><small>active and recent order rows</small></div>
               <div><span>Order Refresh</span><strong>Polling</strong><small>status, fill qty, average price</small></div>
             </div>
+          </section>
+          <section class="panel launch-panel">
+            <div>
+              <h2>Intraday Stocks Terminal</h2>
+              <p>Open the new five-stock PAPER/REAL intraday terminal with locked settings, scoring, approval flow, SQLite logging, and Excel export.</p>
+            </div>
+            <a class="primary-link" href="/intraday">Open Terminal</a>
+          </section>
+          <section class="panel launch-panel">
+            <div>
+              <h2>Options Auto</h2>
+              <p>Open the guarded options cockpit for NIFTY/SENSEX CE/PE selection, market cue, paper/shadow evaluation, and real dry-run checks.</p>
+            </div>
+            <a class="primary-link" href="/options-auto">Open Options Auto</a>
           </section>
           <section class="panel">
             <h2>Network Health</h2>
@@ -257,12 +273,32 @@
             <div class="actions wide">
               <button type="button" data-settings="backtest">Risk Settings</button>
               <button type="button" id="apply-backtest-live">Apply Settings To Live</button>
+              <button type="button" id="optimize-risk-settings">Optimize Risk Settings</button>
+              <button type="button" id="stop-risk-optimizer" class="danger" disabled>Stop Risk Optimizer</button>
+              <span id="risk-optimizer-progress" class="optimizer-progress" aria-live="polite"></span>
+              <label class="optimizer-mode">Trading Optimizer
+                <select id="trading-optimizer-mode" name="trading_optimizer_mode">
+                  <option value="quick" selected>Quick 500</option>
+                  <option value="full">Full 6000</option>
+                </select>
+              </label>
+              <button type="button" id="optimize-trading-tab">Optimize Trading Tab</button>
+              <button type="button" id="stop-trading-optimizer" class="danger" disabled>Stop Trading Optimizer</button>
+              <span id="trading-optimizer-progress" class="optimizer-progress" aria-live="polite"></span>
               <button type="submit" class="primary">Start Backtest</button>
             </div>
           </form>
           <section class="panel">
             <h2>Backtest Output</h2>
             <pre id="backtest-output">No backtest completed yet.</pre>
+          </section>
+          <section class="panel">
+            <h2>Risk Settings Optimizer Output</h2>
+            <pre id="risk-optimizer-output">No risk settings optimizer run yet.</pre>
+          </section>
+          <section class="panel">
+            <h2>Trading Tab Optimizer Output</h2>
+            <pre id="trading-optimizer-output">No Trading tab optimizer run yet.</pre>
           </section>
           <form id="zerodha-backtest-form" class="panel zerodha-backtest-form">
             <h2>NIFTY Optimizer</h2>
@@ -389,5 +425,7 @@
 
     <div id="toast"></div>
     <script src="/static/app.js"></script>
+    <script src="/static/risk_optimizer.js"></script>
+    <script src="/static/trading_optimizer.js"></script>
   </body>
 </html>

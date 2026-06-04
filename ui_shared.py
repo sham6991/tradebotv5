@@ -192,7 +192,7 @@ class SharedUIMixin:
     def show_home(self):
         self.clear_window()
         self.set_status("Ready")
-        self.header("TradeBotV3 Control Center", "Backtesting, paper/live execution, session replay, and risk-engine exports")
+        self.header("TradeBotV5 Control Center", "Backtesting, paper/live execution, session replay, and risk-engine exports")
         frame = self.content()
 
         tk.Label(

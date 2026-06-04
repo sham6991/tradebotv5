@@ -17,6 +17,24 @@ class FakeMarginClient:
         return self.margin
 
 
+class FakeHealthClient(FakeMarginClient):
+    def __init__(self, margin=100000, fail_orders=False):
+        super().__init__(margin)
+        self.fail_orders = fail_orders
+        self.profile_calls = 0
+        self.order_calls = 0
+
+    def profile(self):
+        self.profile_calls += 1
+        return {"user_id": "TEST"}
+
+    def orders(self):
+        self.order_calls += 1
+        if self.fail_orders:
+            raise RuntimeError("static IP configuration required")
+        return []
+
+
 def checked_at(seconds_ago=0):
     return (datetime.now() - timedelta(seconds=seconds_ago)).strftime("%Y-%m-%d %H:%M:%S")
 
@@ -73,6 +91,32 @@ class LiveStartSafetyTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "recovery check"):
             app.require_real_live_start_safety()
+
+    def test_paper_network_health_does_not_run_order_book_static_ip_check(self):
+        client = FakeHealthClient(fail_orders=True)
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["PAPER"] = client
+        app.check_zerodha_api_reachable = lambda: True
+
+        result = app.run_network_health_check("PAPER")
+
+        self.assertEqual(result["status"], "Connected")
+        self.assertEqual(client.profile_calls, 1)
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(client.order_calls, 0)
+        self.assertNotIn("Zerodha Order Book", {step["name"] for step in result["steps"]})
+
+    def test_live_network_health_keeps_order_book_static_ip_check(self):
+        client = FakeHealthClient()
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["LIVE"] = client
+        app.check_zerodha_api_reachable = lambda: True
+
+        result = app.run_network_health_check("LIVE")
+
+        self.assertEqual(result["status"], "Connected")
+        self.assertEqual(client.order_calls, 1)
+        self.assertIn("Zerodha Order Book", {step["name"] for step in result["steps"]})
 
     def test_recovery_check_blocks_restored_active_kill_switch_state(self):
         import web_app

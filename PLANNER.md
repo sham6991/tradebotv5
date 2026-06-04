@@ -1,8 +1,221 @@
-# TradeBotV4 Planner
+# TradeBotV5 Planner
 
 Date created: 2026-05-18
 
 `BLUEPRINT.md` remains the base document for project structure, architecture, safety rules, and current behavior. This planner is only for dated work queues and should be updated as planned jobs are completed or moved.
+
+## 2026-06-04 Options Auto Phased Implementation - Completed
+
+Primary goal:
+
+Add the new `Options Auto` terminal for NIFTY/SENSEX index options with backtest, shadow, paper, and guarded real-money workflows.
+
+Completion notes:
+
+- Added modular `options_auto/` package with mode guard, session state, logging, market cue, regime classifier, strike selection, scoring, risk/discipline/master governor, data adapters, backtest, shadow, paper lifecycle, real safety, watchdog, promotion, Telegram safety, drift, missed-trade learning, and replay components.
+- Added `/options-auto` cockpit and `/api/options-auto/*` routes for defaults, evaluate, shadow, paper approval/execution, paper market processing, real dry-run, real preflight, real reconciliation, emergency plan, health, exit evaluation, promotion, drift, missed trades, replay, and Telegram command validation.
+- Implemented paper account balance/ledger, approval timeout, simulated entry/target/SL/OCO, trailing/breakeven/partial/theta/time/reversal exits, and local-only order history.
+- Implemented real execution safety foundation with static-IP confirmation only in REAL mode, broker preflight evidence, duplicate order guard, manual-order detector, unprotected-position detector, Stop New Entries, Safe Mode, and dry-run emergency exit plans.
+- Kept real order placement disabled through the web route and hard-guarded by `ModeGuard`; no real order path is available from paper/backtest/shadow mode.
+- Added advanced cockpit safety visibility for mode, Kite status, data freshness, engine status, health, position protection, OCO, real-money state, reconciliation, and manual-attention status.
+- Added report writers for backtest, shadow, and replay outputs under `results/options_auto/...`.
+
+Verification performed:
+
+```powershell
+python -B -m unittest tests.test_options_auto_analysis_replay tests.test_options_auto_watchdog_health tests.test_options_auto_exit_manager tests.test_options_auto_real_safety tests.test_options_auto_paper_lifecycle tests.test_options_auto_phase_engines tests.test_options_auto_mode_guard tests.test_options_auto_order_state_machine tests.test_options_auto_indicators tests.test_options_auto_strike_selector tests.test_options_auto_web_routes
+python -B -m compileall -q options_auto
+node --check web_static\options_auto.js
+```
+
+Safety limitations:
+
+- Real-money order placement remains intentionally disabled from the Options Auto web route until separately reviewed with a real 1-lot trial checklist.
+- Emergency exit currently produces a dry-run broker action plan and does not send Zerodha orders.
+- Shadow learning, missed-trade learning, drift detection, and replay are analysis-only and do not auto-change live parameters.
+
+## 2026-06-03 Intraday Real-Order Safety Improvement Queue
+
+Primary goal:
+
+Improve intraday decision quality and real-money execution safeguards before expanding automated real-order behavior.
+
+Priority 1 - Real order reconciliation:
+
+- Add a broker-backed order state machine for `PLACED`, `OPEN`, `PARTIAL`, `COMPLETE`, `REJECTED`, and `CANCELLED`.
+- Reconcile real orders through Kite order history, trades, postbacks, or WebSocket updates instead of trusting only the initial `place_order` response.
+- Add idempotency checks before any retry so request timeouts cannot create duplicate real orders.
+
+Priority 2 - Protective order safety:
+
+- Place stoploss and target only after confirmed entry fill.
+- Size protective orders from actual filled quantity, including partial fills.
+- If stoploss placement fails after a real entry fill, freeze new trades and trigger emergency exit handling.
+- Validate SL-LIMIT trigger/limit relationship and tick-size rounding before broker send.
+
+Priority 3 - Broker-real kill switch:
+
+- Cancel pending intraday orders.
+- Fetch live positions and open orders from Zerodha.
+- Square off open MIS positions where possible.
+- Verify the account is flat before clearing the emergency state.
+- Keep trading frozen if any cancel/square-off/reconciliation step is uncertain.
+
+Priority 4 - Final approval revalidation:
+
+- Re-check LTP, spread, depth, margin, position state, candle age, price band, and risk after user approval and before broker send.
+- Expire real-money approval quickly, ideally 10-15 seconds.
+- Show a real-order ticket with symbol, side, quantity, entry, stoploss, target, max loss, margin, live LTP, spread, data age, setup reason, and active account mode.
+
+Priority 5 - Data freshness and broker health gates:
+
+- Block real orders if candles, ticks, quote, depth, or margin data are stale.
+- Block real orders if the system falls back to simulated/provided data in real mode.
+- Pause real order execution when quote, margin, order, or instrument APIs start failing.
+- Add rate-limit and broker latency guardrails.
+
+Priority 6 - Decision logic improvements:
+
+- Separate setup score from hard execution gates.
+- Make regime-specific rules binding: reduce quantity or require stricter structure in `HIGH_VOLATILITY`, `TRAP_HEAVY`, `LOW_VOLUME`, and `CHOPPY`.
+- Cap news influence so Pulse/Google news can support or block a valid setup but cannot create a trade by itself.
+- Add event blackout windows around RBI announcements, results, macro releases, and sudden market-wide news.
+- Calibrate trigger weights from paper/backtest/live outcomes by setup type.
+
+Priority 7 - Risk and eligibility controls:
+
+- Sync risk state from broker before every real order: positions, open orders, day trades, P&L, and margin.
+- Add no-new-entry and square-off cutoffs near market close.
+- Add daily limits for real mode: max loss, max trades, max order attempts, max rejected orders, max API failures, and max slippage.
+- Reject low-liquidity, wide-spread, circuit-risk, ASM/GSM/T2T-like, or unreliable MIS/shorting candidates before real start.
+- Track intended price versus actual average fill and block symbols or real mode when slippage exceeds limits.
+
+Priority 8 - Audit and drill mode:
+
+- Store immutable audit records for locked settings, formula version, data timestamps, score breakdown, order payloads, broker responses, order updates, and user approval timestamps.
+- Add a dry-run real mode that uses real live data and real margin checks but never places orders.
+- Keep dry-run/drill mode separate from paper simulation and real execution.
+
+### Completed 2026-06-03 - Intraday Order Execution Safeguards
+
+Implemented for the intraday feature:
+
+- Added broker-order idempotency checks before real entry send by matching existing Kite orders using tag/session payload details.
+- Added post-error reconciliation after uncertain real `place_order` failures; if no matching broker order is found, real trading is paused/blocked.
+- Added instrument tick-size based price normalization for entry, stoploss, and target order requests.
+- Added SL-LIMIT trigger/limit relationship validation for BUY and SELL exits, including one-tick minimum buffer enforcement.
+- Added real-order circuit/price-band blockers for entry, stoploss, and target prices.
+- Added abnormal intraday move blocker versus day open.
+- Added real-data hard blocks for simulated/provided data, missing live Zerodha source, stale candle, stale tick/depth, missing live depth, synthetic depth, and quote/depth fetch failures.
+- Added Zerodha quote/depth metadata into intraday live candle rows so real safeguards can verify live depth source and timestamps.
+- Added broker API health guard for quote, margin, order, instrument, funds, order-book, and position failures; real orders pause when broker health is degraded.
+- Added focused regression tests for tick rounding, SL-LIMIT validation, idempotency matching, stale/non-live data blocks, circuit/abnormal-move blocks, broker API pause, and duplicate-send avoidance.
+
+Guardrails:
+
+- No market orders for intraday stock terminal unless a separate reviewed feature explicitly enables them.
+- No real order placement without a current Main App Real Money connection.
+- No automatic real order unless real-auto confirmation, final revalidation, broker health, and risk gates all pass.
+- No fallback simulated data in real-money order decisions.
+
+### Completed 2026-06-03 - Intraday Active Trade Management, Paper Setup, and Backtest Flow
+
+Implemented for the intraday feature:
+
+- Added `intraday/active_trade_manager.py` with active trade health scoring and actions: `HOLD`, `TIGHTEN_SL`, `MOVE_SL_TO_BREAKEVEN`, `TRAIL_SL`, `PARTIAL_EXIT`, `FULL_EXIT`, `MODIFY_TARGET`, and `NO_ACTION`.
+- Added breakeven SL, trailing SL, partial-exit simulation, weak-thesis full exit, dynamic target extension, and health-score logging.
+- Enforced the core stoploss safety rule: active management can only tighten risk and must never widen an existing stoploss.
+- Added real-order reconciliation hooks for entry/protective order state, including confirmed fills, partial filled quantity handling, protective SL/target placement after fill, broker-freeze on protective-order failure, and broker-status reconciliation for SL/target fills.
+- Added real-mode SL/target management through `modify_order` on existing protective broker orders; active management does not create duplicate real stoploss orders while modifying.
+- Added paper-account settlement behavior: losses and charges affect available balance at trade close; positive net profit is kept as pending session profit and released to available balance when the session is stopped/exported.
+- Added intraday UI controls for paper balance edit/reset, setup save/reset, max open trades, active management, breakeven SL, trailing SL, partial exit, and trailing method.
+- Added persistent setup storage in the intraday UI so saved setup values reload for later paper/backtest/real sessions.
+- Added active trade panel fields for health, management action, R multiple, current/initial SL, current/initial target, last LTP, unrealized P&L, and management notes.
+- Added `intraday_trade_management_events` table and Excel sheet `Trade Management Events`.
+- Added focused tests for breakeven, SL-never-widens, trailing SL, partial exit, weak-health full exit, and real SL modification without duplicate SL placement.
+- Confirmed backtest remains isolated from the live terminal and still produces an Excel export through the paper backtest/replay route.
+
+Verification completed:
+
+```powershell
+python -m py_compile intraday\active_trade_manager.py intraday\models.py intraday\paper_account.py intraday\database.py intraday\export_excel.py intraday\order_lifecycle.py intraday\session_manager.py
+python -m unittest tests.test_intraday_active_trade_manager tests.test_intraday_paper_account_and_lifecycle tests.test_intraday_session_manager tests.test_intraday_web_routes tests.test_intraday_news_engine tests.test_intraday_execution_safeguards tests.test_intraday_engine_service tests.test_intraday_margin_engine tests.test_intraday_models_and_orders tests.test_intraday_mode_manager_and_market_cue tests.test_intraday_indicators_and_scoring
+python -m unittest discover tests
+python process_flow_benchmark.py
+python tick_storm_benchmark.py
+```
+
+### Completed 2026-06-03 - Intraday Real Kill Switch and Hard Entry Gates
+
+Implemented for the intraday feature:
+
+- Added broker-aware real-money kill switch actions:
+  - cancel open selected-symbol MIS orders from the broker order book,
+  - send emergency square-off market orders for selected-symbol MIS positions,
+  - refetch orders and positions after emergency actions,
+  - keep the real session frozen when flat-account verification is uncertain.
+- Added a separate emergency market-order path so normal intraday stock entries remain `LIMIT_ONLY`.
+- Added `kill_switch_report` to intraday status for audit/UI visibility.
+- Added event blackout gates through locked settings and evaluation payloads, blocking new entries during configured RBI/results/macro/custom windows.
+- Added stock eligibility gates across paper, backtest, and real modes:
+  - blocked symbols,
+  - MIS eligibility flag,
+  - ASM/GSM/T2T-style flags,
+  - minimum liquidity score,
+  - maximum spread percentage,
+  - maximum trap score,
+  - optional minimum relative volume.
+- Added `hard_gates` into the signal score breakdown so setup score remains separate from trade permission.
+- Capped news influence in entry scoring; news can support or penalize a setup but cannot bypass structure, volume, liquidity, trap, risk, and hard eligibility gates.
+- Added terminal journal visibility for event blackout blockers and kill-switch reports.
+- Added focused tests for real emergency cancel/square-off/flat verification, event blackout blocking, and spread eligibility blocking.
+
+Verification completed:
+
+```powershell
+python -m unittest tests.test_intraday_real_kill_switch_and_gates tests.test_intraday_active_trade_manager tests.test_intraday_session_manager tests.test_intraday_paper_account_and_lifecycle tests.test_intraday_indicators_and_scoring tests.test_intraday_execution_safeguards
+python -m py_compile intraday\order_request.py intraday\zerodha_broker.py intraday\trade_gates.py intraday\models.py intraday\scoring.py intraday\session_manager.py
+node --check web_static\intraday.js
+python -m unittest discover tests
+python process_flow_benchmark.py
+python tick_storm_benchmark.py
+```
+
+### Completed 2026-06-03 - Intraday Critical Real Lifecycle Fixes
+
+Implemented for the intraday feature:
+
+- Fixed real active-manager `FULL_EXIT` handling so a real trade is not marked closed locally until a broker market square-off order is confirmed filled.
+- Real active-manager exits now cancel the target order first, keep the stoploss protection live, send a broker emergency market square-off order, and reconcile the exit fill from the broker order book before closing local trade state.
+- Added duplicate pending-exit protection so repeated active-management cycles do not submit multiple real square-off orders for the same trade.
+- Fixed failed real protective stoploss placement after entry fill to immediately request emergency square-off handling instead of only freezing future orders.
+- Kept normal intraday entries `LIMIT_ONLY`; market orders remain isolated to emergency/square-off handling.
+- Added focused regression tests for real active-manager exit reconciliation and failed-SL emergency square-off.
+
+### Added 2026-06-03 - Intraday Audit Future Improvement Queue
+
+Future improvements from the intraday audit:
+
+- Add a REAL-mode stop-session flatness check: block normal stop if selected-symbol MIS positions or open orders remain, or provide explicit square-off-and-stop / leave-live-and-stop choices.
+- Enforce currently dormant risk settings: `cooldown_after_trade_seconds`, `cooldown_after_loss_seconds`, `no_trade_first_minutes`, `max_candles_without_progress`, and `stop_after_consecutive_losses`.
+- Update risk state from actual trade outcomes, not only order attempts, so consecutive-loss and cooldown locks reflect real closed trades.
+- Use `limit_order_timeout_seconds` instead of the hardcoded 60-second pending-entry timeout.
+- Re-check pending approval expiry inside `approve_entry`, then revalidate latest LTP, spread, depth, candle/tick age, margin, open positions, price bands, and score before broker send.
+- Improve kill-switch position verification by preserving both Kite `net` and `day` rows or preferring non-zero quantities instead of overwriting rows by `(exchange, symbol, product)`.
+- Make multi-open-trade support complete in the UI and reports: render all `active_trades`, close all open backtest trades at day end, and show per-trade controls/status.
+- Add caching, backoff, and rate-limit protection for live news and live/historical candle fetches so the 5-second engine loop does not hammer external providers.
+- Add clearer news source health in the terminal for Zerodha Pulse, Google News RSS, manual news, and disabled/empty adapters.
+- Preserve pre-modification stoploss/target values in trade-management event logs so `old_stoploss` and `old_target` are accurate.
+- Add session-specific emergency tags or richer broker response metadata for easier emergency-order reconciliation.
+- Add tests for overnight event blackout windows and symbol-scoped blackout windows if those scopes are introduced.
+
+Verification required when implemented:
+
+```powershell
+python -m pytest tests\test_intraday_* tests\test_order_idempotency.py tests\test_partial_fill_lifecycle.py tests\test_live_kill_switch.py
+python -m pytest
+node --check web_static\intraday.js
+```
 
 ## 2026-05-27 Next Improvement Queue
 

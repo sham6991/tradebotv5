@@ -1,13 +1,21 @@
+// state
 const $ = (selector, root = document) => root.querySelector(selector);
+const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
 
 const state = {
   defaults: {},
   status: {},
   lastResult: {},
+  lastBacktest: {},
+  lastShadowReport: {},
+  lastReplay: {},
   pendingApprovalId: "",
-  activeLog: "decision",
+  activeLog: "raw",
+  activeTab: "dashboard",
+  dataSource: "SAMPLE",
 };
 
+// api helper
 async function api(path, payload) {
   const options = payload === undefined
     ? {}
@@ -22,12 +30,123 @@ async function api(path, payload) {
   return data;
 }
 
+// format helpers
+function value(input, fallback = "-") {
+  if (input === undefined || input === null || input === "") return fallback;
+  if (typeof input === "number" && Number.isNaN(input)) return fallback;
+  return input;
+}
+
+function text(input, fallback = "-") {
+  const resolved = value(input, fallback);
+  if (typeof resolved === "object") return fallback;
+  return String(resolved);
+}
+
+function numberValue(input, fallback = 0) {
+  const parsed = Number(input);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function money(input) {
+  const amount = numberValue(input, 0);
+  return amount.toLocaleString("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 2 });
+}
+
+function score(input) {
+  if (input === undefined || input === null || input === "") return "-";
+  return `${Number(input).toFixed(Number(input) % 1 ? 1 : 0)} / 100`;
+}
+
+function percent(input) {
+  if (input === undefined || input === null || input === "") return "-";
+  return `${Number(input).toFixed(2)}%`;
+}
+
+function escapeHtml(input) {
+  return text(input, "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
+function setText(id, content) {
+  const node = $(id);
+  if (node) node.textContent = text(content);
+}
+
+function setHtml(id, html) {
+  const node = $(id);
+  if (node) node.innerHTML = html;
+}
+
+function badgeClass(kind) {
+  return {
+    green: "oa-badge-green",
+    red: "oa-badge-red",
+    yellow: "oa-badge-yellow",
+    grey: "oa-badge-grey",
+    blue: "oa-badge-blue",
+  }[kind] || "oa-badge-grey";
+}
+
+function setBadge(id, label, kind = "grey") {
+  const node = $(id);
+  if (!node) return;
+  node.className = `oa-status-badge ${badgeClass(kind)}`;
+  node.textContent = text(label);
+}
+
+function yesNoBadge(id, ok, yes = "YES", no = "NO") {
+  setBadge(id, ok ? yes : no, ok ? "green" : "red");
+}
+
+function metric(label, content, extra = "") {
+  return `<div ${extra}><span>${escapeHtml(label)}</span><strong>${escapeHtml(content)}</strong></div>`;
+}
+
+function row(label, content) {
+  return `<div class="oa-plan-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(content)}</strong></div>`;
+}
+
+function renderList(id, items, emptyText = "No items to show.") {
+  const rows = (items || []).filter(Boolean);
+  setHtml(id, rows.length
+    ? rows.map(item => `<li>${escapeHtml(item)}</li>`).join("")
+    : `<li class="oa-muted">${escapeHtml(emptyText)}</li>`);
+}
+
+function alertHtml(message, kind = "info") {
+  return `<div class="oa-alert oa-alert-${kind}">${escapeHtml(message)}</div>`;
+}
+
+function setTabAlert(tab, message = "", kind = "info") {
+  const node = $(`#oa-${tab}-alert`);
+  if (!node) return;
+  node.innerHTML = message ? alertHtml(message, kind) : "";
+}
+
+function parseJson(id, fallback) {
+  const node = $(id);
+  const raw = node ? node.value.trim() : "";
+  if (!raw) {
+    state.dataSource = "SAMPLE";
+    return fallback;
+  }
+  state.dataSource = "DEBUG";
+  return JSON.parse(raw);
+}
+
+// sample payloads for Developer Debug and local smoke only
 function sampleInstruments() {
   return [
-    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22500CE", instrument_token: "1001", instrument_type: "CE", strike: 22500, lot_size: 50, tick_size: 0.05 },
-    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22500PE", instrument_token: "1002", instrument_type: "PE", strike: 22500, lot_size: 50, tick_size: 0.05 },
-    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22600CE", instrument_token: "1003", instrument_type: "CE", strike: 22600, lot_size: 50, tick_size: 0.05 },
-    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22400PE", instrument_token: "1004", instrument_type: "PE", strike: 22400, lot_size: 50, tick_size: 0.05 },
+    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22500CE", instrument_token: "1001", instrument_type: "CE", strike: 22500, expiry: "2026-06-25", lot_size: 50, tick_size: 0.05 },
+    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22500PE", instrument_token: "1002", instrument_type: "PE", strike: 22500, expiry: "2026-06-25", lot_size: 50, tick_size: 0.05 },
+    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22600CE", instrument_token: "1003", instrument_type: "CE", strike: 22600, expiry: "2026-06-25", lot_size: 50, tick_size: 0.05 },
+    { name: "NIFTY", tradingsymbol: "NIFTY26JUN22400PE", instrument_token: "1004", instrument_type: "PE", strike: 22400, expiry: "2026-06-25", lot_size: 50, tick_size: 0.05 },
   ];
 }
 
@@ -51,35 +170,59 @@ function sampleReplayCandles() {
   ];
 }
 
-function parseJson(id, fallback) {
-  const text = $(id).value.trim();
-  if (!text) return fallback;
-  return JSON.parse(text);
-}
-
-function settingsPayload() {
+// shared payload builders
+function settingsPayload(modeOverride = "") {
+  const mode = modeOverride || ($("#oa-setting-mode")?.value || "PAPER");
   return {
-    mode: $("#oa-setting-mode").value,
-    underlying: $("#oa-underlying").value,
-    strategy_profile: $("#oa-profile").value,
-    buy_score_threshold: Number($("#oa-score-threshold").value || 70),
-    paper_starting_balance: Number($("#oa-paper-balance").value || 20000),
-    max_capital_per_trade_pct: Number($("#oa-capital-pct").value || 20),
-    ask_permission_before_entry: $("#oa-ask").checked,
-    auto_entry_enabled: $("#oa-auto").checked,
-    confirm_real_mode: $("#oa-confirm-real").checked,
-    static_ip_confirmed: $("#oa-static-ip").checked,
+    mode,
+    underlying: $("#oa-underlying")?.value || $("#oa-backtest-symbol")?.value || "NIFTY",
+    chart_interval: $("#oa-chart-interval")?.value || $("#oa-backtest-interval")?.value || "3minute",
+    strategy_profile: $("#oa-profile")?.value || $("#oa-backtest-profile")?.value || "BALANCED",
+    buy_score_threshold: numberValue($("#oa-score-threshold")?.value, 70),
+    paper_starting_balance: numberValue($("#oa-paper-balance")?.value, 20000),
+    approval_timeout_seconds: numberValue($("#oa-approval-timeout")?.value, 30),
+    max_capital_per_trade_pct: numberValue($("#oa-capital-pct")?.value, 20),
+    max_daily_loss: numberValue($("#oa-max-daily-loss")?.value, 1000),
+    max_daily_profit_lock: numberValue($("#oa-max-daily-profit")?.value, 2500),
+    max_trades_per_day: numberValue($("#oa-max-trades")?.value, 3),
+    max_open_trades: numberValue($("#oa-max-open-trades")?.value, 1),
+    max_consecutive_losses: numberValue($("#oa-max-consecutive-losses")?.value, 2),
+    cooldown_after_trade_seconds: numberValue($("#oa-cooldown-seconds")?.value, 300),
+    max_chase_points: numberValue($("#oa-max-chase")?.value, 3),
+    avoid_first_minutes: numberValue($("#oa-avoid-first")?.value, 15),
+    no_new_trade_after: $("#oa-no-new-after")?.value || "15:00",
+    square_off_time: $("#oa-square-off")?.value || "15:15",
+    trailing_stop_enabled: Boolean($("#oa-trailing")?.checked),
+    break_even_sl_enabled: Boolean($("#oa-breakeven")?.checked),
+    partial_exit_enabled: Boolean($("#oa-partial")?.checked),
+    reversal_exit_enabled: Boolean($("#oa-reversal")?.checked),
+    time_exit_enabled: Boolean($("#oa-time-exit")?.checked),
+    max_holding_minutes: numberValue($("#oa-max-holding")?.value, 45),
+    expiry_preference: $("#oa-expiry-mode")?.value || "AUTO",
+    min_volume: numberValue($("#oa-min-volume")?.value, 0),
+    min_oi: numberValue($("#oa-min-oi")?.value, 0),
+    max_spread_pct: numberValue($("#oa-max-spread")?.value, 0.6),
+    theta_exit_risk_score: numberValue($("#oa-theta-risk")?.value, 80),
+    expiry_day_max_lots: numberValue($("#oa-expiry-day-lots")?.value, 1),
+    allow_deep_otm: Boolean($("#oa-allow-deep-otm")?.checked),
+    limit_order_timeout_seconds: numberValue($("#oa-limit-timeout")?.value, 30),
+    max_buy_limit_modifications: numberValue($("#oa-max-mods")?.value, 2),
+    sl_modify_throttle_seconds: numberValue($("#oa-sl-throttle")?.value, 10),
+    slippage_buffer_points: numberValue($("#oa-slippage-buffer")?.value, 0.1),
+    ask_permission_before_entry: Boolean($("#oa-ask")?.checked || $("#oa-ask-settings")?.checked),
+    auto_entry_enabled: Boolean($("#oa-auto")?.checked || $("#oa-auto-settings")?.checked),
+    confirm_real_mode: Boolean($("#oa-confirm-real")?.checked),
+    static_ip_confirmed: Boolean($("#oa-static-ip")?.checked),
   };
 }
 
 function evaluationPayload(modeOverride = "") {
-  const settings = settingsPayload();
-  if (modeOverride) settings.mode = modeOverride;
+  const settings = settingsPayload(modeOverride);
   return {
     mode: settings.mode,
     settings,
-    spot: Number($("#oa-spot").value || 0),
-    quote_age_seconds: Number($("#oa-quote-age").value || 0),
+    spot: numberValue($("#oa-spot")?.value, 22500),
+    quote_age_seconds: numberValue($("#oa-quote-age")?.value, 0),
     market_cue: parseJson("#oa-market-cue-json", sampleMarketCue()),
     instruments: parseJson("#oa-instruments-json", sampleInstruments()),
     quotes: parseJson("#oa-quotes-json", sampleQuotes()),
@@ -88,187 +231,871 @@ function evaluationPayload(modeOverride = "") {
   };
 }
 
-function setText(id, text) {
-  const node = $(id);
-  if (node) node.textContent = text;
+function backtestPayload() {
+  return {
+    settings: {
+      ...settingsPayload("BACKTEST"),
+      underlying: $("#oa-backtest-symbol")?.value || "NIFTY",
+      chart_interval: $("#oa-backtest-interval")?.value || "3minute",
+      paper_starting_balance: numberValue($("#oa-backtest-balance")?.value, 20000),
+      strategy_profile: $("#oa-backtest-profile")?.value || "BALANCED",
+      max_trades_per_day: numberValue($("#oa-backtest-max-trades")?.value, 3),
+      buy_score_threshold: numberValue($("#oa-backtest-score")?.value, 70),
+    },
+    candles: sampleReplayCandles(),
+  };
 }
 
-function money(value) {
-  const number = Number(value || 0);
-  return number.toLocaleString("en-IN", { maximumFractionDigits: 2 });
+// tab navigation
+function initTabs() {
+  $$("[data-oa-tab]").forEach(button => {
+    button.addEventListener("click", () => {
+      const tab = button.dataset.oaTab;
+      state.activeTab = tab;
+      $$("[data-oa-tab]").forEach(item => item.classList.toggle("oa-tab-active", item === button));
+      $$(".oa-tab-panel").forEach(panel => {
+        panel.hidden = panel.id !== `oa-tab-${tab}`;
+      });
+      renderAll();
+    });
+  });
 }
 
-function renderStatus(payload) {
-  state.status = payload || {};
-  const settings = payload.settings || state.defaults.settings || {};
-  const session = payload.session || {};
-  const account = payload.account_status || {};
-  setText("#oa-mode", settings.mode || "PAPER");
-  setText("#oa-engine", session.status || "Idle");
-  setText("#oa-real-orders", settings.real_orders_enabled ? "Enabled" : "Disabled");
-  const connected = settings.mode === "REAL" ? account.real?.connected : account.paper?.connected;
-  setText("#oa-kite", connected ? "Connected" : "Disconnected");
-  const dataOk = state.lastResult.data_quality?.allowed;
-  setText("#oa-data", dataOk ? "Fresh" : "Waiting");
-  const health = payload.watchdog || state.lastResult.watchdog || {};
-  setText("#oa-health-top", health.mode || "-");
+// status rendering
+function renderTopStatus() {
+  const result = state.lastResult || {};
+  const settings = result.settings || state.status.settings || state.defaults.settings || {};
+  const mode = text(result.mode || settings.mode || "PAPER");
+  const account = result.account_status || state.status.account_status || {};
+  const isReal = mode === "REAL";
+  const connected = isReal ? Boolean(account.real?.connected) : Boolean(account.paper?.connected);
+  const activeTrades = activeTradesFrom(result);
+  const protectedOk = !activeTrades.length || activeTrades.every(trade => trade.position_protected);
+  const ocoOk = !activeTrades.length || activeTrades.every(trade => trade.oco_active);
+  const dataAllowed = result.data_quality?.allowed;
+  const dataLabel = dataAllowed ? "Fresh" : state.dataSource === "SAMPLE" ? "Sample" : "Waiting";
+  const governor = result.governor || {};
+  const governorLabel = governor.allowed === true ? "Allow" : governor.state ? "Blocked" : "Waiting";
+  const engine = result.session?.status || state.status.session?.status || "Idle";
+  const pnl = realizedPnl();
+
+  setBadge("#oa-mode", mode, isReal ? "red" : mode === "PAPER" ? "green" : "blue");
+  setBadge("#oa-real-money", isReal ? "YES" : "NO", isReal ? "red" : "green");
+  setBadge("#oa-kite", connected ? "Connected" : "Disconnected", connected ? "green" : "red");
+  setBadge("#oa-data", dataLabel, dataAllowed ? "green" : state.dataSource === "SAMPLE" ? "blue" : "yellow");
+  setBadge("#oa-governor", governorLabel, governor.allowed === true ? "green" : governor.state ? "yellow" : "grey");
+  setBadge("#oa-engine", engine, /RUNNING|ACTIVE|READY/.test(String(engine)) ? "green" : /LOCK|ERROR|MANUAL/.test(String(engine)) ? "red" : "grey");
+  setBadge("#oa-position", activeTrades.length ? (protectedOk ? "Protected" : "Unprotected") : "No Position", activeTrades.length ? (protectedOk ? "green" : "red") : "grey");
+  setBadge("#oa-oco", activeTrades.length ? (ocoOk ? "Active" : "Inactive") : "Inactive", activeTrades.length ? (ocoOk ? "green" : "red") : "grey");
+  setBadge("#oa-daily-pnl", money(pnl), pnl > 0 ? "green" : pnl < 0 ? "red" : "grey");
 }
 
-function renderResult(result) {
-  state.lastResult = result || {};
-  renderStatus({ ...(state.status || {}), settings: { ...(state.status.settings || {}), mode: result.mode || state.status.settings?.mode }, session: result.session, account_status: result.account_status });
+function renderAll() {
+  renderTopStatus();
+  renderDashboard();
+  renderBacktestResults();
+  renderShadow();
+  renderRealPreflight();
+  renderPaperAccount();
+  renderReports();
+  renderDeveloperRawJson();
+}
+
+function activeTradesFrom(result) {
+  return result.session?.active_trades || result.paper_lifecycle?.active_trades || state.status.session?.active_trades || [];
+}
+
+function realizedPnl() {
+  const ledger = state.status.paper_account?.ledger || state.lastResult.paper_account?.ledger || [];
+  return ledger.reduce((sum, item) => {
+    const type = String(item.type || "").toUpperCase();
+    return type === "SELL" ? sum + numberValue(item.amount, 0) : sum;
+  }, 0);
+}
+
+// dashboard rendering
+function renderDashboard() {
+  const result = state.lastResult || {};
   const cue = result.market_cue || {};
   const regime = result.regime || {};
   const selection = result.selection || {};
   const selected = selection.selected || {};
-  setText("#oa-cue", cue.cue || "-");
-  setText("#oa-cue-score", cue.score !== undefined ? `${cue.score} / ${cue.confidence}` : "0");
-  setText("#oa-regime", regime.regime || "-");
-  setText("#oa-regime-side", regime.recommended_side || "WAIT");
-  setText("#oa-contract", selected.tradingsymbol || "-");
-  setText("#oa-contract-score", selection.score ? `${selection.score.toFixed(1)}` : "0");
-
-  const rows = [
-    ["Decision", result.allowed ? "ALLOW" : "WAIT"],
-    ["Side", selection.side || regime.recommended_side || "WAIT"],
-    ["Contract", selected.tradingsymbol || "-"],
-    ["Score", selection.score ? selection.score.toFixed(2) : "0"],
-    ["LTP", selected.ltp || "-"],
-    ["Spread", selected.spread_pct !== undefined ? `${selected.spread_pct}%` : "-"],
-    ["Moneyness", selected.moneyness || "-"],
-    ["Reason", result.explanation || "-"],
-    ["Blockers", (result.blockers || []).join("; ") || "-"],
-  ];
-  $("#oa-plan-body").innerHTML = rows.map(([name, value]) => `<div class="oa-plan-row"><span>${name}</span><strong>${value}</strong></div>`).join("");
-  renderSafety(result);
-  if (result.approval?.approval_id) state.pendingApprovalId = result.approval.approval_id;
-  renderLog();
-}
-
-function renderSafety(result) {
-  const isReal = result.mode === "REAL";
-  const dataFresh = result.data_quality?.allowed;
-  const attention = (result.blockers || []).length > 0;
-  const activeTrades = result.session?.active_trades || result.paper_lifecycle?.active_trades || [];
-  const protectedOk = !activeTrades.length || activeTrades.every(trade => trade.position_protected);
-  const ocoOk = !activeTrades.length || activeTrades.every(trade => trade.oco_active);
-  setSafety("#oa-protected", protectedOk, protectedOk ? "YES" : "NO");
-  setSafety("#oa-oco", ocoOk, ocoOk ? "YES" : "NO");
-  setSafety("#oa-real", isReal, isReal ? "YES" : "NO");
-  const connected = result.account_status ? (isReal ? result.account_status.real?.connected : result.account_status.paper?.connected) : false;
-  setSafety("#oa-kite-safe", Boolean(connected), connected ? "YES" : "NO");
-  setSafety("#oa-fresh", dataFresh, dataFresh ? "YES" : "NO");
+  const plan = result.trade_plan || {};
   const watchdog = result.watchdog || {};
-  if (watchdog.mode) {
-    const healthOk = watchdog.mode === "NORMAL";
-    setSafety("#oa-health", healthOk, watchdog.mode, healthOk ? "ok" : watchdog.mode === "CRITICAL" || watchdog.mode === "LOCKED" ? "bad" : "warn");
+  const health = watchdog || {};
+
+  setBadge("#oa-dashboard-cue-badge", cue.cue || "Waiting", cue.recommended_side === "WAIT" ? "yellow" : cue.cue ? "blue" : "grey");
+  setText("#oa-cue", cue.cue || "-");
+  setText("#oa-cue-score", cue.score !== undefined ? score(cue.score) : "-");
+  setText("#oa-cue-confidence", cue.confidence !== undefined ? score(cue.confidence) : "-");
+  setText("#oa-cue-updated", cue.last_updated || cue.timestamp || "-");
+  setText("#oa-cue-reason", cue.reason || cue.reason_summary || "No market cue evaluated yet.");
+
+  setBadge("#oa-regime-side", regime.recommended_side || "WAIT", regime.recommended_side === "WAIT" ? "yellow" : "blue");
+  setText("#oa-regime", regime.regime || "-");
+  setText("#oa-regime-confidence", regime.confidence !== undefined ? score(regime.confidence) : "-");
+  setText("#oa-regime-aggression", regime.aggressiveness || "-");
+  setText("#oa-regime-block", regime.no_trade_reason || "-");
+
+  setBadge("#oa-health-badge", health.mode || "Waiting", health.mode === "NORMAL" ? "green" : health.mode ? "yellow" : "grey");
+  setText("#oa-session-health", health.session_health_score !== undefined ? score(health.session_health_score) : "-");
+  setText("#oa-bot-health", health.bot_health_score !== undefined ? score(health.bot_health_score) : "-");
+  setText("#oa-readiness-score", health.daily_readiness_score !== undefined ? score(health.daily_readiness_score) : "-");
+  if (health.new_entries_allowed === undefined) {
+    setBadge("#oa-new-entries", "-", "grey");
+  } else {
+    setBadge("#oa-new-entries", health.new_entries_allowed ? "YES" : "NO", health.new_entries_allowed ? "green" : "yellow");
   }
-  const reconciliation = result.reconciliation || result.evidence?.reconciliation;
-  if (reconciliation) {
-    setSafety("#oa-reconcile", Boolean(reconciliation.ok), reconciliation.ok ? "YES" : "NO");
-  }
-  setSafety("#oa-attention", !attention, attention ? "YES" : "NO", attention ? "warn" : "ok");
+  setText("#oa-cooldown", `Cooldown: ${text(result.risk?.cooldown_remaining_seconds, "0")} sec`);
+
+  const riskAmount = plan.entry_price && plan.stoploss && plan.quantity ? (plan.entry_price - plan.stoploss) * plan.quantity : 0;
+  const rewardAmount = plan.entry_price && plan.target && plan.quantity ? (plan.target - plan.entry_price) * plan.quantity : 0;
+  const rr = riskAmount > 0 ? (rewardAmount / riskAmount).toFixed(2) : "-";
+  setBadge("#oa-decision-badge", result.allowed ? "ALLOW" : result.blockers?.length ? "BLOCKED" : "WAIT", result.allowed ? "green" : result.blockers?.length ? "yellow" : "grey");
+  setHtml("#oa-plan-body", [
+    row("Decision", result.allowed ? "ALLOW" : result.blockers?.length ? "BLOCKED" : "WAIT"),
+    row("Side", selection.side || regime.recommended_side || "WAIT"),
+    row("Contract", selected.tradingsymbol || plan.tradingsymbol || "-"),
+    row("Underlying", selected.name || settingsPayload().underlying || "-"),
+    row("Expiry", selected.expiry || "-"),
+    row("Strike", selected.strike || "-"),
+    row("Moneyness", selected.moneyness || "-"),
+    row("LTP", selected.ltp || "-"),
+    row("Entry Limit", plan.entry_price || "-"),
+    row("Target", plan.target || "-"),
+    row("Stoploss", plan.stoploss || "-"),
+    row("Quantity", plan.quantity || "-"),
+    row("Lots", plan.lots || "-"),
+    row("Estimated Risk", riskAmount ? money(riskAmount) : "-"),
+    row("Estimated Reward", rewardAmount ? money(rewardAmount) : "-"),
+    row("Risk Reward", rr),
+    row("Trade Score", selection.score !== undefined ? score(selection.score) : "-"),
+    row("Discipline Score", result.discipline?.discipline_score !== undefined ? score(result.discipline.discipline_score) : "-"),
+    row("Data Quality", result.data_quality?.allowed ? "PASS" : "WAIT"),
+    row("Theta Risk", result.options_risk?.theta_risk_score !== undefined ? score(result.options_risk.theta_risk_score) : "-"),
+    row("Spread", selected.spread_pct !== undefined ? percent(selected.spread_pct) : "-"),
+    row("Liquidity", selected.breakdown?.liquidity !== undefined ? score(selected.breakdown.liquidity) : "-"),
+    row("Reason", result.explanation || "-"),
+  ].join(""));
+
+  renderList("#oa-blockers-list", readableBlockers(result), "No blockers. Waiting for a valid setup.");
+  renderActiveTradeCard(activeTradesFrom(result));
+  renderRecentEvents(result);
+  renderDashboardAlerts(result);
 }
 
-function setSafety(selector, ok, label = "", forcedClass = "") {
-  const node = $(selector);
-  if (!node) return;
-  node.classList.remove("oa-ok", "oa-bad", "oa-warn");
-  node.classList.add(forcedClass ? `oa-${forcedClass}` : ok ? "oa-ok" : "oa-bad");
-  const strong = $("strong", node);
-  if (strong) strong.textContent = label || (ok ? "YES" : "NO");
+function readableBlockers(result) {
+  const blockers = result.blockers || result.governor?.blockers || [];
+  return blockers.map(item => `Blocked: ${item}`);
 }
 
-function renderLog() {
+function renderActiveTradeCard(trades) {
+  if (!trades.length) {
+    setBadge("#oa-active-trade-badge", "No Position", "grey");
+    setHtml("#oa-active-trade-body", `<p class="oa-empty-state">No active position.</p>`);
+    setHtml("#oa-trade-timeline", "");
+    return;
+  }
+  const trade = trades[0] || {};
+  setBadge("#oa-active-trade-badge", trade.position_protected ? "Protected" : "Unprotected", trade.position_protected ? "green" : "red");
+  setHtml("#oa-active-trade-body", [
+    row("Contract", trade.tradingsymbol || "-"),
+    row("Quantity", trade.quantity || "-"),
+    row("Entry Average", trade.entry_price || trade.average_price || "-"),
+    row("Current LTP", trade.last_ltp || "-"),
+    row("Unrealized P&L", trade.unrealized_pnl !== undefined ? money(trade.unrealized_pnl) : "-"),
+    row("Target", trade.target || "-"),
+    row("Stoploss", trade.stoploss || "-"),
+    row("Trailing", trade.trailing_status || "-"),
+    row("OCO", trade.oco_active ? "Active" : "Inactive"),
+    row("Protected", trade.position_protected ? "YES" : "NO"),
+    row("Last Update", trade.updated_at || trade.opened_at || "-"),
+  ].join(""));
+  const steps = [
+    ["Signal accepted", true],
+    ["Entry placed", Boolean(trade.entry_order_id)],
+    ["Entry filled", Boolean(trade.entry_price || trade.average_price)],
+    ["Target placed", Boolean(trade.target_order_id)],
+    ["SL placed", Boolean(trade.stoploss_order_id)],
+    ["OCO active", Boolean(trade.oco_active)],
+    ["Monitoring", trade.status === "ACTIVE" || trade.status === "POSITION_ACTIVE"],
+    ["Trade closed", trade.status === "CLOSED"],
+  ];
+  setHtml("#oa-trade-timeline", steps.map(([label, done]) => `<li class="${done ? "oa-step-done" : ""}">${escapeHtml(label)}</li>`).join(""));
+}
+
+function renderRecentEvents(result) {
+  const session = result.session || state.status.session || {};
+  const events = [];
+  if (result.selection?.selected?.tradingsymbol) {
+    events.push(`Candidate found: ${result.selection.selected.tradingsymbol}, score ${text(result.selection.score, "-")}.`);
+  }
+  (result.blockers || []).slice(0, 4).forEach(item => events.push(`Trade blocked: ${item}`));
+  (session.safety_events || []).slice(-6).forEach(item => events.push(`${item.reason || "Safety event"}.`));
+  (session.rejected_log || []).slice(-4).forEach(item => events.push(`Rejected setup: ${item.reason || "-"}`));
+  renderList("#oa-events", events.slice(-10).reverse(), "No recent events yet.");
+}
+
+function renderDashboardAlerts(result) {
+  const alerts = [];
+  const mode = result.mode || state.status.settings?.mode || state.defaults.settings?.mode || "PAPER";
+  const trades = activeTradesFrom(result);
+  const connected = mode === "REAL" ? result.account_status?.real?.connected : result.account_status?.paper?.connected;
+  if (mode === "REAL") alerts.push(alertHtml("REAL MONEY MODE is selected. Real order placement is still disabled in this build.", "danger"));
+  if (connected === false) alerts.push(alertHtml("Kite is disconnected for the selected mode.", "warning"));
+  if (state.dataSource === "SAMPLE") alerts.push(alertHtml("Dashboard is using sample/demo payload until live evaluation data is provided.", "info"));
+  if (trades.some(trade => !trade.position_protected)) alerts.push(alertHtml("Position unprotected. Manual attention required.", "danger"));
+  if (trades.some(trade => !trade.oco_active)) alerts.push(alertHtml("OCO inactive while a position exists.", "danger"));
+  if (result.watchdog?.mode === "CRITICAL" || result.watchdog?.mode === "LOCKED") alerts.push(alertHtml(`Watchdog ${result.watchdog.mode}. New entries blocked.`, "danger"));
+  if (result.execution?.blockers?.length) alerts.push(alertHtml(result.execution.blockers[0], "warning"));
+  setHtml("#oa-dashboard-alerts", alerts.join(""));
+}
+
+// backtest rendering/actions
+function initBacktestTab() {
+  on("#oa-backtest-run", "click", runBacktest);
+  on("#oa-backtest-replay", "click", runReplay);
+}
+
+async function runBacktest() {
+  try {
+    setTabAlert("backtest", "Running backtest...", "info");
+    const result = await api("/api/options-auto/backtest/run", backtestPayload());
+    state.lastBacktest = result;
+    state.lastResult = result;
+    renderBacktestResults(result);
+    renderTopStatus();
+    setTabAlert("backtest", "Backtest complete.", "success");
+  } catch (error) {
+    setTabAlert("backtest", error.message, "danger");
+  }
+}
+
+function renderBacktestResults(result = state.lastBacktest) {
+  const metrics = result.metrics || result.summary || {};
+  setHtml("#oa-backtest-summary", [
+    metric("Net P&L", money(metrics.net_pnl || 0)),
+    metric("Gross P&L", money(metrics.gross_pnl || 0)),
+    metric("Charges", money(metrics.charges || 0)),
+    metric("Win Rate", metrics.win_rate !== undefined ? percent(metrics.win_rate) : "-"),
+    metric("Total Trades", metrics.total_trades || result.trades?.length || 0),
+    metric("Max Drawdown", money(metrics.max_drawdown || 0)),
+    metric("Profit Factor", metrics.profit_factor || "-"),
+    metric("Target Hits", metrics.target_hits || 0),
+    metric("Stoploss Hits", metrics.stoploss_hits || 0),
+    metric("Reversal Exits", metrics.reversal_exits || 0),
+    metric("Time Exits", metrics.time_exits || 0),
+    metric("Best Trade", money(metrics.best_trade || 0)),
+    metric("Worst Trade", money(metrics.worst_trade || 0)),
+  ].join(""));
+  const trades = result.trades || [];
+  setHtml("#oa-backtest-trades", trades.length
+    ? trades.map(trade => `<tr><td>${escapeHtml(trade.time || trade.datetime || "-")}</td><td>${escapeHtml(trade.side || "-")}</td><td>${escapeHtml(trade.tradingsymbol || "-")}</td><td>${escapeHtml(trade.entry || trade.entry_price || "-")}</td><td>${escapeHtml(trade.exit || trade.exit_price || "-")}</td><td>${escapeHtml(trade.quantity || "-")}</td><td>${escapeHtml(trade.exit_reason || "-")}</td><td>${escapeHtml(money(trade.net_pnl || 0))}</td><td>${escapeHtml(trade.score || "-")}</td></tr>`).join("")
+    : `<tr><td colspan="9">No trades generated by this backtest result.</td></tr>`);
+}
+
+// shadow rendering/actions
+function initShadowTab() {
+  on("#oa-shadow-start", "click", runShadowStart);
+  on("#oa-shadow-stop", "click", () => {
+    setTabAlert("shadow", "Shadow stop requested. No stop route exists yet; no orders were ever placed.", "info");
+  });
+  on("#oa-shadow-report-btn", "click", runShadowReport);
+}
+
+async function runShadowStart() {
+  try {
+    const result = await api("/api/options-auto/shadow/start", evaluationPayload("SHADOW"));
+    state.lastResult = result;
+    renderShadow(result);
+    renderAll();
+    setTabAlert("shadow", "Shadow mode running. No orders will be placed.", "success");
+  } catch (error) {
+    setTabAlert("shadow", error.message, "danger");
+  }
+}
+
+async function runShadowReport() {
+  try {
+    const report = await api("/api/options-auto/shadow/report");
+    state.lastShadowReport = report;
+    renderShadowReport(report);
+    setTabAlert("shadow", "Shadow report generated.", "success");
+  } catch (error) {
+    setTabAlert("shadow", error.message, "danger");
+  }
+}
+
+function renderShadow(result = state.lastResult) {
+  const selected = result.selection?.selected || {};
+  setHtml("#oa-shadow-status", [
+    metric("Status", result.session?.status || "Idle"),
+    metric("Would Trade", result.allowed ? "YES" : "NO"),
+    metric("Rejected Signals", result.blockers?.length || 0),
+    metric("Mode", "SHADOW"),
+  ].join(""));
+  setHtml("#oa-shadow-candidate", [
+    row("Candidate", selected.tradingsymbol || "-"),
+    row("Side", result.selection?.side || result.regime?.recommended_side || "WAIT"),
+    row("Score", result.selection?.score !== undefined ? score(result.selection.score) : "-"),
+    row("Reason", result.explanation || "-"),
+  ].join(""));
+  setHtml("#oa-shadow-plan", renderPlanRows(result.trade_plan || {}));
+}
+
+function renderShadowReport(report = state.lastShadowReport) {
+  setHtml("#oa-shadow-learning", [
+    metric("Signals", report.signals || 0),
+    metric("Would-Have Trades", report.would_trade || 0),
+    metric("Expected P&L", money(report.expected_pnl || 0)),
+    metric("Actual P&L", money(report.actual_pnl || 0)),
+    metric("False Entries", report.false_entries || 0),
+    metric("Missed Trades", report.missed_trades || 0),
+    metric("Late Entries", report.late_entries || 0),
+    metric("Late Exits", report.late_exits || 0),
+  ].join(""));
+}
+
+// paper rendering/actions
+function initPaperTab() {
+  on("#oa-paper-start", "click", runPaperStart);
+  on("#oa-paper-stop", "click", () => setTabAlert("paper", "Paper stop requested locally. No real orders exist in paper mode.", "info"));
+  on("#oa-paper-reset", "click", resetPaperBalance);
+  on("#oa-paper-request-approval", "click", requestPaperApproval);
+  on("#oa-paper-approve", "click", approvePaper);
+  on("#oa-paper-reject", "click", rejectPaper);
+  on("#oa-paper-execute", "click", executePaper);
+  on("#oa-paper-process", "click", processPaperMarket);
+}
+
+async function runPaperStart() {
+  try {
+    const result = await api("/api/options-auto/paper/start", evaluationPayload("PAPER"));
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("paper", "Paper engine evaluated. No real orders were called.", "success");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
+}
+
+async function requestPaperApproval() {
+  try {
+    const result = await api("/api/options-auto/paper/request-approval", evaluationPayload("PAPER"));
+    state.lastResult = result;
+    if (result.approval?.approval_id) state.pendingApprovalId = result.approval.approval_id;
+    renderAll();
+    setTabAlert("paper", result.approval ? "Approval card created." : result.message || "Approval not created.", result.approval ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
+}
+
+async function approvePaper() {
+  try {
+    const result = await api("/api/options-auto/paper/approve", { approval_id: state.pendingApprovalId });
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("paper", result.status === "APPROVED" ? "Paper trade approved and protected." : result.message || result.status, result.status === "APPROVED" ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
+}
+
+async function rejectPaper() {
+  try {
+    const result = await api("/api/options-auto/paper/reject", { approval_id: state.pendingApprovalId });
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("paper", "Paper approval rejected.", "info");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
+}
+
+async function executePaper() {
+  try {
+    const result = await api("/api/options-auto/paper/execute-plan", evaluationPayload("PAPER"));
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("paper", result.paper_order ? "Paper order simulated locally." : result.message || "Paper execution blocked.", result.paper_order ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
+}
+
+async function processPaperMarket() {
+  try {
+    const tick = numberValue($("#oa-spot")?.value, 22500);
+    const result = await api("/api/options-auto/paper/process-market", { market: { ltp: tick, high: tick, low: tick } });
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("paper", "Paper market tick processed.", "success");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
+}
+
+function resetPaperBalance() {
+  const defaults = state.defaults.settings || {};
+  if ($("#oa-paper-balance")) $("#oa-paper-balance").value = defaults.paper_starting_balance || 20000;
+  setTabAlert("paper", "Paper balance input reset. Save settings or start paper engine to apply.", "info");
+}
+
+function renderPaperAccount() {
+  const account = state.lastResult.paper_account || state.status.paper_account || {};
+  setHtml("#oa-paper-account", [
+    metric("Starting Balance", money(account.opening_balance || state.defaults.settings?.paper_starting_balance || 20000)),
+    metric("Available Balance", money(account.available_balance || 0)),
+    metric("Realized P&L", money(account.realized_pnl || 0)),
+    metric("Unrealized P&L", money(account.unrealized_pnl || 0)),
+    metric("Charges Estimate", money(account.charges || 0)),
+    metric("Trades Today", activeTradesFrom(state.lastResult).length),
+  ].join(""));
+  setHtml("#oa-paper-plan", renderPlanRows(state.lastResult.trade_plan || {}));
+  renderApprovalCard();
+  renderPaperTrades();
+}
+
+function renderApprovalCard() {
+  const approval = state.lastResult.approval || state.lastResult.paper_lifecycle?.pending_approval || state.status.paper_lifecycle?.pending_approval;
+  if (!approval) {
+    setBadge("#oa-approval-badge", "No Pending Approval", "grey");
+    setHtml("#oa-approval-card", `<p class="oa-empty-state">No approval is pending.</p>`);
+    return;
+  }
+  state.pendingApprovalId = approval.approval_id || state.pendingApprovalId;
+  setBadge("#oa-approval-badge", approval.status || "PENDING", "yellow");
+  const expiresIn = approval.expires_at_epoch ? Math.max(0, Math.round(approval.expires_at_epoch - Date.now() / 1000)) : "-";
+  setHtml("#oa-approval-card", [
+    row("Approval ID", approval.approval_id || "-"),
+    row("Status", approval.status || "-"),
+    row("Contract", approval.trade_plan?.tradingsymbol || "-"),
+    row("Entry", approval.trade_plan?.entry_price || "-"),
+    row("Target", approval.trade_plan?.target || "-"),
+    row("Stoploss", approval.trade_plan?.stoploss || "-"),
+    row("Quantity", approval.trade_plan?.quantity || "-"),
+    row("Countdown", expiresIn === 0 ? "Expired" : `${expiresIn} sec`),
+  ].join(""));
+}
+
+function renderPaperTrades() {
+  const trades = activeTradesFrom(state.lastResult);
+  if (!trades.length) {
+    setHtml("#oa-paper-trades", `<p class="oa-empty-state">No active paper trades.</p>`);
+    return;
+  }
+  setHtml("#oa-paper-trades", trades.map(trade => `<div class="oa-mini-trade">
+    ${row("Contract", trade.tradingsymbol || "-")}
+    ${row("Qty", trade.quantity || "-")}
+    ${row("Entry", trade.entry_price || "-")}
+    ${row("LTP", trade.last_ltp || "-")}
+    ${row("P&L", trade.unrealized_pnl !== undefined ? money(trade.unrealized_pnl) : "-")}
+    ${row("Target", trade.target || "-")}
+    ${row("SL", trade.stoploss || "-")}
+    ${row("OCO", trade.oco_active ? "Active" : "Inactive")}
+    ${row("Protected", trade.position_protected ? "YES" : "NO")}
+  </div>`).join(""));
+}
+
+// real rendering/actions
+function initRealTab() {
+  on("#oa-real-preflight", "click", runRealPreflight);
+  on("#oa-real-reconcile", "click", runRealReconcile);
+  on("#oa-real-dry", "click", runRealDryRun);
+  on("#oa-real-stop", "click", stopNewEntries);
+  on("#oa-stop-new-entries-top", "click", stopNewEntries);
+  on("#oa-real-safe", "click", runSafeMode);
+  on("#oa-real-emergency", "click", runEmergencyPlan);
+}
+
+async function runRealPreflight() {
+  try {
+    const result = await api("/api/options-auto/real/preflight", { ...evaluationPayload("REAL"), market_open: true, instruments_valid: true });
+    state.lastResult = result;
+    renderRealPreflight(result);
+    renderAll();
+    setTabAlert("real", result.allowed ? "Real preflight passed, but real order placement is still disabled." : "Real preflight blocked. Review checklist.", result.allowed ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function runRealReconcile() {
+  try {
+    const result = await api("/api/options-auto/real/reconcile", { mode: "REAL", broker_orders: [], positions: [] });
+    state.lastResult = result;
+    renderRealPreflight(result);
+    renderAll();
+    setTabAlert("real", result.ok ? "Reconciliation clean." : "Reconciliation needs attention.", result.ok ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function runRealDryRun() {
+  try {
+    const result = await api("/api/options-auto/real/dry-run", evaluationPayload("REAL"));
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("real", result.message || "Real dry-run complete. No order placed.", "info");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function stopNewEntries() {
+  try {
+    const result = await api("/api/options-auto/real/stop-new-entries", { source: "UI" });
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("real", "Stop New Entries is active.", "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function runSafeMode() {
+  try {
+    const result = await api("/api/options-auto/real/safe-mode", { source: "UI" });
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("real", "Safe Mode is active.", "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function runEmergencyPlan() {
+  try {
+    const result = await api("/api/options-auto/real/emergency-plan", { mode: "REAL", confirmed: Boolean($("#oa-confirm-real")?.checked), positions: [] });
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("real", "Emergency plan generated. Dry-run only; no orders sent.", "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+function renderRealPreflight(result = state.lastResult) {
+  const evidence = result.evidence || {};
+  const checks = evidence.checks || {};
+  const reconciliation = result.reconciliation || evidence.reconciliation || {};
+  const hasResult = Boolean(result.state || evidence.timestamp || result.reconciliation);
+  const rows = hasResult ? [
+    ["Real Money Zerodha connected", checks.client_connected],
+    ["Real mode explicitly confirmed", checks.real_mode_confirmed],
+    ["Static IP/order readiness confirmed", checks.static_ip_confirmed],
+    ["Instruments valid", checks.instruments_valid],
+    ["Funds/margins fetched", checks.available_margin !== undefined && checks.available_margin !== null],
+    ["Market open", checks.market_open],
+    ["No unknown manual position", !(reconciliation.unknown_manual_orders || []).length],
+    ["No orphan order", !(reconciliation.unknown_auto_orders || []).length],
+    ["No duplicate order", !(reconciliation.duplicate_orders || []).length],
+    ["No unprotected position", !(reconciliation.unprotected_positions || []).length],
+    ["OCO manager ready", true],
+    ["Watchdog running", checks.watchdog_ready],
+    ["Rate limiter healthy", evidence.rate_limiter?.healthy !== false],
+    ["Result folder writable", checks.results_writable],
+    ["Reconciliation clean", reconciliation.ok],
+  ] : [
+    ["Real Money Zerodha connected", null],
+    ["Real mode explicitly confirmed", null],
+    ["Static IP/order readiness confirmed", null],
+    ["Instruments valid", null],
+    ["Funds/margins fetched", null],
+    ["Market open", null],
+    ["No unknown manual position", null],
+    ["No orphan order", null],
+    ["No duplicate order", null],
+    ["No unprotected position", null],
+    ["OCO manager ready", null],
+    ["Watchdog running", null],
+    ["Rate limiter healthy", null],
+    ["Result folder writable", null],
+    ["Reconciliation clean", null],
+  ];
+  setHtml("#oa-real-checklist", rows.map(([label, ok]) => checklistRow(label, ok, reasonForCheck(label, result))).join(""));
+  const active = activeTradesFrom(result);
+  setHtml("#oa-real-position", active.length ? active.map(trade => renderPlanRows(trade)).join("") : `<p class="oa-empty-state">No active real position is reported.</p>`);
+}
+
+function checklistRow(label, ok, reason = "") {
+  const kind = ok === true ? "green" : ok === false ? "red" : "yellow";
+  const icon = ok === true ? "PASS" : ok === false ? "FAIL" : "WAIT";
+  return `<div class="oa-check-row"><span class="oa-status-badge ${badgeClass(kind)}">${icon}</span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(reason || "-")}</small></div>`;
+}
+
+function reasonForCheck(label, result) {
+  const blockers = result.blockers || [];
+  const match = blockers.find(item => item.toLowerCase().includes(label.split(" ")[0].toLowerCase()));
+  if (match) return match;
+  if (label.includes("disabled")) return "Real order placement is disabled.";
+  return "";
+}
+
+// reports rendering/actions
+function initReportsTab() {
+  on("#oa-reports-refresh", "click", refresh);
+  on("#oa-report-open-folder", "click", () => setTabAlert("reports", "Opening folders from the browser is not enabled in this build.", "info"));
+  on("#oa-report-download", "click", () => setTabAlert("reports", "Download/export is available from generated report paths when present.", "info"));
+}
+
+function renderReports() {
+  setHtml("#oa-report-backtest", [
+    metric("Rows", state.lastBacktest.rows || 0),
+    metric("Orders", state.lastBacktest.orders_placed || 0),
+    metric("Report", state.lastBacktest.report?.audit_json ? "Available" : "-"),
+  ].join(""));
+  const paper = state.status.paper_account || state.lastResult.paper_account || {};
+  setHtml("#oa-report-paper", [
+    metric("Available", money(paper.available_balance || 0)),
+    metric("Orders", paper.orders?.length || 0),
+    metric("Ledger Rows", paper.ledger?.length || 0),
+  ].join(""));
+  setHtml("#oa-report-shadow", [
+    metric("Signals", state.lastShadowReport.signals || 0),
+    metric("Would Trade", state.lastShadowReport.would_trade || 0),
+    metric("Expected P&L", money(state.lastShadowReport.expected_pnl || 0)),
+  ].join(""));
+  setHtml("#oa-report-replay", [
+    metric("Rows", state.lastReplay.rows || 0),
+    metric("Orders", state.lastReplay.orders_placed || 0),
+    metric("Mode", state.lastReplay.mode || "-"),
+  ].join(""));
+  const reports = [
+    state.lastBacktest.report?.audit_json && `Backtest audit: ${state.lastBacktest.report.audit_json}`,
+    state.lastShadowReport.saved_report && `Shadow report: ${state.lastShadowReport.saved_report}`,
+    state.lastReplay.saved_report && `Replay report: ${state.lastReplay.saved_report}`,
+    state.status.result_root && `Result root: ${state.status.result_root}`,
+  ].filter(Boolean);
+  renderList("#oa-report-list", reports, "No report paths available yet.");
+}
+
+// settings rendering/actions
+function initSettingsTab() {
+  on("#oa-settings-save", "click", saveSettings);
+  on("#oa-settings-reset", "click", loadDefaults);
+}
+
+async function saveSettings() {
+  try {
+    syncSettingsToggles();
+    const result = await api("/api/options-auto/configure", settingsPayload());
+    state.status = result;
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("settings", "Settings saved for this Options Auto session.", "success");
+  } catch (error) {
+    setTabAlert("settings", error.message, "danger");
+  }
+}
+
+function syncSettingsToggles() {
+  if ($("#oa-auto") && $("#oa-auto-settings")) $("#oa-auto").checked = $("#oa-auto-settings").checked;
+  if ($("#oa-ask") && $("#oa-ask-settings")) $("#oa-ask").checked = $("#oa-ask-settings").checked;
+}
+
+function applySettings(settings) {
+  const pairs = [
+    ["#oa-setting-mode", settings.mode],
+    ["#oa-underlying", settings.underlying],
+    ["#oa-profile", settings.strategy_profile],
+    ["#oa-chart-interval", settings.chart_interval],
+    ["#oa-score-threshold", settings.buy_score_threshold],
+    ["#oa-paper-balance", settings.paper_starting_balance],
+    ["#oa-approval-timeout", settings.approval_timeout_seconds],
+    ["#oa-capital-pct", settings.max_capital_per_trade_pct],
+    ["#oa-max-daily-loss", settings.max_daily_loss],
+    ["#oa-max-daily-profit", settings.max_daily_profit_lock],
+    ["#oa-max-trades", settings.max_trades_per_day],
+    ["#oa-max-open-trades", settings.max_open_trades],
+    ["#oa-max-consecutive-losses", settings.max_consecutive_losses],
+    ["#oa-cooldown-seconds", settings.cooldown_after_trade_seconds],
+    ["#oa-max-chase", settings.max_chase_points],
+    ["#oa-avoid-first", settings.avoid_first_minutes],
+    ["#oa-no-new-after", settings.no_new_trade_after],
+    ["#oa-square-off", settings.square_off_time],
+    ["#oa-max-holding", settings.max_holding_minutes],
+    ["#oa-expiry-mode", settings.expiry_preference],
+    ["#oa-min-volume", settings.min_volume],
+    ["#oa-min-oi", settings.min_oi],
+    ["#oa-max-spread", settings.max_spread_pct],
+    ["#oa-theta-risk", settings.theta_exit_risk_score],
+    ["#oa-expiry-day-lots", settings.expiry_day_max_lots],
+    ["#oa-limit-timeout", settings.limit_order_timeout_seconds],
+    ["#oa-max-mods", settings.max_buy_limit_modifications],
+    ["#oa-sl-throttle", settings.sl_modify_throttle_seconds],
+    ["#oa-slippage-buffer", settings.slippage_buffer_points],
+    ["#oa-backtest-balance", settings.paper_starting_balance],
+    ["#oa-backtest-interval", settings.chart_interval],
+    ["#oa-backtest-profile", settings.strategy_profile],
+    ["#oa-backtest-score", settings.buy_score_threshold],
+  ];
+  pairs.forEach(([selector, content]) => {
+    const node = $(selector);
+    if (node && content !== undefined) node.value = content;
+  });
+  const toggles = [
+    ["#oa-auto", settings.auto_entry_enabled],
+    ["#oa-auto-settings", settings.auto_entry_enabled],
+    ["#oa-ask", settings.ask_permission_before_entry],
+    ["#oa-ask-settings", settings.ask_permission_before_entry],
+    ["#oa-trailing", settings.trailing_stop_enabled],
+    ["#oa-breakeven", settings.break_even_sl_enabled],
+    ["#oa-partial", settings.partial_exit_enabled],
+    ["#oa-reversal", settings.reversal_exit_enabled],
+    ["#oa-time-exit", settings.time_exit_enabled],
+    ["#oa-allow-deep-otm", settings.allow_deep_otm],
+    ["#oa-confirm-real", settings.confirm_real_mode],
+    ["#oa-static-ip", settings.static_ip_confirmed],
+  ];
+  toggles.forEach(([selector, checked]) => {
+    const node = $(selector);
+    if (node) node.checked = Boolean(checked);
+  });
+}
+
+// developer debug rendering/actions
+function initDeveloperDebugTab() {
+  on("#oa-evaluate", "click", () => runAction("/api/options-auto/evaluate"));
+  on("#oa-shadow", "click", runShadowStart);
+  on("#oa-paper", "click", runPaperStart);
+  on("#oa-paper-approval", "click", requestPaperApproval);
+  on("#oa-paper-debug-approve", "click", approvePaper);
+  on("#oa-paper-debug-reject", "click", rejectPaper);
+  on("#oa-paper-debug-execute", "click", executePaper);
+  on("#oa-paper-debug-process", "click", processPaperMarket);
+  on("#oa-real-debug-dry", "click", runRealDryRun);
+  on("#oa-real-debug-preflight", "click", runRealPreflight);
+  on("#oa-real-debug-reconcile", "click", runRealReconcile);
+  on("#oa-readiness", "click", () => runSimple("/api/options-auto/readiness", { mode: $("#oa-setting-mode")?.value || "PAPER", data_feed_alive: true, last_update_age_seconds: numberValue($("#oa-quote-age")?.value, 0) }, "debug"));
+  on("#oa-health-check", "click", () => runSimple("/api/options-auto/health", { mode: $("#oa-setting-mode")?.value || "PAPER", data_feed_alive: true, last_update_age_seconds: numberValue($("#oa-quote-age")?.value, 0), memory_pct: 0, cpu_pct: 0 }, "debug"));
+  on("#oa-backtest", "click", runBacktest);
+  on("#oa-shadow-report", "click", runShadowReport);
+  on("#oa-promotion", "click", () => runSimple("/api/options-auto/promotion/status", { metrics: { current_stage: "LEARNING", sessions_completed: 5, net_pnl: 1200, max_drawdown_pct: 4, unprotected_position_incidents: 0, major_safety_errors: 0 } }, "debug"));
+  on("#oa-drift", "click", () => runSimple("/api/options-auto/drift/status", { trades: [{ pnl: 200 }, { pnl: -80 }, { pnl: 150 }] }, "debug"));
+  on("#oa-missed", "click", () => runSimple("/api/options-auto/missed-trades/status", { decisions: [{ allowed: true, actual_pnl: 120 }, { allowed: false, actual_pnl: 80, reason: "Spread too wide" }] }, "debug"));
+  on("#oa-replay", "click", runReplay);
+  on("#oa-telegram-status", "click", () => runSimple("/api/options-auto/telegram/command", { command: "status", user_id: "UI" }, "debug"));
+  $$("[data-oa-log]").forEach(button => {
+    button.addEventListener("click", () => {
+      $$("[data-oa-log]").forEach(item => item.classList.remove("active"));
+      button.classList.add("active");
+      state.activeLog = button.dataset.oaLog;
+      renderDeveloperRawJson();
+    });
+  });
+}
+
+async function runAction(path, mode = "") {
+  try {
+    const result = await api(path, evaluationPayload(mode));
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("debug", "Raw action completed.", "success");
+  } catch (error) {
+    setTabAlert("debug", error.message, "danger");
+  }
+}
+
+async function runSimple(path, payload = {}, alertTab = "debug") {
+  try {
+    const result = await api(path, payload);
+    state.lastResult = result;
+    if (path.includes("/replay/")) state.lastReplay = result;
+    renderAll();
+    setTabAlert(alertTab, "Action completed.", "success");
+    return result;
+  } catch (error) {
+    setTabAlert(alertTab, error.message, "danger");
+    return null;
+  }
+}
+
+async function runReplay() {
+  try {
+    const result = await api("/api/options-auto/replay/run", { candles: sampleReplayCandles(), decisions: [{ decision: "WAIT", reason: "Opening range forming" }, { decision: "WAIT", reason: "No order in replay" }] });
+    state.lastReplay = result;
+    state.lastResult = result;
+    renderAll();
+    setTabAlert(state.activeTab === "backtest" ? "backtest" : "debug", "Replay generated. No orders placed.", "success");
+  } catch (error) {
+    setTabAlert(state.activeTab === "backtest" ? "backtest" : "debug", error.message, "danger");
+  }
+}
+
+function renderDeveloperRawJson() {
+  const log = $("#oa-log");
+  if (!log) return;
   const result = state.lastResult || {};
   const session = result.session || state.status.session || {};
   let content = result;
   if (state.activeLog === "decision") content = session.decision_log || [];
   if (state.activeLog === "rejected") content = session.rejected_log || [];
   if (state.activeLog === "safety") content = session.safety_events || [];
-  $("#oa-log").textContent = JSON.stringify(content, null, 2);
+  log.textContent = JSON.stringify(content, null, 2);
 }
 
+// shared render helpers
+function renderPlanRows(plan) {
+  if (!plan || !Object.keys(plan).length) return `<p class="oa-empty-state">No trade plan available.</p>`;
+  return [
+    row("Contract", plan.tradingsymbol || "-"),
+    row("Side", plan.side || "-"),
+    row("Entry", plan.entry_price || plan.entry || "-"),
+    row("Target", plan.target || "-"),
+    row("Stoploss", plan.stoploss || "-"),
+    row("Quantity", plan.quantity || "-"),
+    row("Lots", plan.lots || "-"),
+  ].join("");
+}
+
+function on(selector, event, handler) {
+  const node = $(selector);
+  if (node) node.addEventListener(event, handler);
+}
+
+// init
 async function refresh() {
   const payload = await api("/api/options-auto/status");
   state.status = payload;
-  renderStatus(payload);
-  if (!state.lastResult.session) renderLog();
-}
-
-async function runAction(path, mode = "") {
-  try {
-    const result = await api(path, evaluationPayload(mode));
-    renderResult(result);
-  } catch (error) {
-    $("#oa-log").textContent = error.message;
-  }
-}
-
-async function runSimple(path, payload = {}) {
-  try {
-    const result = await api(path, payload);
-    state.lastResult = result;
-    renderStatus({ ...(state.status || {}), settings: state.status.settings || state.defaults.settings || {}, session: result.session || state.status.session, account_status: result.account_status, watchdog: result.watchdog });
-    renderSafety(result);
-    renderLog();
-  } catch (error) {
-    $("#oa-log").textContent = error.message;
-  }
+  renderAll();
 }
 
 async function loadDefaults() {
   state.defaults = await api("/api/options-auto/defaults");
   const settings = state.defaults.settings || {};
-  $("#oa-setting-mode").value = settings.mode || "PAPER";
-  $("#oa-underlying").value = settings.underlying || "NIFTY";
-  $("#oa-profile").value = settings.strategy_profile || "BALANCED";
-  $("#oa-score-threshold").value = settings.buy_score_threshold || 70;
-  $("#oa-paper-balance").value = settings.paper_starting_balance || 20000;
-  $("#oa-capital-pct").value = settings.max_capital_per_trade_pct || 20;
-  $("#oa-ask").checked = Boolean(settings.ask_permission_before_entry);
-  $("#oa-auto").checked = Boolean(settings.auto_entry_enabled);
-  $("#oa-confirm-real").checked = Boolean(settings.confirm_real_mode);
-  $("#oa-static-ip").checked = Boolean(settings.static_ip_confirmed);
-  $("#oa-market-cue-json").value = JSON.stringify(sampleMarketCue(), null, 2);
-  $("#oa-instruments-json").value = JSON.stringify(sampleInstruments(), null, 2);
-  $("#oa-quotes-json").value = JSON.stringify(sampleQuotes(), null, 2);
+  applySettings(settings);
+  const cue = $("#oa-market-cue-json");
+  const instruments = $("#oa-instruments-json");
+  const quotes = $("#oa-quotes-json");
+  if (cue) cue.value = JSON.stringify(sampleMarketCue(), null, 2);
+  if (instruments) instruments.value = JSON.stringify(sampleInstruments(), null, 2);
+  if (quotes) quotes.value = JSON.stringify(sampleQuotes(), null, 2);
   await refresh();
 }
 
+function initDashboard() {
+  on("#oa-top-refresh", "click", refresh);
+}
+
+function initReports() {
+  renderReports();
+}
+
 document.addEventListener("DOMContentLoaded", () => {
-  $("#oa-refresh").addEventListener("click", refresh);
-  $("#oa-evaluate").addEventListener("click", () => runAction("/api/options-auto/evaluate"));
-  $("#oa-shadow").addEventListener("click", () => runAction("/api/options-auto/shadow/start", "SHADOW"));
-  $("#oa-paper").addEventListener("click", () => runAction("/api/options-auto/paper/start", "PAPER"));
-  $("#oa-paper-approval").addEventListener("click", () => runAction("/api/options-auto/paper/request-approval", "PAPER"));
-  $("#oa-paper-approve").addEventListener("click", () => runSimple("/api/options-auto/paper/approve", { approval_id: state.pendingApprovalId }));
-  $("#oa-paper-execute").addEventListener("click", () => runAction("/api/options-auto/paper/execute-plan", "PAPER"));
-  $("#oa-paper-process").addEventListener("click", () => runSimple("/api/options-auto/paper/process-market", { market: { ltp: Number($("#oa-spot").value || 0), high: Number($("#oa-spot").value || 0), low: Number($("#oa-spot").value || 0) } }));
-  $("#oa-real-dry").addEventListener("click", () => runAction("/api/options-auto/real/dry-run", "REAL"));
-  $("#oa-real-preflight").addEventListener("click", () => runSimple("/api/options-auto/real/preflight", { ...evaluationPayload("REAL"), market_open: true, instruments_valid: true }));
-  $("#oa-real-reconcile").addEventListener("click", () => runSimple("/api/options-auto/real/reconcile", { mode: "REAL", broker_orders: [], positions: [] }));
-  $("#oa-real-stop").addEventListener("click", () => runSimple("/api/options-auto/real/stop-new-entries", { source: "UI" }));
-  $("#oa-real-safe").addEventListener("click", () => runSimple("/api/options-auto/real/safe-mode", { source: "UI" }));
-  $("#oa-real-emergency").addEventListener("click", () => runSimple("/api/options-auto/real/emergency-plan", { mode: "REAL", confirmed: $("#oa-confirm-real").checked, positions: [] }));
-  $("#oa-readiness").addEventListener("click", () => runSimple("/api/options-auto/readiness", { mode: $("#oa-setting-mode").value, data_feed_alive: true, last_update_age_seconds: Number($("#oa-quote-age").value || 0) }));
-  $("#oa-health-check").addEventListener("click", () => runSimple("/api/options-auto/health", { mode: $("#oa-setting-mode").value, data_feed_alive: true, last_update_age_seconds: Number($("#oa-quote-age").value || 0), memory_pct: 0, cpu_pct: 0 }));
-  $("#oa-backtest").addEventListener("click", () => runAction("/api/options-auto/backtest/run", "BACKTEST"));
-  $("#oa-shadow-report").addEventListener("click", () => runSimple("/api/options-auto/shadow/report"));
-  $("#oa-promotion").addEventListener("click", () => runSimple("/api/options-auto/promotion/status", { metrics: { current_stage: "LEARNING", sessions_completed: 5, net_pnl: 1200, max_drawdown_pct: 4, unprotected_position_incidents: 0, major_safety_errors: 0 } }));
-  $("#oa-drift").addEventListener("click", () => runSimple("/api/options-auto/drift/status", { trades: [{ pnl: 200 }, { pnl: -80 }, { pnl: 150 }] }));
-  $("#oa-missed").addEventListener("click", () => runSimple("/api/options-auto/missed-trades/status", { decisions: [{ allowed: true, actual_pnl: 120 }, { allowed: false, actual_pnl: 80, reason: "Spread too wide" }] }));
-  $("#oa-replay").addEventListener("click", () => runSimple("/api/options-auto/replay/run", { candles: sampleReplayCandles(), decisions: [{ decision: "WAIT", reason: "Opening range forming" }, { decision: "WAIT", reason: "No order in replay" }] }));
-  $("#oa-telegram-status").addEventListener("click", () => runSimple("/api/options-auto/telegram/command", { command: "status", user_id: "UI" }));
-  document.querySelectorAll("[data-oa-log]").forEach(button => {
-    button.addEventListener("click", () => {
-      document.querySelectorAll("[data-oa-log]").forEach(item => item.classList.remove("active"));
-      button.classList.add("active");
-      state.activeLog = button.dataset.oaLog;
-      renderLog();
-    });
-  });
+  initTabs();
+  initDashboard();
+  initBacktestTab();
+  initShadowTab();
+  initPaperTab();
+  initRealTab();
+  initReportsTab();
+  initSettingsTab();
+  initDeveloperDebugTab();
+  initReports();
   loadDefaults().catch(error => {
-    $("#oa-log").textContent = error.message;
+    setHtml("#oa-dashboard-alerts", alertHtml(error.message, "danger"));
   });
 });

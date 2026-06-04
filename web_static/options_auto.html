@@ -10,131 +10,526 @@
   <body>
     <div class="oa-shell">
       <header class="oa-topbar">
-        <div>
+        <div class="oa-brand">
           <a class="oa-back" href="/">TradeBotV5</a>
-          <h1>Options Auto</h1>
+          <div>
+            <h1>Options Auto</h1>
+            <p>Mode-based index options cockpit</p>
+          </div>
         </div>
-        <div class="oa-status-grid">
-          <div><span>Mode</span><strong id="oa-mode">PAPER</strong></div>
-          <div><span>Kite</span><strong id="oa-kite">Disconnected</strong></div>
-          <div><span>Data</span><strong id="oa-data">Waiting</strong></div>
-          <div><span>Engine</span><strong id="oa-engine">Idle</strong></div>
-          <div><span>Health</span><strong id="oa-health-top">-</strong></div>
-          <div><span>Real Orders</span><strong id="oa-real-orders">Disabled</strong></div>
+        <div class="oa-status-grid" aria-label="Options Auto status">
+          <div><span>Mode</span><strong id="oa-mode" class="oa-status-badge oa-badge-blue">PAPER</strong></div>
+          <div><span>Real Money</span><strong id="oa-real-money" class="oa-status-badge oa-badge-grey">NO</strong></div>
+          <div><span>Kite</span><strong id="oa-kite" class="oa-status-badge oa-badge-yellow">Waiting</strong></div>
+          <div><span>Data</span><strong id="oa-data" class="oa-status-badge oa-badge-yellow">Waiting</strong></div>
+          <div><span>Governor</span><strong id="oa-governor" class="oa-status-badge oa-badge-grey">Waiting</strong></div>
+          <div><span>Engine</span><strong id="oa-engine" class="oa-status-badge oa-badge-grey">Idle</strong></div>
+          <div><span>Position</span><strong id="oa-position" class="oa-status-badge oa-badge-grey">No Position</strong></div>
+          <div><span>OCO</span><strong id="oa-oco" class="oa-status-badge oa-badge-grey">Inactive</strong></div>
+          <div><span>Daily P&amp;L</span><strong id="oa-daily-pnl" class="oa-status-badge oa-badge-grey">₹0</strong></div>
+        </div>
+        <div class="oa-emergency-strip">
+          <button type="button" id="oa-top-refresh" class="oa-button">Refresh</button>
+          <button type="button" id="oa-stop-new-entries-top" class="oa-button oa-button-danger">Stop New Entries</button>
         </div>
       </header>
 
-      <main class="oa-grid">
-        <section class="oa-panel oa-settings">
-          <div class="oa-panel-head">
-            <h2>Settings</h2>
-            <button type="button" id="oa-refresh">Refresh</button>
+      <nav class="oa-tabs-nav" aria-label="Options Auto sections">
+        <button type="button" class="oa-tab-active" data-oa-tab="dashboard">Dashboard</button>
+        <button type="button" data-oa-tab="backtest">Backtest</button>
+        <button type="button" data-oa-tab="shadow">Shadow Mode</button>
+        <button type="button" data-oa-tab="paper">Paper Trading</button>
+        <button type="button" data-oa-tab="real">Real Trading</button>
+        <button type="button" data-oa-tab="reports">Reports</button>
+        <button type="button" data-oa-tab="settings">Settings</button>
+        <button type="button" data-oa-tab="debug">Developer Debug</button>
+      </nav>
+
+      <main class="oa-main">
+        <section id="oa-tab-dashboard" class="oa-tab-panel">
+          <div id="oa-dashboard-alerts" class="oa-alert-stack"></div>
+
+          <div class="oa-card-grid oa-card-grid-three">
+            <article class="oa-card">
+              <div class="oa-card-head">
+                <h2>Market Cue</h2>
+                <span id="oa-dashboard-cue-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
+              </div>
+              <div class="oa-metric-grid">
+                <div><span>Cue</span><strong id="oa-cue">-</strong></div>
+                <div><span>Score</span><strong id="oa-cue-score">-</strong></div>
+                <div><span>Confidence</span><strong id="oa-cue-confidence">-</strong></div>
+                <div><span>Last Updated</span><strong id="oa-cue-updated">-</strong></div>
+              </div>
+              <p id="oa-cue-reason" class="oa-muted">No market cue evaluated yet.</p>
+            </article>
+
+            <article class="oa-card">
+              <div class="oa-card-head">
+                <h2>Regime</h2>
+                <span id="oa-regime-side" class="oa-status-badge oa-badge-grey">WAIT</span>
+              </div>
+              <div class="oa-metric-grid">
+                <div><span>Regime</span><strong id="oa-regime">-</strong></div>
+                <div><span>Confidence</span><strong id="oa-regime-confidence">-</strong></div>
+                <div><span>Aggressiveness</span><strong id="oa-regime-aggression">-</strong></div>
+                <div><span>No-Trade Reason</span><strong id="oa-regime-block">-</strong></div>
+              </div>
+            </article>
+
+            <article class="oa-card">
+              <div class="oa-card-head">
+                <h2>Session Health</h2>
+                <span id="oa-health-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
+              </div>
+              <div class="oa-metric-grid">
+                <div><span>Session</span><strong id="oa-session-health">-</strong></div>
+                <div><span>Bot</span><strong id="oa-bot-health">-</strong></div>
+                <div><span>Readiness</span><strong id="oa-readiness-score">-</strong></div>
+                <div><span>New Entries</span><strong id="oa-new-entries" class="oa-status-badge oa-badge-grey">-</strong></div>
+              </div>
+              <p id="oa-cooldown" class="oa-muted">Cooldown: -</p>
+            </article>
           </div>
-          <div class="oa-form-grid">
-            <label>Mode
-              <select id="oa-setting-mode">
-                <option>PAPER</option>
-                <option>SHADOW</option>
-                <option>BACKTEST</option>
-                <option>REAL</option>
-              </select>
-            </label>
-            <label>Symbol
-              <select id="oa-underlying">
-                <option>NIFTY</option>
-                <option>SENSEX</option>
-                <option>BANKNIFTY</option>
-                <option>BANKEX</option>
-              </select>
-            </label>
-            <label>Profile
-              <select id="oa-profile">
-                <option>BALANCED</option>
-                <option>CONSERVATIVE</option>
-                <option>AGGRESSIVE</option>
-              </select>
-            </label>
-            <label>Score Threshold <input id="oa-score-threshold" type="number" min="0" max="100" step="1"></label>
-            <label>Paper Balance <input id="oa-paper-balance" type="number" min="0" step="100"></label>
-            <label>Max Capital % <input id="oa-capital-pct" type="number" min="1" max="100" step="1"></label>
-            <label>Spot LTP <input id="oa-spot" type="number" step="0.05" value="22500"></label>
-            <label>Quote Age Sec <input id="oa-quote-age" type="number" min="0" step="0.1" value="0"></label>
+
+          <div class="oa-card-grid oa-dashboard-grid">
+            <article class="oa-card oa-trade-plan-card">
+              <div class="oa-card-head">
+                <h2>Trade Plan</h2>
+                <span id="oa-decision-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
+              </div>
+              <div id="oa-plan-body" class="oa-plan-body"></div>
+              <div class="oa-blocker-panel">
+                <h3>Why</h3>
+                <ul id="oa-blockers-list" class="oa-readable-list"></ul>
+              </div>
+            </article>
+
+            <article class="oa-card oa-active-trade-card">
+              <div class="oa-card-head">
+                <h2>Active Trade</h2>
+                <span id="oa-active-trade-badge" class="oa-status-badge oa-badge-grey">No Position</span>
+              </div>
+              <div id="oa-active-trade-body"></div>
+              <ol id="oa-trade-timeline" class="oa-timeline"></ol>
+            </article>
           </div>
-          <div class="oa-toggle-row">
-            <label><input id="oa-ask" type="checkbox"> Ask Permission</label>
-            <label><input id="oa-auto" type="checkbox"> Auto Entry</label>
-            <label><input id="oa-confirm-real" type="checkbox"> Real Confirmed</label>
-            <label><input id="oa-static-ip" type="checkbox"> Static IP OK</label>
+
+          <article class="oa-card">
+            <div class="oa-card-head">
+              <h2>Recent Events</h2>
+              <span class="oa-status-badge oa-badge-blue">Last 10</span>
+            </div>
+            <ul id="oa-events" class="oa-event-list"></ul>
+          </article>
+        </section>
+
+        <section id="oa-tab-backtest" class="oa-tab-panel" hidden>
+          <div class="oa-workflow-grid">
+            <article class="oa-card">
+              <h2>Backtest Inputs</h2>
+              <div class="oa-form-grid">
+                <label>Symbol
+                  <select id="oa-backtest-symbol">
+                    <option>NIFTY</option>
+                    <option>SENSEX</option>
+                  </select>
+                </label>
+                <label>Date <input id="oa-backtest-date" type="date"></label>
+                <label>Interval
+                  <select id="oa-backtest-interval">
+                    <option value="1minute">1m</option>
+                    <option value="3minute">3m</option>
+                    <option value="5minute">5m</option>
+                    <option value="10minute">10m</option>
+                    <option value="15minute">15m</option>
+                  </select>
+                </label>
+                <label>Starting Balance <input id="oa-backtest-balance" type="number" min="0" step="100"></label>
+                <label>Profile
+                  <select id="oa-backtest-profile">
+                    <option>BALANCED</option>
+                    <option>CONSERVATIVE</option>
+                    <option>AGGRESSIVE</option>
+                  </select>
+                </label>
+                <label>FII/DII CSV <input id="oa-backtest-fii" type="file" accept=".csv"></label>
+              </div>
+              <details class="oa-collapsible">
+                <summary>Advanced backtest settings</summary>
+                <div class="oa-form-grid">
+                  <label>Max Trades <input id="oa-backtest-max-trades" type="number" min="1" step="1" value="3"></label>
+                  <label>Buy Score Threshold <input id="oa-backtest-score" type="number" min="0" max="100" value="70"></label>
+                </div>
+              </details>
+              <div id="oa-backtest-alert" class="oa-tab-alert"></div>
+              <button type="button" id="oa-backtest-run" class="oa-button oa-button-primary oa-wide-button">Run Backtest</button>
+            </article>
+
+            <article class="oa-card">
+              <h2>Results Summary</h2>
+              <div id="oa-backtest-summary" class="oa-summary-grid"></div>
+              <div class="oa-button-row">
+                <button type="button" id="oa-backtest-export" class="oa-button" disabled>Export Excel</button>
+                <button type="button" id="oa-backtest-folder" class="oa-button" disabled>Open Result Folder</button>
+                <button type="button" id="oa-backtest-replay" class="oa-button">Replay Day</button>
+              </div>
+            </article>
           </div>
-          <div class="oa-action-row">
-            <button type="button" id="oa-evaluate" class="primary">Evaluate</button>
-            <button type="button" id="oa-shadow">Shadow</button>
-            <button type="button" id="oa-paper">Paper</button>
-            <button type="button" id="oa-paper-approval">Request Approval</button>
-            <button type="button" id="oa-paper-approve">Approve</button>
-            <button type="button" id="oa-paper-execute">Paper Execute</button>
-            <button type="button" id="oa-paper-process">Process Market</button>
-            <button type="button" id="oa-real-dry">Real Dry Run</button>
-            <button type="button" id="oa-real-preflight">Real Preflight</button>
-            <button type="button" id="oa-real-reconcile">Reconcile</button>
-            <button type="button" id="oa-real-stop">Stop Entries</button>
-            <button type="button" id="oa-real-safe">Safe Mode</button>
-            <button type="button" id="oa-real-emergency">Emergency Plan</button>
-            <button type="button" id="oa-readiness">Readiness</button>
-            <button type="button" id="oa-health-check">Health</button>
-            <button type="button" id="oa-backtest">Backtest</button>
-            <button type="button" id="oa-shadow-report">Shadow Report</button>
-            <button type="button" id="oa-promotion">Promotion</button>
-            <button type="button" id="oa-drift">Drift</button>
-            <button type="button" id="oa-missed">Missed Trades</button>
-            <button type="button" id="oa-replay">Replay</button>
-            <button type="button" id="oa-telegram-status">Telegram Status</button>
+          <article class="oa-card">
+            <h2>Trades</h2>
+            <div class="oa-table-wrap">
+              <table class="oa-table">
+                <thead>
+                  <tr><th>Time</th><th>CE/PE</th><th>Contract</th><th>Entry</th><th>Exit</th><th>Qty</th><th>Exit Reason</th><th>Net P&amp;L</th><th>Score</th></tr>
+                </thead>
+                <tbody id="oa-backtest-trades"></tbody>
+              </table>
+            </div>
+          </article>
+        </section>
+
+        <section id="oa-tab-shadow" class="oa-tab-panel" hidden>
+          <div class="oa-mode-banner oa-info-banner">SHADOW MODE - NO ORDERS WILL BE PLACED</div>
+          <div id="oa-shadow-alert" class="oa-tab-alert"></div>
+          <div class="oa-button-row">
+            <button type="button" id="oa-shadow-start" class="oa-button oa-button-primary">Start Shadow Mode</button>
+            <button type="button" id="oa-shadow-stop" class="oa-button">Stop Shadow Mode</button>
+            <button type="button" id="oa-shadow-report-btn" class="oa-button">Generate Shadow Report</button>
+          </div>
+          <div class="oa-card-grid oa-card-grid-two">
+            <article class="oa-card"><h2>Shadow Engine</h2><div id="oa-shadow-status" class="oa-summary-grid"></div></article>
+            <article class="oa-card"><h2>Current Candidate</h2><div id="oa-shadow-candidate" class="oa-plan-body"></div></article>
+            <article class="oa-card"><h2>Would-Have Trade Plan</h2><div id="oa-shadow-plan" class="oa-plan-body"></div></article>
+            <article class="oa-card"><h2>Learning Summary</h2><div id="oa-shadow-learning" class="oa-summary-grid"></div></article>
           </div>
         </section>
 
-        <section class="oa-panel oa-center">
-          <div class="oa-market-strip">
-            <div><span>Market Cue</span><strong id="oa-cue">-</strong><small id="oa-cue-score">0</small></div>
-            <div><span>Regime</span><strong id="oa-regime">-</strong><small id="oa-regime-side">WAIT</small></div>
-            <div><span>Best Contract</span><strong id="oa-contract">-</strong><small id="oa-contract-score">0</small></div>
+        <section id="oa-tab-paper" class="oa-tab-panel" hidden>
+          <div class="oa-mode-banner oa-safe-banner">PAPER MODE - NO REAL ORDERS</div>
+          <div id="oa-paper-alert" class="oa-tab-alert"></div>
+          <div class="oa-card-grid oa-card-grid-two">
+            <article class="oa-card">
+              <h2>Paper Controls</h2>
+              <div class="oa-form-grid">
+                <label>Starting Balance <input id="oa-paper-balance" type="number" min="0" step="100"></label>
+                <label>Approval Timeout <input id="oa-approval-timeout" type="number" min="5" step="1" value="30"></label>
+              </div>
+              <div class="oa-toggle-row">
+                <label><input id="oa-auto" type="checkbox"> Auto entry</label>
+                <label><input id="oa-ask" type="checkbox"> Ask approval</label>
+              </div>
+              <div class="oa-button-row">
+                <button type="button" id="oa-paper-start" class="oa-button oa-button-primary">Start Paper Engine</button>
+                <button type="button" id="oa-paper-stop" class="oa-button">Stop Paper Engine</button>
+                <button type="button" id="oa-paper-reset" class="oa-button">Reset Paper Balance</button>
+              </div>
+            </article>
+            <article class="oa-card">
+              <h2>Paper Account</h2>
+              <div id="oa-paper-account" class="oa-summary-grid"></div>
+            </article>
           </div>
-          <div class="oa-plan">
-            <h2>Trade Plan</h2>
-            <div id="oa-plan-body" class="oa-plan-body"></div>
+
+          <div class="oa-card-grid oa-card-grid-two">
+            <article class="oa-card"><h2>Paper Trade Plan</h2><div id="oa-paper-plan" class="oa-plan-body"></div></article>
+            <article class="oa-card">
+              <div class="oa-card-head">
+                <h2>Approval</h2>
+                <span id="oa-approval-badge" class="oa-status-badge oa-badge-grey">No Pending Approval</span>
+              </div>
+              <div id="oa-approval-card" class="oa-plan-body"></div>
+              <div class="oa-button-row">
+                <button type="button" id="oa-paper-request-approval" class="oa-button">Request Approval</button>
+                <button type="button" id="oa-paper-approve" class="oa-button oa-button-primary">Approve</button>
+                <button type="button" id="oa-paper-reject" class="oa-button">Reject</button>
+              </div>
+            </article>
           </div>
-          <div class="oa-safety-grid">
-            <div id="oa-protected"><span>Position Protected</span><strong>NO</strong></div>
-            <div id="oa-oco"><span>OCO Active</span><strong>NO</strong></div>
-            <div id="oa-real"><span>Real Money</span><strong>NO</strong></div>
-            <div id="oa-kite-safe"><span>Kite Connected</span><strong>NO</strong></div>
-            <div id="oa-fresh"><span>Data Fresh</span><strong>NO</strong></div>
-            <div id="oa-health"><span>Health</span><strong>-</strong></div>
-            <div id="oa-reconcile"><span>Reconciled</span><strong>-</strong></div>
-            <div id="oa-attention"><span>Manual Attention</span><strong>NO</strong></div>
+
+          <article class="oa-card">
+            <h2>Paper Active Trades</h2>
+            <div id="oa-paper-trades"></div>
+          </article>
+
+          <details class="oa-collapsible oa-debug-lite">
+            <summary>Paper Simulation Tools</summary>
+            <p class="oa-muted">Local simulation helpers for testing paper fills. These do not call Zerodha.</p>
+            <div class="oa-button-row">
+              <button type="button" id="oa-paper-execute" class="oa-button">Paper Execute Current Plan</button>
+              <button type="button" id="oa-paper-process" class="oa-button">Process Sample Market Tick</button>
+            </div>
+          </details>
+        </section>
+
+        <section id="oa-tab-real" class="oa-tab-panel" hidden>
+          <div class="oa-mode-banner oa-danger-banner">REAL MONEY MODE - REAL ORDERS CAN CAUSE FINANCIAL LOSS</div>
+          <div class="oa-card oa-danger-zone">
+            <strong>Real order placement is disabled in this build.</strong>
+            <p>This tab is for preflight, reconciliation, safety review, and dry-run planning only.</p>
+          </div>
+          <div id="oa-real-alert" class="oa-tab-alert"></div>
+
+          <div class="oa-card-grid oa-real-grid">
+            <article class="oa-card">
+              <h2>Real Preflight Checklist</h2>
+              <div id="oa-real-checklist" class="oa-preflight-checklist"></div>
+            </article>
+            <article class="oa-card">
+              <h2>Real Active Position</h2>
+              <div id="oa-real-position" class="oa-plan-body"></div>
+            </article>
+          </div>
+
+          <div class="oa-card-grid oa-card-grid-three">
+            <article class="oa-card">
+              <h2>Preflight</h2>
+              <div class="oa-button-row">
+                <button type="button" id="oa-real-preflight" class="oa-button oa-button-primary">Run Real Preflight</button>
+                <button type="button" id="oa-real-reconcile" class="oa-button">Run Reconciliation</button>
+                <button type="button" id="oa-real-dry" class="oa-button">Real Dry Run</button>
+              </div>
+            </article>
+            <article class="oa-card">
+              <h2>Safety Controls</h2>
+              <div class="oa-button-row">
+                <button type="button" id="oa-real-stop" class="oa-button">Stop New Entries</button>
+                <button type="button" id="oa-real-safe" class="oa-button">Safe Mode</button>
+              </div>
+            </article>
+            <article class="oa-card oa-danger-zone">
+              <h2>Emergency</h2>
+              <button type="button" id="oa-real-emergency" class="oa-button oa-button-danger oa-wide-button">Emergency Exit Plan</button>
+            </article>
           </div>
         </section>
 
-        <section class="oa-panel oa-right">
-          <h2>Inputs</h2>
-          <label>Market Cue JSON
-            <textarea id="oa-market-cue-json" spellcheck="false"></textarea>
-          </label>
-          <label>Instruments JSON
-            <textarea id="oa-instruments-json" spellcheck="false"></textarea>
-          </label>
-          <label>Quotes JSON
-            <textarea id="oa-quotes-json" spellcheck="false"></textarea>
-          </label>
+        <section id="oa-tab-reports" class="oa-tab-panel" hidden>
+          <div id="oa-reports-alert" class="oa-tab-alert"></div>
+          <div class="oa-card-grid oa-card-grid-four">
+            <article class="oa-card"><h2>Last Backtest</h2><div id="oa-report-backtest" class="oa-summary-grid"></div></article>
+            <article class="oa-card"><h2>Last Paper</h2><div id="oa-report-paper" class="oa-summary-grid"></div></article>
+            <article class="oa-card"><h2>Latest Shadow</h2><div id="oa-report-shadow" class="oa-summary-grid"></div></article>
+            <article class="oa-card"><h2>Last Replay</h2><div id="oa-report-replay" class="oa-summary-grid"></div></article>
+          </div>
+          <article class="oa-card">
+            <div class="oa-card-head">
+              <h2>Report Folders</h2>
+              <button type="button" id="oa-reports-refresh" class="oa-button">Refresh Reports</button>
+            </div>
+            <div class="oa-button-row">
+              <button type="button" id="oa-report-open-folder" class="oa-button" disabled>Open Result Folder</button>
+              <button type="button" id="oa-report-download" class="oa-button" disabled>Download Latest Report</button>
+            </div>
+            <ul id="oa-report-list" class="oa-event-list"></ul>
+          </article>
         </section>
 
-        <section class="oa-panel oa-bottom">
-          <div class="oa-tabs">
-            <button type="button" class="active" data-oa-log="decision">Decision</button>
-            <button type="button" data-oa-log="rejected">Rejected</button>
-            <button type="button" data-oa-log="safety">Safety</button>
-            <button type="button" data-oa-log="raw">Raw</button>
+        <section id="oa-tab-settings" class="oa-tab-panel" hidden>
+          <div id="oa-settings-alert" class="oa-tab-alert"></div>
+          <article class="oa-card">
+            <div class="oa-card-head">
+              <h2>Options Auto Settings</h2>
+              <div class="oa-button-row">
+                <button type="button" id="oa-settings-save" class="oa-button oa-button-primary">Save Settings</button>
+                <button type="button" id="oa-settings-reset" class="oa-button">Reset Defaults</button>
+              </div>
+            </div>
+
+            <details class="oa-collapsible" open>
+              <summary>General</summary>
+              <div class="oa-form-grid">
+                <label>Mode
+                  <select id="oa-setting-mode">
+                    <option>PAPER</option>
+                    <option>SHADOW</option>
+                    <option>BACKTEST</option>
+                    <option>REAL</option>
+                  </select>
+                </label>
+                <label>Symbol
+                  <select id="oa-underlying">
+                    <option>NIFTY</option>
+                    <option>SENSEX</option>
+                    <option>BANKNIFTY</option>
+                    <option>BANKEX</option>
+                  </select>
+                </label>
+                <label>Profile
+                  <select id="oa-profile">
+                    <option>BALANCED</option>
+                    <option>CONSERVATIVE</option>
+                    <option>AGGRESSIVE</option>
+                  </select>
+                </label>
+                <label>Interval
+                  <select id="oa-chart-interval">
+                    <option value="1minute">1m</option>
+                    <option value="3minute">3m</option>
+                    <option value="5minute">5m</option>
+                    <option value="10minute">10m</option>
+                    <option value="15minute">15m</option>
+                  </select>
+                </label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>Risk</summary>
+              <div class="oa-form-grid">
+                <label>Max Daily Loss <input id="oa-max-daily-loss" type="number" step="50"></label>
+                <label>Daily Profit Target <input id="oa-max-daily-profit" type="number" step="50"></label>
+                <label>Max Trades <input id="oa-max-trades" type="number" min="1" step="1"></label>
+                <label>Max Open Trades <input id="oa-max-open-trades" type="number" min="1" step="1"></label>
+                <label>Max Capital % <input id="oa-capital-pct" type="number" min="1" max="100" step="1"></label>
+                <label>Consecutive Losses <input id="oa-max-consecutive-losses" type="number" min="0" step="1"></label>
+                <label>Cooldown Seconds <input id="oa-cooldown-seconds" type="number" min="0" step="30"></label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>Entry</summary>
+              <div class="oa-form-grid">
+                <label>Buy Score Threshold <input id="oa-score-threshold" type="number" min="0" max="100" step="1"></label>
+                <label>Max Chase Points <input id="oa-max-chase" type="number" min="0" step="0.05"></label>
+                <label>Avoid First Minutes <input id="oa-avoid-first" type="number" min="0" step="1"></label>
+                <label>No New Trade After <input id="oa-no-new-after" type="time"></label>
+              </div>
+              <div class="oa-toggle-row">
+                <label><input id="oa-auto-settings" type="checkbox"> Auto entry</label>
+                <label><input id="oa-ask-settings" type="checkbox"> Ask approval</label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>Exit</summary>
+              <div class="oa-toggle-row">
+                <label><input id="oa-trailing" type="checkbox"> Trailing SL</label>
+                <label><input id="oa-breakeven" type="checkbox"> Breakeven SL</label>
+                <label><input id="oa-partial" type="checkbox"> Partial exit</label>
+                <label><input id="oa-reversal" type="checkbox"> Reversal exit</label>
+                <label><input id="oa-time-exit" type="checkbox"> Time exit</label>
+              </div>
+              <div class="oa-form-grid">
+                <label>Max Holding Minutes <input id="oa-max-holding" type="number" min="1" step="1"></label>
+                <label>Square Off Time <input id="oa-square-off" type="time"></label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>Option Selection</summary>
+              <div class="oa-form-grid">
+                <label>Expiry Mode
+                  <select id="oa-expiry-mode">
+                    <option>AUTO</option>
+                    <option>NEAREST</option>
+                    <option>NEXT</option>
+                  </select>
+                </label>
+                <label>Min Volume <input id="oa-min-volume" type="number" min="0" step="1"></label>
+                <label>Min OI <input id="oa-min-oi" type="number" min="0" step="1"></label>
+                <label>Max Spread % <input id="oa-max-spread" type="number" min="0" step="0.01"></label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>Theta / Expiry</summary>
+              <div class="oa-form-grid">
+                <label>Theta Exit Risk <input id="oa-theta-risk" type="number" min="0" max="100"></label>
+                <label>Expiry Day Max Lots <input id="oa-expiry-day-lots" type="number" min="1"></label>
+              </div>
+              <div class="oa-toggle-row">
+                <label><input id="oa-allow-deep-otm" type="checkbox"> Allow far OTM</label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>Execution</summary>
+              <div class="oa-form-grid">
+                <label>Buy Limit Timeout <input id="oa-limit-timeout" type="number" min="1"></label>
+                <label>Max Modifications <input id="oa-max-mods" type="number" min="0"></label>
+                <label>SL Modify Throttle <input id="oa-sl-throttle" type="number" min="0"></label>
+                <label>Slippage Buffer <input id="oa-slippage-buffer" type="number" min="0" step="0.05"></label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>UI / Performance</summary>
+              <div class="oa-form-grid">
+                <label>UI Refresh Seconds <input id="oa-ui-refresh" type="number" min="1" value="5"></label>
+                <label>Log Level
+                  <select id="oa-log-level">
+                    <option>INFO</option>
+                    <option>WARN</option>
+                    <option>DEBUG</option>
+                  </select>
+                </label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>Advanced</summary>
+              <div class="oa-toggle-row">
+                <label><input id="oa-confirm-real" type="checkbox"> Real mode explicitly confirmed</label>
+                <label><input id="oa-static-ip" type="checkbox"> Static IP/order readiness confirmed</label>
+              </div>
+              <p class="oa-danger-text">Dangerous real-mode settings are safety review flags only. Real order placement remains disabled.</p>
+            </details>
+          </article>
+        </section>
+
+        <section id="oa-tab-debug" class="oa-tab-panel" hidden>
+          <div class="oa-mode-banner oa-warning-banner">Developer Debug is for testing only. Do not use during active real trading unless you understand the effect.</div>
+          <div id="oa-debug-alert" class="oa-tab-alert"></div>
+          <div class="oa-card-grid oa-debug-grid">
+            <article class="oa-card oa-debug-panel">
+              <h2>Sample / Raw Inputs</h2>
+              <div class="oa-form-grid">
+                <label>Spot LTP <input id="oa-spot" type="number" step="0.05" value="22500"></label>
+                <label>Quote Age Sec <input id="oa-quote-age" type="number" min="0" step="0.1" value="0"></label>
+              </div>
+              <label>Market Cue JSON <textarea id="oa-market-cue-json" spellcheck="false"></textarea></label>
+              <label>Instruments JSON <textarea id="oa-instruments-json" spellcheck="false"></textarea></label>
+              <label>Quotes JSON <textarea id="oa-quotes-json" spellcheck="false"></textarea></label>
+            </article>
+            <article class="oa-card oa-debug-panel">
+              <h2>Raw Actions</h2>
+              <div class="oa-action-grid">
+                <button type="button" id="oa-evaluate" class="oa-button">Evaluate</button>
+                <button type="button" id="oa-shadow" class="oa-button">Shadow Start</button>
+                <button type="button" id="oa-paper" class="oa-button">Paper Start</button>
+                <button type="button" id="oa-paper-approval" class="oa-button">Request Approval</button>
+                <button type="button" id="oa-paper-debug-approve" class="oa-button">Approve</button>
+                <button type="button" id="oa-paper-debug-reject" class="oa-button">Reject</button>
+                <button type="button" id="oa-paper-debug-execute" class="oa-button">Paper Execute</button>
+                <button type="button" id="oa-paper-debug-process" class="oa-button">Process Market</button>
+                <button type="button" id="oa-real-debug-dry" class="oa-button">Real Dry Run</button>
+                <button type="button" id="oa-real-debug-preflight" class="oa-button">Real Preflight</button>
+                <button type="button" id="oa-real-debug-reconcile" class="oa-button">Reconcile</button>
+                <button type="button" id="oa-readiness" class="oa-button">Readiness</button>
+                <button type="button" id="oa-health-check" class="oa-button">Health</button>
+                <button type="button" id="oa-backtest" class="oa-button">Backtest Raw Run</button>
+                <button type="button" id="oa-shadow-report" class="oa-button">Shadow Report Raw</button>
+                <button type="button" id="oa-promotion" class="oa-button">Promotion</button>
+                <button type="button" id="oa-drift" class="oa-button">Drift</button>
+                <button type="button" id="oa-missed" class="oa-button">Missed Trades</button>
+                <button type="button" id="oa-replay" class="oa-button">Replay</button>
+                <button type="button" id="oa-telegram-status" class="oa-button">Telegram Command Test</button>
+              </div>
+            </article>
           </div>
-          <pre id="oa-log"></pre>
+          <article class="oa-card oa-debug-panel">
+            <div class="oa-card-head">
+              <h2>Raw Result JSON</h2>
+              <div class="oa-tabs">
+                <button type="button" class="active" data-oa-log="decision">Decision</button>
+                <button type="button" data-oa-log="rejected">Rejected</button>
+                <button type="button" data-oa-log="safety">Safety</button>
+                <button type="button" data-oa-log="raw">Raw</button>
+              </div>
+            </div>
+            <pre id="oa-log"></pre>
+          </article>
         </section>
       </main>
     </div>

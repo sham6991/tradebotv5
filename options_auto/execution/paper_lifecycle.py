@@ -85,6 +85,44 @@ class PaperLifecycleEngine:
         self.active_trades = remaining
         return {"updates": updates, "snapshot": self.snapshot()}
 
+    def cancel_pending_entry(self, entry_id: str | None = None, reason: str = "") -> dict[str, Any]:
+        remaining = []
+        cancelled = None
+        for pending in self.pending_entries:
+            if entry_id and pending.get("entry_id") != entry_id:
+                remaining.append(pending)
+                continue
+            order = pending.get("entry_order") or {}
+            self.broker.cancel_order(order.get("order_id", ""))
+            pending = dict(pending)
+            pending["status"] = "ENTRY_CANCELLED"
+            pending["cancel_reason"] = reason
+            cancelled = {"status": "ENTRY_CANCELLED", "pending_entry": pending, "reason": reason}
+            self.events.append({"timestamp": iso_now(), "event": "ENTRY_CANCELLED", "entry_id": pending.get("entry_id"), "reason": reason})
+            if entry_id:
+                remaining.extend(item for item in self.pending_entries if item.get("entry_id") != pending.get("entry_id") and item not in remaining)
+                break
+        if not entry_id and cancelled:
+            self.pending_entries = []
+        elif cancelled:
+            self.pending_entries = remaining
+        return cancelled or {"status": "NOT_FOUND", "entry_id": entry_id}
+
+    def modify_pending_entry(self, entry_id: str, new_limit: float) -> dict[str, Any]:
+        for pending in self.pending_entries:
+            if pending.get("entry_id") != entry_id:
+                continue
+            order = pending.get("entry_order") or {}
+            old_limit = float(order.get("price") or 0)
+            order["price"] = float(new_limit)
+            order["status"] = "OPEN"
+            order["modified_at"] = iso_now()
+            pending["entry_order"] = order
+            pending["modification_count"] = int(pending.get("modification_count") or 0) + 1
+            self.events.append({"timestamp": iso_now(), "event": "ENTRY_MODIFIED", "entry_id": entry_id, "old_limit": old_limit, "new_limit": float(new_limit)})
+            return {"status": "ENTRY_MODIFIED", "old_limit": old_limit, "new_limit": float(new_limit), "pending_entry": dict(pending)}
+        return {"status": "NOT_FOUND", "entry_id": entry_id}
+
     def update_stoploss(self, trade_id: str, new_stoploss: float) -> dict[str, Any]:
         for trade in self.active_trades:
             if trade.get("trade_id") != trade_id:
@@ -93,6 +131,21 @@ class PaperLifecycleEngine:
             new_stoploss = max(old_stoploss, float(new_stoploss))
             trade["stoploss"] = round(new_stoploss, 2)
             self.events.append({"timestamp": iso_now(), "event": "PAPER_SL_MODIFIED", "trade_id": trade_id, "old_stoploss": old_stoploss, "new_stoploss": trade["stoploss"]})
+            return {"status": "MODIFIED", "trade": dict(trade)}
+        return {"status": "NOT_FOUND", "trade_id": trade_id}
+
+    def update_target(self, trade_id: str, new_target: float) -> dict[str, Any]:
+        for trade in self.active_trades:
+            if trade.get("trade_id") != trade_id:
+                continue
+            old_target = float(trade.get("target") or 0)
+            new_target = max(old_target, float(new_target))
+            trade["target"] = round(new_target, 2)
+            for order in self.broker.orders:
+                if order.get("order_id") == trade.get("target_order_id") and order.get("status") == "OPEN":
+                    order["price"] = trade["target"]
+                    order["modified_at"] = iso_now()
+            self.events.append({"timestamp": iso_now(), "event": "PAPER_TARGET_MODIFIED", "trade_id": trade_id, "old_target": old_target, "new_target": trade["target"]})
             return {"status": "MODIFIED", "trade": dict(trade)}
         return {"status": "NOT_FOUND", "trade_id": trade_id}
 

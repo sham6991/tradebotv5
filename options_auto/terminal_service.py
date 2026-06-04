@@ -14,6 +14,7 @@ from options_auto.config.options_auto_defaults import default_settings, normaliz
 from options_auto.constants import MODE_BACKTEST, MODE_PAPER, MODE_REAL, MODE_SHADOW, REAL_EXECUTION_DISABLED_REASON, SIDE_WAIT
 from options_auto.core.logger import OptionsAutoLogger
 from options_auto.core.mode_guard import ModeGuard, normalize_mode
+from options_auto.core.performance_monitor import PerformanceMonitor
 from options_auto.core.promotion import PromotionManager
 from options_auto.core.session_state import OptionsAutoSessionState
 from options_auto.core.watchdog import WatchdogService
@@ -27,6 +28,8 @@ from options_auto.intelligence.adaptive_risk_engine import PositionSizer, RiskEn
 from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
 from options_auto.intelligence.entry_timing_engine import EntryTimingEngine
 from options_auto.intelligence.exit_manager import ExitManager, build_long_option_trade_plan
+from options_auto.intelligence.live_adaptive_engine import LiveAdaptiveEngine
+from options_auto.intelligence.low_latency_decision_engine import LowLatencyDecisionEngine
 from options_auto.intelligence.master_governor import MasterGovernor
 from options_auto.intelligence.market_cue_engine import MarketCueEngine
 from options_auto.intelligence.missed_trade_learning import MissedTradeLearning
@@ -34,6 +37,7 @@ from options_auto.intelligence.options_greeks_risk_engine import OptionsGreeksRi
 from options_auto.intelligence.position_manager import PositionManager
 from options_auto.intelligence.professional_discipline import ProfessionalDisciplineEngine
 from options_auto.intelligence.regime_classifier import RegimeClassifier
+from options_auto.intelligence.ready_trade_plan_cache import ReadyTradePlanCache
 from options_auto.intelligence.strategy_drift import StrategyDriftMonitor
 from options_auto.intelligence.strike_selector import StrikeSelector
 from options_auto.shadow_mode import ShadowModeEngine
@@ -75,6 +79,13 @@ class OptionsAutoTerminalService:
         self.real_controller = RealExecutionController(self.real_api_manager, self.reconciliation)
         self.shadow_engine = ShadowModeEngine()
         self.telegram_safety = TelegramSafety()
+        self.performance_monitor = PerformanceMonitor(
+            final_validation_warning_ms=float(self.settings.get("final_validation_latency_warning_ms") or 200),
+            action_warning_ms=float(self.settings.get("action_latency_warning_ms") or 500),
+        )
+        self.ready_plan_cache = ReadyTradePlanCache()
+        self.low_latency_engine = LowLatencyDecisionEngine(self.performance_monitor)
+        self.live_adaptive = LiveAdaptiveEngine(log_path=os.path.join(self.result_root(), "adaptive_action_log.jsonl"))
 
     def defaults(self) -> dict[str, Any]:
         return {
@@ -96,6 +107,9 @@ class OptionsAutoTerminalService:
             "logs": self.logger.tail(100),
             "result_root": self.result_root(),
             "shadow_report": self.shadow_engine.report(),
+            "ready_trade_plan_cache": self.ready_plan_cache.snapshot(),
+            "adaptive": self.live_adaptive.snapshot(),
+            "performance": self.performance_monitor.snapshot(),
         }
 
     def result_root(self) -> str:
@@ -146,6 +160,9 @@ class OptionsAutoTerminalService:
             timestamp=payload.get("timestamp") or payload.get("datetime"),
         )
         blockers = decision.get("blockers") or []
+        if mode in {MODE_PAPER, MODE_REAL} and self.settings.get("ready_plan_cache_enabled"):
+            ready_plan = self.ready_plan_cache.refresh_from_decision(decision, self.settings)
+            decision["ready_trade_plan"] = ready_plan
         self.session.record_decision(decision)
         if mode == MODE_SHADOW:
             self.shadow_engine.record(decision)
@@ -178,6 +195,14 @@ class OptionsAutoTerminalService:
         result = self.start_paper(payload)
         if not result.get("allowed"):
             return {**result, "paper_order": None, "message": "Paper order not simulated because governor blocked the setup."}
+        final_validation = self._final_entry_validation(result, payload or {})
+        if self.settings.get("fast_final_validation_enabled") and not final_validation.get("allowed"):
+            blocked = {**result, "allowed": False, "blockers": list(dict.fromkeys((result.get("blockers") or []) + final_validation.get("blockers", []))), "final_validation": final_validation, "paper_order": None}
+            self.session.record_rejection("; ".join(blocked["blockers"]), {"mode": MODE_PAPER, "stage": "FINAL_VALIDATION"})
+            return {**blocked, "message": "Paper entry skipped because fast final validation blocked the setup."}
+        if final_validation.get("entry_limit") and result.get("trade_plan"):
+            result["trade_plan"] = {**result["trade_plan"], "entry_price": final_validation["entry_limit"]}
+        result["final_validation"] = final_validation
         pending = self.paper_lifecycle.create_pending(result, int(self.settings.get("approval_timeout_seconds") or 30))
         approved = self.paper_lifecycle.approve(pending["approval_id"])
         self.session.orders.append(approved["entry_order"])
@@ -228,9 +253,11 @@ class OptionsAutoTerminalService:
     def process_paper_market(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         market = payload.get("market") or payload
+        adaptive_pending_updates = self._apply_adaptive_pending_entries(market)
         exit_updates = self._apply_paper_exit_decisions(market)
         result = self.paper_lifecycle.process_market(market)
         result["exit_updates"] = exit_updates
+        result["adaptive_pending_updates"] = adaptive_pending_updates
         for update in result.get("updates") or []:
             if update.get("action") == "ENTRY_FILLED":
                 for key in ("entry_order", "target_order", "stoploss_order"):
@@ -249,6 +276,9 @@ class OptionsAutoTerminalService:
     def real_dry_run(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = {**dict(payload or {}), "mode": MODE_REAL}
         result = self.evaluate(payload)
+        result["dry_run"] = True
+        result["orders_sent"] = 0
+        result["adaptive_dry_run"] = self._real_adaptive_dry_run(result, payload)
         self.session.status = "REAL_DRY_RUN_ONLY"
         result["session"] = self.session.to_dict()
         result["message"] = REAL_EXECUTION_DISABLED_REASON
@@ -542,10 +572,172 @@ class OptionsAutoTerminalService:
             json.dump(payload, handle, indent=2, default=str)
         return path
 
+    def _final_entry_validation(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        plan = decision.get("ready_trade_plan") or self.ready_plan_cache.get(self.settings.get("underlying"))
+        selected = dict(decision.get("selected_contract") or {})
+        quote = self._latest_quote_for_selected(selected, payload)
+        if not quote and selected:
+            quote = {
+                "ltp": selected.get("ltp"),
+                "bid": selected.get("bid"),
+                "ask": selected.get("ask"),
+                "tick_size": selected.get("tick_size") or 0.05,
+                "premium_return_1": (selected.get("premium_momentum") or {}).get("premium_return_1"),
+                "option_atr14": selected.get("option_atr14") or selected.get("atr14"),
+                "age_seconds": payload.get("quote_age_seconds", 0),
+            }
+        state = {
+            "mode_guard_allowed": True,
+            "governor_allowed": bool((decision.get("governor") or {}).get("allowed", decision.get("allowed"))),
+            "rate_limiter_healthy": True,
+            "data_quality_score": 100 if (decision.get("data_quality") or {}).get("allowed", True) else 0,
+            "market_cue": decision.get("market_cue"),
+            "regime": decision.get("regime"),
+        }
+        return self.low_latency_engine.validate_final_entry(plan or {}, quote, self.settings, state)
+
+    def _latest_quote_for_selected(self, selected: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        quotes = dict(payload.get("quotes") or {})
+        keys = [
+            str(selected.get("instrument_token") or ""),
+            str(selected.get("token") or ""),
+            str(selected.get("tradingsymbol") or "").upper(),
+        ]
+        for key in keys:
+            if key and key in quotes:
+                return dict(quotes[key] or {})
+        if payload.get("latest_quote"):
+            return dict(payload.get("latest_quote") or {})
+        return {}
+
+    def _apply_adaptive_pending_entries(self, market: dict[str, Any]) -> list[dict[str, Any]]:
+        updates = []
+        for pending in list(self.paper_lifecycle.pending_entries):
+            order = dict(pending.get("entry_order") or {})
+            decision = dict(pending.get("decision") or {})
+            selected = dict(decision.get("selected_contract") or {})
+            latest_quote = {
+                "ltp": market.get("ltp") or market.get("last_price") or selected.get("ltp"),
+                "bid": market.get("bid") or selected.get("bid"),
+                "ask": market.get("ask") or selected.get("ask"),
+                "spread_pct": market.get("spread_pct") or selected.get("spread_pct"),
+                "premium_return_1": market.get("premium_return_1") or (selected.get("premium_momentum") or {}).get("premium_return_1"),
+                "tick_size": selected.get("tick_size") or 0.05,
+                "age_seconds": market.get("age_seconds"),
+                "now_epoch": market.get("now_epoch") or time.time(),
+            }
+            option_features = {
+                "premium_return_1": latest_quote.get("premium_return_1"),
+                "premium_return_3": market.get("premium_return_3") or (selected.get("premium_momentum") or {}).get("premium_return_3"),
+                "spread_pct": latest_quote.get("spread_pct"),
+                "upper_wick_pct": market.get("upper_wick_pct"),
+                "option_atr14": selected.get("option_atr14") or selected.get("atr14"),
+                "relative_volume": market.get("relative_volume") or selected.get("relative_volume"),
+                "premium_expansion_confirmed": market.get("premium_expansion_confirmed", selected.get("premium_expansion_confirmed")),
+            }
+            adaptive = self.live_adaptive.evaluate_pending_entry(
+                {**pending, **order, "planned_entry": (pending.get("trade_plan") or {}).get("entry_price"), "side": (pending.get("trade_plan") or {}).get("side")},
+                selected,
+                latest_quote,
+                ((decision.get("decision_snapshot") or {}).get("index_features") or {}),
+                option_features,
+                market.get("market_cue") or decision.get("market_cue") or {},
+                market.get("regime") or decision.get("regime") or {},
+                self.settings,
+            )
+            update = {"entry_id": pending.get("entry_id"), "adaptive": adaptive}
+            if adaptive.get("action") == "CANCEL_ENTRY" and self.settings.get("pending_entry_dynamic_cancel_enabled", True):
+                update["cancel"] = self.paper_lifecycle.cancel_pending_entry(pending.get("entry_id"), adaptive.get("reason") or "Adaptive cancel.")
+            elif adaptive.get("action") == "MODIFY_ENTRY" and adaptive.get("new_entry_limit"):
+                update["modify"] = self.paper_lifecycle.modify_pending_entry(pending.get("entry_id"), adaptive["new_entry_limit"])
+            updates.append(update)
+        return updates
+
+    def _real_adaptive_dry_run(self, result: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        plan = result.get("ready_trade_plan") or self.ready_plan_cache.get(self.settings.get("underlying"))
+        selected = dict(result.get("selected_contract") or {})
+        latest_quote = self._latest_quote_for_selected(selected, payload)
+        final_validation = self.low_latency_engine.validate_final_entry(
+            plan or {},
+            latest_quote or {
+                "ltp": selected.get("ltp"),
+                "bid": selected.get("bid"),
+                "ask": selected.get("ask"),
+                "tick_size": selected.get("tick_size") or 0.05,
+                "premium_return_1": (selected.get("premium_momentum") or {}).get("premium_return_1"),
+                "option_atr14": selected.get("option_atr14") or selected.get("atr14"),
+                "age_seconds": payload.get("quote_age_seconds", 0),
+            },
+            self.settings,
+            {
+                "mode_guard_allowed": False,
+                "governor_allowed": bool((result.get("governor") or {}).get("allowed", False)),
+                "rate_limiter_healthy": True,
+                "data_quality_score": 100 if (result.get("data_quality") or {}).get("allowed", True) else 0,
+                "market_cue": result.get("market_cue"),
+                "regime": result.get("regime"),
+            },
+        )
+        return {
+            "dry_run": True,
+            "recommended_action": "ENTER" if final_validation.get("allowed") else "HOLD",
+            "order_request_preview": {
+                "tradingsymbol": selected.get("tradingsymbol"),
+                "transaction_type": "BUY",
+                "quantity": (result.get("trade_plan") or {}).get("quantity"),
+                "order_type": "LIMIT",
+                "price": final_validation.get("entry_limit"),
+            },
+            "final_validation": final_validation,
+            "safety_required": ["ModeGuard", "MasterGovernor", "RealExecutionController", "KiteApiManager", "OCO", "Reconciliation"],
+            "orders_sent": 0,
+        }
+
     def _apply_paper_exit_decisions(self, market: dict[str, Any]) -> list[dict[str, Any]]:
         updates = []
         forced_exit_actions = {"THETA_EXIT", "IV_CRUSH_EXIT", "END_OF_DAY_EXIT", "TIME_EXIT", "REVERSAL_EXIT"}
         for trade in list(self.paper_lifecycle.active_trades):
+            adaptive = self.live_adaptive.evaluate_active_trade(
+                trade,
+                {
+                    "ltp": market.get("ltp") or market.get("last_price"),
+                    "bid": market.get("bid"),
+                    "ask": market.get("ask"),
+                    "spread_pct": market.get("spread_pct"),
+                    "now_epoch": market.get("now_epoch") or time.time(),
+                },
+                market.get("index_features") or {},
+                market.get("option_features") or market,
+                market.get("market_cue") or {},
+                market.get("regime") or {},
+                self.settings,
+                broker_orders=market.get("broker_orders") or [],
+            )
+            adaptive_update = {"trade_id": trade.get("trade_id"), "adaptive": adaptive}
+            if adaptive.get("new_stoploss"):
+                adaptive_update["stoploss_update"] = self.paper_lifecycle.update_stoploss(trade["trade_id"], adaptive["new_stoploss"])
+            if adaptive.get("new_target"):
+                adaptive_update["target_update"] = self.paper_lifecycle.update_target(trade["trade_id"], adaptive["new_target"])
+            if adaptive.get("action") == "PARTIAL_EXIT" and int(adaptive.get("partial_quantity") or 0) > 0:
+                adaptive_update["partial_exit"] = self.paper_lifecycle.partial_exit(
+                    trade["trade_id"],
+                    int(adaptive["partial_quantity"]),
+                    float(market.get("ltp") or market.get("last_price") or trade.get("last_ltp") or trade.get("entry_price")),
+                    "ADAPTIVE_PARTIAL_EXIT",
+                )
+            if adaptive.get("action") == "EXIT":
+                adaptive_update["force_exit"] = self.paper_lifecycle.force_exit(
+                    trade["trade_id"],
+                    float(market.get("ltp") or market.get("last_price") or trade.get("last_ltp") or trade.get("entry_price")),
+                    "ADAPTIVE_EXIT",
+                )
+            adaptive_visible = adaptive.get("action") != "HOLD" or any(
+                key in adaptive_update for key in ("stoploss_update", "target_update", "partial_exit", "force_exit")
+            )
+            if adaptive.get("action") == "EXIT" and adaptive_update.get("force_exit"):
+                if adaptive_visible:
+                    updates.append(adaptive_update)
+                continue
             decision = self.exit_manager.evaluate(trade, market, self.settings)
             update = {"trade_id": trade.get("trade_id"), "decision": decision}
             if decision.get("stoploss_change"):
@@ -563,4 +755,6 @@ class OptionsAutoTerminalService:
                     decision["action"],
                 )
             updates.append(update)
+            if adaptive_visible:
+                updates.append(adaptive_update)
         return updates

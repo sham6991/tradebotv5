@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
 
@@ -71,8 +72,14 @@ def backtest_buy_limit(signal_close: float, avg_range_10: float, settings: dict[
 
 
 def round_to_tick(value: float, tick_size: float = 0.05) -> float:
-    tick = tick_size if tick_size > 0 else 0.05
-    return round(round(float(value) / tick) * tick, 2)
+    raw_tick = tick_size if _number(tick_size, 0.05) > 0 else 0.05
+    try:
+        price = Decimal(str(value))
+        tick = Decimal(str(raw_tick))
+        ticks = (price / tick).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        return float((ticks * tick).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except (InvalidOperation, ValueError, TypeError, ZeroDivisionError):
+        return 0.0
 
 
 def _number(value: Any, default: float = 0.0) -> float:

@@ -8,22 +8,24 @@ from options_auto.terminal_service import OptionsAutoTerminalService
 def sample_payload():
     return {
         "mode": "PAPER",
+        "timestamp": "2026-06-04 10:00:00",
         "spot": 22520,
         "settings": {
             "mode": "PAPER",
             "underlying": "NIFTY",
             "buy_score_threshold": 35,
             "max_capital_per_trade_pct": 100,
+            "max_risk_per_trade_pct": 10,
             "paper_starting_balance": 20000,
             "partial_exit_enabled": True,
         },
-        "market_cue": {"phase": "LUNCH", "technical_score": 50, "option_oi_score": 25, "news_score": 1},
+        "market_cue": {"phase": "LUNCH", "technical_score": 58, "option_oi_score": 25, "news_score": 1},
         "features": {"ema_alignment_score": 25, "vwap_score": 18, "rsi_slope_score": 15, "volume_score": 12, "depth_score": 8},
         "instruments": [
-            {"name": "NIFTY", "tradingsymbol": "NIFTY26JUN22500CE", "instrument_token": "1", "instrument_type": "CE", "strike": 22500, "lot_size": 50},
+            {"name": "NIFTY", "tradingsymbol": "NIFTY26JUN22500CE", "instrument_token": "1", "instrument_type": "CE", "strike": 22500, "expiry": "2026-06-25", "lot_size": 50},
         ],
         "quotes": {
-            "1": {"ltp": 40, "bid": 39.95, "ask": 40.05, "bid_qty": 1500, "ask_qty": 1400, "volume": 90000, "oi": 950000, "momentum_score": 80},
+            "1": {"ltp": 40, "bid": 39.95, "ask": 40.05, "bid_qty": 1500, "ask_qty": 1400, "volume": 90000, "oi": 950000, "premium_return_1": 1.2, "premium_return_3": 4.5, "relative_volume": 1.6, "option_vwap": 39, "option_atr14": 5, "momentum_score": 80},
         },
     }
 
@@ -107,6 +109,7 @@ class OptionsAutoExitManagerTests(unittest.TestCase):
     def test_paper_market_process_applies_theta_exit_without_real_orders(self):
         service = OptionsAutoTerminalService("results")
         service.execute_paper_plan(sample_payload())
+        service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
 
         result = service.process_paper_market({"market": {"ltp": 41, "high": 41, "low": 41, "theta_risk_score": 95}})
 
@@ -117,6 +120,7 @@ class OptionsAutoExitManagerTests(unittest.TestCase):
     def test_paper_market_process_can_move_sl_to_breakeven(self):
         service = OptionsAutoTerminalService("results")
         service.execute_paper_plan(sample_payload())
+        service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
 
         result = service.process_paper_market({"market": {"ltp": 49, "high": 49, "low": 49}})
 

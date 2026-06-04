@@ -24,9 +24,9 @@ from options_auto.execution.paper_lifecycle import PaperLifecycleEngine
 from options_auto.execution.reconciliation import ReconciliationEngine
 from options_auto.execution.real_execution_controller import RealExecutionController, results_folder_writable
 from options_auto.intelligence.adaptive_risk_engine import PositionSizer, RiskEngine
-from options_auto.intelligence.decision_explainer import explain_score
+from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
 from options_auto.intelligence.entry_timing_engine import EntryTimingEngine
-from options_auto.intelligence.exit_manager import ExitManager
+from options_auto.intelligence.exit_manager import ExitManager, build_long_option_trade_plan
 from options_auto.intelligence.master_governor import MasterGovernor
 from options_auto.intelligence.market_cue_engine import MarketCueEngine
 from options_auto.intelligence.missed_trade_learning import MissedTradeLearning
@@ -127,99 +127,25 @@ class OptionsAutoTerminalService:
         profile = payload.get("kite_profile") or {}
         self.configure({**settings_payload, "mode": mode}, kite_profile=profile)
 
-        market_cue = self.market_cue_engine.evaluate(payload.get("market_cue") or payload, phase=payload.get("market_phase") or payload.get("cue_phase") or "")
-        regime = self.regime_classifier.classify(payload.get("features") or {}, market_cue.to_dict())
-        side = payload.get("side") or regime.recommended_side or market_cue.recommended_side or SIDE_WAIT
         instruments = list(payload.get("instruments") or [])
         quotes = dict(payload.get("quotes") or {})
-        spot = float(payload.get("spot") or payload.get("index_ltp") or 0)
         settings = dict(self.settings)
-        settings["available_capital"] = self._available_capital(mode)
-        context = {
-            "regime_alignment": regime.confidence if side == regime.recommended_side else 25,
-            "market_cue_score": market_cue.confidence if side == market_cue.recommended_side else 35,
-            "news_score": (payload.get("market_cue") or payload).get("news_score", 0) if isinstance(payload.get("market_cue") or payload, dict) else 0,
-            "time_of_day_score": float(payload.get("time_of_day_score") or 65),
-            "option_momentum_score": float(payload.get("option_momentum_score") or 55),
+        account_state = {
+            "available_capital": self._available_capital(mode),
+            "available_balance": self.paper_broker.available_balance,
         }
-        selection = self.strike_selector.select(instruments, quotes, spot, side, settings, context)
-        blockers = list(selection.blockers)
-        selected = selection.selected or {}
-        if mode == MODE_REAL:
-            preflight = self.real_preflight.validate(mode, self.kite_client_provider("LIVE"), self.settings, results_writable=True)
-            blockers.extend(preflight.blockers)
-        else:
-            preflight = {"allowed": True, "state": "NOT_REAL_MODE", "blockers": [], "warnings": []}
-        quote_decision = {"allowed": True, "blockers": []}
-        if selected:
-            quote = {
-                "ltp": selected.get("ltp"),
-                "spread_pct": selected.get("spread_pct"),
-                "age_seconds": payload.get("quote_age_seconds", 0),
-            }
-            quote_decision = self.data_quality.validate_quote(quote, settings).to_dict()
-            blockers.extend(quote_decision["blockers"])
-        risk = self.risk_engine.evaluate(settings, payload.get("risk_state") or {}, now_epoch=time.time())
-        sizing = self.position_sizer.quantity(
-            selected.get("ltp") or selected.get("ask") or 0,
-            selected.get("lot_size") or 0,
-            settings["available_capital"],
-            settings,
-        ) if selected else {"quantity": 0, "lots": 0, "reason": "No selected contract."}
-        if selected and sizing.get("quantity", 0) <= 0:
-            blockers.append(sizing.get("reason") or "Calculated quantity is below one lot.")
-        timing = self.entry_timing.evaluate(payload.get("signal_candle") or {}, {"ltp": selected.get("ltp"), "intended_entry": payload.get("intended_entry")}, settings) if selected else {"allowed": True, "blockers": [], "warnings": []}
-        options_risk = self.options_risk.evaluate(selected, settings) if selected else {"allowed": True, "blockers": [], "warnings": []}
-        blockers.extend(timing.get("blockers") or [])
-        blockers.extend(options_risk.get("blockers") or [])
-        discipline = self.discipline_engine.evaluate(
-            {
-                "aggressiveness": regime.aggressiveness,
-                "chase_detected": bool(payload.get("chase_detected")),
-                "manual_override_to_increase_risk": bool(payload.get("manual_override_to_increase_risk")),
-            },
-            payload.get("risk_state") or {},
+        decision = evaluate_options_auto_decision(
+            mode=mode,
+            settings=settings,
+            index_history=self._frame(payload.get("index_history") or payload.get("index_candles") or payload.get("candles") or []),
+            option_candidates=instruments,
+            quotes=quotes,
+            market_cue_payload={**payload, **dict(payload.get("market_cue") or {})},
+            risk_state=payload.get("risk_state") or {},
+            account_state=account_state,
+            timestamp=payload.get("timestamp") or payload.get("datetime"),
         )
-        execution = preflight if isinstance(preflight, dict) else preflight.to_dict()
-        strategy = {
-            "selected": bool(selected),
-            "blockers": blockers,
-        }
-        governor = self.master_governor.evaluate(
-            self.mode_guard.to_dict(),
-            quote_decision,
-            risk,
-            discipline,
-            execution,
-            market={"blockers": [regime.no_trade_reason] if regime.no_trade_reason and not selected else []},
-            strategy=strategy,
-        )
-        blockers = list(dict.fromkeys((blockers or []) + (governor.get("blockers") or [])))
-        trade_plan = self._trade_plan(selected, sizing, regime.to_dict()) if selected else {}
-
-        decision = {
-            "mode": mode,
-            "market_cue": market_cue.to_dict(),
-            "regime": regime.to_dict(),
-            "selection": selection.to_dict(),
-            "data_quality": quote_decision,
-            "risk": risk,
-            "discipline": discipline,
-            "entry_timing": timing,
-            "options_risk": options_risk,
-            "execution": execution,
-            "governor": governor,
-            "position_size": sizing,
-            "trade_plan": trade_plan,
-            "allowed": not blockers and bool(selected) and bool(governor.get("allowed")),
-            "blockers": blockers,
-            "real_execution_enabled": False,
-            "real_execution_reason": REAL_EXECUTION_DISABLED_REASON,
-        }
-        if selected:
-            decision["explanation"] = explain_score(selected.get("breakdown", {}), blockers)
-        else:
-            decision["explanation"] = explain_score({}, blockers)
+        blockers = decision.get("blockers") or []
         self.session.record_decision(decision)
         if mode == MODE_SHADOW:
             self.shadow_engine.record(decision)
@@ -229,25 +155,7 @@ class OptionsAutoTerminalService:
         return {**decision, "session": self.session.to_dict(), "paper_account": self.paper_broker.snapshot()}
 
     def _trade_plan(self, selected: dict[str, Any], sizing: dict[str, Any], regime: dict[str, Any]) -> dict[str, Any]:
-        entry = float(selected.get("ask") or selected.get("ltp") or 0)
-        if entry <= 0:
-            return {}
-        stop_distance = max(0.5, entry * 0.18 * float(regime.get("stoploss_multiplier") or 1.0))
-        target_distance = max(0.5, stop_distance * float(regime.get("target_multiplier") or 1.5))
-        return {
-            "tradingsymbol": selected.get("tradingsymbol"),
-            "instrument_token": selected.get("instrument_token") or selected.get("token"),
-            "side": selected.get("option_type"),
-            "entry_price": round(entry, 2),
-            "stoploss": round(max(0.05, entry - stop_distance), 2),
-            "target": round(entry + target_distance, 2),
-            "quantity": int(sizing.get("quantity") or 0),
-            "lots": int(sizing.get("lots") or 0),
-            "lot_size": int(selected.get("lot_size") or 0),
-            "order_type": "LIMIT",
-            "stoploss_order_type": "SL",
-            "target_order_type": "LIMIT",
-        }
+        return build_long_option_trade_plan(selected, sizing, regime, self.settings)
 
     def start_shadow(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = {**dict(payload or {}), "mode": MODE_SHADOW}
@@ -272,14 +180,15 @@ class OptionsAutoTerminalService:
             return {**result, "paper_order": None, "message": "Paper order not simulated because governor blocked the setup."}
         pending = self.paper_lifecycle.create_pending(result, int(self.settings.get("approval_timeout_seconds") or 30))
         approved = self.paper_lifecycle.approve(pending["approval_id"])
-        self.session.orders.extend([approved["entry_order"], approved["target_order"], approved["stoploss_order"]])
+        self.session.orders.append(approved["entry_order"])
         self.session.active_trades = list(self.paper_lifecycle.active_trades)
-        self.session.status = "PAPER_TRADE_ACTIVE"
-        self.logger.log("INFO", "Options Auto paper lifecycle trade active", trade_id=approved["trade"]["trade_id"])
+        self.session.status = "PAPER_ENTRY_PENDING"
+        self.logger.log("INFO", "Options Auto paper lifecycle entry pending", order_id=approved["entry_order"]["order_id"])
         return {
             **result,
             "approval": pending,
             "paper_order": approved["entry_order"],
+            "pending_entry": approved.get("pending_entry"),
             "paper_lifecycle": self.paper_lifecycle.snapshot(),
             "paper_account": self.paper_broker.snapshot(),
             "session": self.session.to_dict(),
@@ -297,7 +206,10 @@ class OptionsAutoTerminalService:
     def approve_paper(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         result = self.paper_lifecycle.approve(payload.get("approval_id"), now_epoch=payload.get("now_epoch"))
-        if result.get("trade"):
+        if result.get("status") == "ENTRY_PENDING":
+            self.session.orders.append(result["entry_order"])
+            self.session.status = "PAPER_ENTRY_PENDING"
+        elif result.get("trade"):
             self.session.orders.extend([result["entry_order"], result["target_order"], result["stoploss_order"]])
             self.session.active_trades = list(self.paper_lifecycle.active_trades)
             self.session.status = "PAPER_TRADE_ACTIVE"
@@ -319,8 +231,18 @@ class OptionsAutoTerminalService:
         exit_updates = self._apply_paper_exit_decisions(market)
         result = self.paper_lifecycle.process_market(market)
         result["exit_updates"] = exit_updates
+        for update in result.get("updates") or []:
+            if update.get("action") == "ENTRY_FILLED":
+                for key in ("entry_order", "target_order", "stoploss_order"):
+                    if update.get(key):
+                        self.session.orders.append(update[key])
         self.session.active_trades = list(self.paper_lifecycle.active_trades)
-        self.session.status = "PAPER_TRADE_ACTIVE" if self.session.active_trades else "PAPER_IDLE"
+        if self.session.active_trades:
+            self.session.status = "PAPER_TRADE_ACTIVE"
+        elif self.paper_lifecycle.pending_entries:
+            self.session.status = "PAPER_ENTRY_PENDING"
+        else:
+            self.session.status = "PAPER_IDLE"
         self.logger.log("INFO", "Options Auto paper market processed", updates=len(result.get("updates") or []))
         return {**result, "paper_account": self.paper_broker.snapshot(), "session": self.session.to_dict()}
 
@@ -571,7 +493,11 @@ class OptionsAutoTerminalService:
         return float(self.settings.get("paper_starting_balance") or 0)
 
     def _paper_lifecycle_active(self) -> bool:
-        return bool(getattr(self.paper_lifecycle, "pending_approval", None) or getattr(self.paper_lifecycle, "active_trades", None))
+        return bool(
+            getattr(self.paper_lifecycle, "pending_approval", None)
+            or getattr(self.paper_lifecycle, "pending_entries", None)
+            or getattr(self.paper_lifecycle, "active_trades", None)
+        )
 
     def _active_positions_protected(self) -> bool:
         if not self.session.active_trades:

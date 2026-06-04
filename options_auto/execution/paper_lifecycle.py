@@ -13,6 +13,7 @@ from options_auto.execution.paper_broker import PaperBroker
 class PaperLifecycleEngine:
     broker: PaperBroker
     pending_approval: dict[str, Any] | None = None
+    pending_entries: list[dict[str, Any]] = field(default_factory=list)
     active_trades: list[dict[str, Any]] = field(default_factory=list)
     closed_trades: list[dict[str, Any]] = field(default_factory=list)
     events: list[dict[str, Any]] = field(default_factory=list)
@@ -41,37 +42,26 @@ class PaperLifecycleEngine:
         pending = self._pending_or_error(approval_id)
         now_epoch = time.time() if now_epoch is None else float(now_epoch)
         if now_epoch > float(pending["expires_at_epoch"]):
-            pending["status"] = "EXPIRED"
+            pending["status"] = "APPROVAL_EXPIRED"
             self.events.append({"timestamp": iso_now(), "event": "APPROVAL_EXPIRED", "approval_id": pending["approval_id"]})
             self.pending_approval = None
-            return {"status": "EXPIRED", "message": "Trade expired, scanning new setup."}
+            return {"status": "APPROVAL_EXPIRED", "message": "Trade expired, scanning new setup."}
         plan = dict(pending["trade_plan"])
         entry_order = self.broker.place_limit_buy(plan["tradingsymbol"], int(plan["quantity"]), float(plan["entry_price"]))
-        self.broker.apply_charges(self.charge_per_order, "paper entry charges", entry_order["order_id"])
-        target_order = self._paper_open_order(plan, "TARGET")
-        stoploss_order = self._paper_open_order(plan, "STOPLOSS")
-        trade = {
-            "trade_id": f"OA-PAPER-{uuid4().hex[:10].upper()}",
-            "status": "ACTIVE",
-            "tradingsymbol": plan["tradingsymbol"],
-            "side": plan.get("side"),
-            "quantity": int(plan["quantity"]),
-            "lot_size": int(plan.get("lot_size") or 1),
-            "entry_price": float(entry_order["average_price"]),
-            "stoploss": float(plan["stoploss"]),
-            "target": float(plan["target"]),
-            "entry_order_id": entry_order["order_id"],
-            "target_order_id": target_order["order_id"],
-            "stoploss_order_id": stoploss_order["order_id"],
-            "oco_active": True,
-            "position_protected": True,
-            "opened_at": iso_now(),
-            "last_ltp": float(entry_order["average_price"]),
+        pending_entry = {
+            "entry_id": f"OA-ENTRY-{uuid4().hex[:10].upper()}",
+            "status": "ENTRY_PENDING",
+            "approval_id": pending["approval_id"],
+            "entry_order": entry_order,
+            "decision": pending["decision"],
+            "trade_plan": plan,
+            "created_epoch": now_epoch,
+            "expires_at_epoch": now_epoch + int((pending["decision"].get("settings") or {}).get("limit_order_timeout_seconds") or 30),
         }
-        self.active_trades.append(trade)
+        self.pending_entries.append(pending_entry)
         self.pending_approval = None
-        self.events.append({"timestamp": iso_now(), "event": "PAPER_TRADE_ACTIVE", "trade_id": trade["trade_id"]})
-        return {"status": "APPROVED", "entry_order": entry_order, "target_order": target_order, "stoploss_order": stoploss_order, "trade": dict(trade)}
+        self.events.append({"timestamp": iso_now(), "event": "ENTRY_PENDING", "entry_id": pending_entry["entry_id"], "order_id": entry_order["order_id"]})
+        return {"status": "ENTRY_PENDING", "entry_order": entry_order, "pending_entry": dict(pending_entry), "trade": None}
 
     def reject(self, approval_id: str | None = None) -> dict[str, Any]:
         pending = self._pending_or_error(approval_id)
@@ -81,7 +71,9 @@ class PaperLifecycleEngine:
         return {"status": "REJECTED", "approval_id": pending["approval_id"]}
 
     def process_market(self, market: dict[str, Any]) -> dict[str, Any]:
+        market = dict(market or {})
         updates = []
+        updates.extend(self._process_pending_entries(market))
         remaining = []
         for trade in self.active_trades:
             update = self._update_trade(trade, market)
@@ -131,16 +123,68 @@ class PaperLifecycleEngine:
         self.active_trades = remaining
         return closed or {"closed": False, "action": "NOT_FOUND", "trade_id": trade_id}
 
+    def _process_pending_entries(self, market: dict[str, Any]) -> list[dict[str, Any]]:
+        updates = []
+        remaining = []
+        now_epoch = float(market.get("now_epoch") or time.time())
+        ltp = _number(market.get("ltp", market.get("last_price")))
+        low = _number(market.get("low"), ltp)
+        for pending in self.pending_entries:
+            order = dict(pending["entry_order"])
+            limit_price = float(order["price"])
+            if now_epoch > float(pending["expires_at_epoch"]):
+                self.broker.cancel_order(order["order_id"])
+                pending["status"] = "ENTRY_CANCELLED"
+                self.events.append({"timestamp": iso_now(), "event": "ENTRY_CANCELLED", "entry_id": pending["entry_id"], "reason": "timeout"})
+                updates.append({"closed": False, "action": "ENTRY_CANCELLED", "pending_entry": dict(pending), "reason": "timeout"})
+                continue
+            if (ltp > 0 and ltp <= limit_price) or (low > 0 and low <= limit_price):
+                fill_price = min(limit_price, ltp) if ltp > 0 else limit_price
+                filled = self.broker.fill_limit_buy(order["order_id"], fill_price)
+                self.broker.apply_charges(self.charge_per_order, "paper entry charges", filled["order_id"])
+                trade_bundle = self._activate_trade(pending, filled)
+                updates.append({"closed": False, "action": "ENTRY_FILLED", **trade_bundle})
+                continue
+            remaining.append(pending)
+        self.pending_entries = remaining
+        return updates
+
+    def _activate_trade(self, pending: dict[str, Any], entry_order: dict[str, Any]) -> dict[str, Any]:
+        plan = dict(pending["trade_plan"])
+        target_order = self._paper_open_order(plan, "TARGET")
+        stoploss_order = self._paper_open_order(plan, "STOPLOSS")
+        trade = {
+            "trade_id": f"OA-PAPER-{uuid4().hex[:10].upper()}",
+            "status": "OCO_ACTIVE",
+            "tradingsymbol": plan["tradingsymbol"],
+            "side": plan.get("side"),
+            "quantity": int(plan["quantity"]),
+            "lot_size": int(plan.get("lot_size") or 1),
+            "entry_price": float(entry_order["average_price"]),
+            "stoploss": float(plan["stoploss"]),
+            "target": float(plan["target"]),
+            "entry_order_id": entry_order["order_id"],
+            "target_order_id": target_order["order_id"],
+            "stoploss_order_id": stoploss_order["order_id"],
+            "oco_active": True,
+            "position_protected": True,
+            "opened_at": iso_now(),
+            "last_ltp": float(entry_order["average_price"]),
+        }
+        self.active_trades.append(trade)
+        self.events.append({"timestamp": iso_now(), "event": "OCO_ACTIVE", "trade_id": trade["trade_id"]})
+        return {"entry_order": entry_order, "target_order": target_order, "stoploss_order": stoploss_order, "trade": dict(trade)}
+
     def _update_trade(self, trade: dict[str, Any], market: dict[str, Any]) -> dict[str, Any]:
         trade = dict(trade)
-        ltp = float(market.get("ltp") or market.get("last_price") or trade.get("last_ltp") or trade["entry_price"])
-        high = float(market.get("high") or ltp)
-        low = float(market.get("low") or ltp)
+        ltp = _number(market.get("ltp", market.get("last_price")), trade.get("last_ltp") or trade["entry_price"])
+        high = _number(market.get("high"), ltp)
+        low = _number(market.get("low"), ltp)
         trade["last_ltp"] = ltp
         if low <= float(trade["stoploss"]):
-            return self._close_trade(trade, float(trade["stoploss"]), "STOPLOSS")
+            return self._close_trade(trade, float(trade["stoploss"]), "SL_FILLED")
         if high >= float(trade["target"]):
-            return self._close_trade(trade, float(trade["target"]), "TARGET")
+            return self._close_trade(trade, float(trade["target"]), "TARGET_FILLED")
         if market.get("move_sl_to_breakeven"):
             trade["stoploss"] = max(float(trade["stoploss"]), float(trade["entry_price"]))
             self.events.append({"timestamp": iso_now(), "event": "MOVE_SL_TO_BREAKEVEN", "trade_id": trade["trade_id"], "stoploss": trade["stoploss"]})
@@ -150,15 +194,29 @@ class PaperLifecycleEngine:
         return {"closed": False, "action": "HOLD", "trade": trade}
 
     def _close_trade(self, trade: dict[str, Any], exit_price: float, reason: str) -> dict[str, Any]:
-        exit_order = self.broker.place_limit_sell(trade["tradingsymbol"], int(trade["quantity"]), float(exit_price))
-        self.broker.apply_charges(self.charge_per_order, f"paper {reason.lower()} exit charges", exit_order["order_id"])
+        if reason == "TARGET_FILLED":
+            self.broker.complete_open_sell(trade["target_order_id"], exit_price)
+            self.broker.cancel_order(trade["stoploss_order_id"])
+            action = "TARGET_FILLED"
+            cancelled = "SL_CANCELLED"
+        elif reason == "SL_FILLED":
+            self.broker.complete_open_sell(trade["stoploss_order_id"], exit_price)
+            self.broker.cancel_order(trade["target_order_id"])
+            action = "SL_FILLED"
+            cancelled = "TARGET_CANCELLED"
+        else:
+            exit_order = self.broker.place_limit_sell(trade["tradingsymbol"], int(trade["quantity"]), float(exit_price))
+            action = reason
+            cancelled = "OCO_CANCELLED"
+            trade["exit_order_id"] = exit_order["order_id"]
+        self.broker.apply_charges(self.charge_per_order, f"paper {action.lower()} exit charges", trade.get("target_order_id") if reason == "TARGET_FILLED" else trade.get("stoploss_order_id", ""))
         gross = (float(exit_price) - float(trade["entry_price"])) * int(trade["quantity"])
         charges = self.charge_per_order * 2
         trade.update({
             "status": "CLOSED",
             "exit_price": float(exit_price),
-            "exit_reason": reason,
-            "exit_order_id": exit_order["order_id"],
+            "exit_reason": action,
+            "oco_cancelled_leg": cancelled,
             "oco_active": False,
             "position_protected": False,
             "closed_at": iso_now(),
@@ -166,8 +224,8 @@ class PaperLifecycleEngine:
             "charges": round(charges, 2),
             "pnl_net": round(gross - charges, 2),
         })
-        self.events.append({"timestamp": iso_now(), "event": f"{reason}_EXIT", "trade_id": trade["trade_id"], "exit_order_id": exit_order["order_id"]})
-        return {"closed": True, "action": reason, "trade": trade}
+        self.events.append({"timestamp": iso_now(), "event": action, "trade_id": trade["trade_id"], "cancelled_leg": cancelled})
+        return {"closed": True, "action": action, "trade": trade}
 
     def _paper_open_order(self, plan: dict[str, Any], kind: str) -> dict[str, Any]:
         price = float(plan["target"] if kind == "TARGET" else plan["stoploss"])
@@ -195,8 +253,16 @@ class PaperLifecycleEngine:
     def snapshot(self) -> dict[str, Any]:
         return {
             "pending_approval": self.pending_approval,
+            "pending_entries": self.pending_entries,
             "active_trades": self.active_trades,
             "closed_trades": self.closed_trades[-100:],
             "events": self.events[-100:],
             "account": self.broker.snapshot(),
         }
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)

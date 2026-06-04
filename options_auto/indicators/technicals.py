@@ -6,9 +6,30 @@ import pandas as pd
 
 
 def _series(frame: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
-    if frame is None or column not in frame:
+    if frame is None:
+        return pd.Series(dtype="float64")
+    source = column
+    if source not in frame:
+        lower_map = {str(name).lower(): name for name in frame.columns}
+        source = lower_map.get(column.lower(), column)
+    if source not in frame:
         return pd.Series([default] * (0 if frame is None else len(frame)), dtype="float64")
-    return pd.to_numeric(frame[column], errors="coerce").fillna(default)
+    return pd.to_numeric(frame[source], errors="coerce").fillna(default)
+
+
+def _datetime_series(frame: pd.DataFrame) -> pd.Series | None:
+    if frame is None or frame.empty:
+        return None
+    lower_map = {str(name).lower(): name for name in frame.columns}
+    source = lower_map.get("datetime") or lower_map.get("date") or lower_map.get("timestamp")
+    if not source:
+        if isinstance(frame.index, pd.DatetimeIndex):
+            return pd.Series(frame.index, index=frame.index)
+        return None
+    values = pd.to_datetime(frame[source], errors="coerce")
+    if values.notna().any():
+        return values
+    return None
 
 
 def ema(values: pd.Series, period: int) -> pd.Series:
@@ -21,36 +42,83 @@ def vwap(frame: pd.DataFrame) -> pd.Series:
     low = _series(frame, "low")
     volume = _series(frame, "volume", 0.0)
     typical = (high + low + close) / 3.0
-    cumulative_volume = volume.cumsum().mask(lambda values: values == 0)
-    return ((typical * volume).cumsum() / cumulative_volume).ffill().fillna(close)
+
+    def session_vwap(indexes: pd.Index) -> pd.Series:
+        session_volume = volume.loc[indexes]
+        session_typical = typical.loc[indexes]
+        session_close = close.loc[indexes]
+        cumulative_volume = session_volume.cumsum().mask(lambda values: values == 0)
+        values = (session_typical * session_volume).cumsum() / cumulative_volume
+        return values.ffill().fillna(session_close)
+
+    datetimes = _datetime_series(frame)
+    if datetimes is None:
+        return session_vwap(frame.index)
+
+    result = pd.Series(index=frame.index, dtype="float64")
+    for _date, indexes in datetimes.groupby(datetimes.dt.date).groups.items():
+        result.loc[indexes] = session_vwap(pd.Index(indexes))
+    return result.fillna(close)
 
 
 def wilder_rsi(close: pd.Series, period: int = 14) -> pd.Series:
     close = pd.to_numeric(close, errors="coerce").ffill()
     delta = close.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1 / int(period), adjust=False, min_periods=int(period)).mean()
-    avg_loss = loss.ewm(alpha=1 / int(period), adjust=False, min_periods=int(period)).mean()
-    rs = avg_gain / avg_loss.mask(lambda values: values == 0)
-    rsi = 100 - (100 / (1 + rs))
-    return rsi.fillna(50.0)
+    gain = delta.clip(lower=0).fillna(0.0)
+    loss = (-delta.clip(upper=0)).fillna(0.0)
+    period = int(period)
+    avg_gain = pd.Series(index=close.index, dtype="float64")
+    avg_loss = pd.Series(index=close.index, dtype="float64")
+    if len(close) > period:
+        avg_gain.iloc[period] = gain.iloc[1 : period + 1].mean()
+        avg_loss.iloc[period] = loss.iloc[1 : period + 1].mean()
+        for index in range(period + 1, len(close)):
+            avg_gain.iloc[index] = (avg_gain.iloc[index - 1] * (period - 1) + gain.iloc[index]) / period
+            avg_loss.iloc[index] = (avg_loss.iloc[index - 1] * (period - 1) + loss.iloc[index]) / period
+    rsi = pd.Series(50.0, index=close.index, dtype="float64")
+    for index in range(len(close)):
+        ag = avg_gain.iloc[index]
+        al = avg_loss.iloc[index]
+        if pd.isna(ag) or pd.isna(al):
+            continue
+        if al == 0 and ag > 0:
+            rsi.iloc[index] = 100.0
+        elif ag == 0 and al > 0:
+            rsi.iloc[index] = 0.0
+        elif ag == 0 and al == 0:
+            rsi.iloc[index] = 50.0
+        else:
+            rs = ag / al
+            rsi.iloc[index] = 100 - (100 / (1 + rs))
+    return rsi
 
 
-def wilder_atr(frame: pd.DataFrame, period: int = 14) -> pd.Series:
+def true_range(frame: pd.DataFrame) -> pd.Series:
     high = _series(frame, "high")
     low = _series(frame, "low")
     close = _series(frame, "close")
     previous_close = close.shift(1)
-    true_range = pd.concat(
+    return pd.concat(
         [
             (high - low).abs(),
             (high - previous_close).abs(),
             (low - previous_close).abs(),
         ],
         axis=1,
-    ).max(axis=1)
-    return true_range.ewm(alpha=1 / int(period), adjust=False, min_periods=1).mean().fillna(0.0)
+    ).max(axis=1).fillna((high - low).abs())
+
+
+def wilder_atr(frame: pd.DataFrame, period: int = 14) -> pd.Series:
+    tr = true_range(frame)
+    period = int(period)
+    if len(tr) < period:
+        return tr.expanding(min_periods=1).mean().fillna(0.0)
+    atr = pd.Series(index=tr.index, dtype="float64")
+    atr.iloc[: period - 1] = tr.iloc[: period - 1].expanding(min_periods=1).mean()
+    atr.iloc[period - 1] = tr.iloc[:period].mean()
+    for index in range(period, len(tr)):
+        atr.iloc[index] = (atr.iloc[index - 1] * (period - 1) + tr.iloc[index]) / period
+    return atr.fillna(0.0)
 
 
 def bollinger_bands(close: pd.Series, period: int = 20, stddev: float = 2.0) -> pd.DataFrame:
@@ -117,12 +185,12 @@ def bid_ask_spread_pct(bid: Any, ask: Any, ltp: Any = None) -> float:
     try:
         bid_value = float(bid)
         ask_value = float(ask)
-        basis = float(ltp) if ltp not in ("", None) else (bid_value + ask_value) / 2
     except (TypeError, ValueError):
         return 100.0
-    if basis <= 0 or ask_value < bid_value:
+    mid = (bid_value + ask_value) / 2.0
+    if bid_value <= 0 or ask_value <= 0 or ask_value < bid_value or mid <= 0:
         return 100.0
-    return round((ask_value - bid_value) / basis * 100, 4)
+    return round((ask_value - bid_value) / mid * 100, 4)
 
 
 def market_depth_imbalance(bid_qty: Any, ask_qty: Any) -> float:

@@ -63,11 +63,35 @@ class PositionSizer:
         if lot_size <= 0 or premium <= 0 or available_capital <= 0:
             return {"quantity": 0, "lots": 0, "reason": "Missing lot size, premium, or capital."}
         cap_pct = float(settings.get("max_capital_per_trade_pct") or 20)
+        risk_pct = float(settings.get("max_risk_per_trade_pct") or 2.5)
         capital_cap = available_capital * cap_pct / 100.0
+        risk_cap = available_capital * risk_pct / 100.0
         max_lots = max(1, int(settings.get("max_lots_per_trade") or 1))
-        affordable_lots = int(capital_cap // (premium * lot_size))
-        lots = max(0, min(max_lots, affordable_lots))
+        charges_per_lot = float(settings.get("estimated_charges_per_lot") or settings.get("estimated_total_charges") or 40.0)
+        stop_distance = float(settings.get("stop_distance_points") or settings.get("minimum_stoploss_points") or max(2.0, premium * 0.03))
+        cost_per_lot = premium * lot_size + charges_per_lot
+        risk_per_lot = stop_distance * lot_size + charges_per_lot
+        affordable_lots = int(capital_cap // cost_per_lot) if cost_per_lot > 0 else 0
+        risk_lots = int(risk_cap // risk_per_lot) if risk_per_lot > 0 else 0
+        lots = max(0, min(max_lots, affordable_lots, risk_lots))
         if lots <= 0:
-            return {"quantity": 0, "lots": 0, "required_per_lot": premium * lot_size, "capital_cap": capital_cap, "reason": "Calculated quantity is below one lot."}
-        return {"quantity": lots * lot_size, "lots": lots, "required": lots * lot_size * premium, "capital_cap": capital_cap, "reason": ""}
-
+            return {
+                "quantity": 0,
+                "lots": 0,
+                "required_per_lot": cost_per_lot,
+                "risk_per_lot": risk_per_lot,
+                "capital_cap": capital_cap,
+                "risk_cap": risk_cap,
+                "reason": "Insufficient capital/risk budget for one lot.",
+            }
+        return {
+            "quantity": lots * lot_size,
+            "lots": lots,
+            "required": lots * cost_per_lot,
+            "risk": lots * risk_per_lot,
+            "capital_cap": capital_cap,
+            "risk_cap": risk_cap,
+            "cost_per_lot": cost_per_lot,
+            "risk_per_lot": risk_per_lot,
+            "reason": "",
+        }

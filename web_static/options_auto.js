@@ -152,15 +152,15 @@ function sampleInstruments() {
 
 function sampleQuotes() {
   return {
-    "1001": { ltp: 142.4, bid: 142.25, ask: 142.45, bid_qty: 1450, ask_qty: 1300, volume: 85000, oi: 950000, momentum_score: 72 },
-    "1002": { ltp: 120.2, bid: 119.9, ask: 120.25, bid_qty: 900, ask_qty: 1150, volume: 76000, oi: 870000, momentum_score: 46 },
-    "1003": { ltp: 97.6, bid: 97.2, ask: 97.95, bid_qty: 800, ask_qty: 850, volume: 53000, oi: 520000, momentum_score: 68 },
-    "1004": { ltp: 88.5, bid: 88.05, ask: 88.7, bid_qty: 750, ask_qty: 800, volume: 51000, oi: 500000, momentum_score: 44 },
+    "1001": { demo_data: true, ltp: 142.4, bid: 142.25, ask: 142.45, bid_qty: 1450, ask_qty: 1300, volume: 85000, oi: 950000, premium_return_1: 1.2, premium_return_3: 4.5, relative_volume: 1.6, option_vwap: 139.8, option_atr14: 5, momentum_score: 72 },
+    "1002": { demo_data: true, ltp: 120.2, bid: 119.9, ask: 120.25, bid_qty: 900, ask_qty: 1150, volume: 76000, oi: 870000, premium_return_1: -0.2, premium_return_3: 0.4, relative_volume: 0.9, option_vwap: 121.1, option_atr14: 4.2, momentum_score: 46 },
+    "1003": { demo_data: true, ltp: 97.6, bid: 97.2, ask: 97.95, bid_qty: 800, ask_qty: 850, volume: 53000, oi: 520000, premium_return_1: 0.8, premium_return_3: 2.1, relative_volume: 1.2, option_vwap: 96.8, option_atr14: 3.8, momentum_score: 68 },
+    "1004": { demo_data: true, ltp: 88.5, bid: 88.05, ask: 88.7, bid_qty: 750, ask_qty: 800, volume: 51000, oi: 500000, premium_return_1: -0.3, premium_return_3: 0.2, relative_volume: 0.8, option_vwap: 89.4, option_atr14: 3.5, momentum_score: 44 },
   };
 }
 
 function sampleMarketCue() {
-  return { phase: "LUNCH", technical_score: 34, option_oi_score: 18, news_score: 2 };
+  return { demo_data: true, phase: "LUNCH", technical_score: 58, option_oi_score: 18, news_score: 2 };
 }
 
 function sampleReplayCandles() {

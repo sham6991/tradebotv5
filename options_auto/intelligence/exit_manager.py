@@ -2,9 +2,63 @@ from __future__ import annotations
 
 from typing import Any
 
+from options_auto.intelligence.entry_timing_engine import round_to_tick
+
 
 PROTECTION_ORDER_TYPES = {"SL", "SL-M", "SL-LIMIT", "STOPLOSS", "STOPLOSS_LIMIT"}
 OPEN_ORDER_STATUSES = {"OPEN", "TRIGGER PENDING", "PENDING", "OPEN PENDING", "MODIFY PENDING"}
+
+
+def build_long_option_trade_plan(
+    selected: dict[str, Any],
+    sizing: dict[str, Any],
+    regime: dict[str, Any],
+    settings: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    selected = dict(selected or {})
+    sizing = dict(sizing or {})
+    regime = dict(regime or {})
+    settings = dict(settings or {})
+    entry = _number(selected.get("ask"), _number(selected.get("ltp")))
+    if entry <= 0:
+        return {}
+    tick_size = _number(selected.get("tick_size"), 0.05)
+    option_atr = _number(selected.get("option_atr14"), _number(selected.get("atr14")))
+    stop_distance = max(
+        option_atr * _number(settings.get("atr_stoploss_multiplier"), 1.0),
+        entry * _number(settings.get("min_stoploss_pct"), 3.0) / 100.0,
+        _number(settings.get("minimum_stoploss_points"), 2.0),
+    )
+    profile = str(settings.get("strategy_profile") or "BALANCED").upper()
+    if str(regime.get("regime") or "").startswith("strong"):
+        risk_reward = max(_profile_rr(profile), _number(regime.get("target_multiplier"), 1.6))
+    elif str(regime.get("regime") or "").startswith("mild"):
+        risk_reward = max(1.2, min(1.4, _number(regime.get("target_multiplier"), _profile_rr(profile))))
+    else:
+        risk_reward = _profile_rr(profile)
+    if selected.get("days_to_expiry") == 0:
+        risk_reward = min(risk_reward, 1.2)
+    target_distance = stop_distance * risk_reward
+    stoploss = round_to_tick(entry - stop_distance, tick_size)
+    target = round_to_tick(entry + target_distance, tick_size)
+    return {
+        "tradingsymbol": selected.get("tradingsymbol"),
+        "instrument_token": selected.get("instrument_token") or selected.get("token"),
+        "exchange": selected.get("exchange") or "NFO",
+        "side": selected.get("option_type"),
+        "entry_price": round_to_tick(entry, tick_size),
+        "stop_distance": round(stop_distance, 4),
+        "target_distance": round(target_distance, 4),
+        "stoploss": max(tick_size, stoploss),
+        "target": target,
+        "quantity": int(sizing.get("quantity") or 0),
+        "lots": int(sizing.get("lots") or 0),
+        "lot_size": int(selected.get("lot_size") or 0),
+        "order_type": "LIMIT",
+        "stoploss_order_type": "SL",
+        "target_order_type": "LIMIT",
+        "trailing_style": regime.get("trailing_style"),
+    }
 
 
 class ExitManager:
@@ -169,3 +223,18 @@ class ExitManager:
         if len(current_time) < 5 or len(square_off) < 5:
             return False
         return current_time[:5] >= square_off[:5]
+
+
+def _profile_rr(profile: str) -> float:
+    if profile == "CONSERVATIVE":
+        return 1.5
+    if profile == "AGGRESSIVE":
+        return 1.1
+    return 1.3
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)

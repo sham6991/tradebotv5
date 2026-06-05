@@ -184,7 +184,7 @@ class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
     def test_weak_far_otm_expiry_option_blocks(self):
         result = evaluate_options_auto_decision(
             mode="PAPER",
-            settings={"mode": "PAPER", "underlying": "NIFTY", "buy_score_threshold": 40, "max_capital_per_trade_pct": 100, "max_risk_per_trade_pct": 10, "paper_starting_balance": 20000},
+            settings={"mode": "PAPER", "underlying": "NIFTY", "buy_score_threshold": 40, "max_capital_per_trade_pct": 100, "max_risk_per_trade_pct": 10, "paper_starting_balance": 20000, "strict_liquidity_filter": True},
             index_history=pd.DataFrame(index_rows()),
             option_candidates=[{"name": "NIFTY", "tradingsymbol": "NIFTY26JUN23000CE", "instrument_token": "1", "instrument_type": "CE", "strike": 23000, "expiry": "2026-06-04", "lot_size": 50}],
             quotes={"1": {"ltp": 18, "bid": 17, "ask": 18.5, "bid_qty": 100, "ask_qty": 100, "volume": 3000, "oi": 12000, "premium_return_1": -0.5, "premium_return_3": 0.2, "relative_volume": 0.6, "option_atr14": 0.5}},

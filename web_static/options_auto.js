@@ -204,8 +204,11 @@ function settingsPayload(modeOverride = "") {
   return {
     mode,
     underlying: $("#oa-underlying")?.value || $("#oa-backtest-symbol")?.value || "NIFTY",
+    expiry: $("#oa-expiry-date")?.value || $("#oa-backtest-expiry")?.value || "",
+    option_expiry: $("#oa-expiry-date")?.value || $("#oa-backtest-expiry")?.value || "",
     chart_interval: $("#oa-chart-interval")?.value || $("#oa-backtest-interval")?.value || "3minute",
     strategy_profile: $("#oa-profile")?.value || $("#oa-backtest-profile")?.value || "BALANCED",
+    number_of_lots: numberValue($("#oa-lots")?.value || $("#oa-backtest-lots")?.value, 1),
     buy_score_threshold: numberValue($("#oa-score-threshold")?.value, 70),
     paper_starting_balance: numberValue($("#oa-paper-balance")?.value, 20000),
     approval_timeout_seconds: numberValue($("#oa-approval-timeout")?.value, 30),
@@ -227,6 +230,14 @@ function settingsPayload(modeOverride = "") {
     time_exit_enabled: Boolean($("#oa-time-exit")?.checked),
     max_holding_minutes: numberValue($("#oa-max-holding")?.value, 45),
     expiry_preference: $("#oa-expiry-mode")?.value || "AUTO",
+    major_strike_selection_enabled: true,
+    use_major_strikes_only: true,
+    major_strike_step: numberValue($("#oa-major-strike-step")?.value || $("#oa-backtest-major-step")?.value, 100),
+    contract_reselection_minutes: numberValue($("#oa-contract-reselect-minutes")?.value, 60),
+    max_hop_strikes: 5,
+    lock_contracts_until_trade_or_timeout: true,
+    reselect_after_exit_cooldown: true,
+    strict_liquidity_filter: Boolean($("#oa-strict-liquidity")?.checked),
     min_volume: numberValue($("#oa-min-volume")?.value, 0),
     min_oi: numberValue($("#oa-min-oi")?.value, 0),
     max_spread_pct: numberValue($("#oa-max-spread")?.value, 0.6),
@@ -274,11 +285,14 @@ function backtestPayload() {
   const underlying = $("#oa-backtest-symbol")?.value || "NIFTY";
   const interval = $("#oa-backtest-interval")?.value || "3minute";
   const tradeDate = $("#oa-backtest-date")?.value || todayLocalIso();
+  const expiry = $("#oa-backtest-expiry")?.value || $("#oa-expiry-date")?.value || "";
   const backtestSpot = $("#oa-backtest-spot")?.value || "";
   const span = numberValue($("#oa-backtest-span")?.value, 4);
   return {
     data_source: "zerodha_historical",
     underlying,
+    expiry,
+    option_expiry: expiry,
     interval,
     trade_date: tradeDate,
     backtest_spot: backtestSpot,
@@ -288,6 +302,8 @@ function backtestPayload() {
       chart_interval: interval,
       paper_starting_balance: numberValue($("#oa-backtest-balance")?.value, 20000),
       strategy_profile: $("#oa-backtest-profile")?.value || "BALANCED",
+      number_of_lots: numberValue($("#oa-backtest-lots")?.value || $("#oa-lots")?.value, 1),
+      major_strike_step: numberValue($("#oa-backtest-major-step")?.value || $("#oa-major-strike-step")?.value, 100),
       max_trades_per_day: numberValue($("#oa-backtest-max-trades")?.value, 3),
       buy_score_threshold: numberValue($("#oa-backtest-score")?.value, 70),
       atm_scan_strike_span: span,
@@ -345,6 +361,7 @@ function renderAll() {
   renderTopStatus();
   renderDashboard();
   renderIndexTickStreams();
+  renderContractLockCards();
   renderBacktestResults();
   renderShadow();
   renderRealPreflight();
@@ -423,6 +440,8 @@ function renderDashboard() {
     row("Estimated Reward", rewardAmount ? money(rewardAmount) : "-"),
     row("Risk Reward", rr),
     row("Trade Score", selection.score !== undefined ? score(selection.score) : "-"),
+    row("Governor", result.governor?.state || "-"),
+    row("No Trade Reason", noTradeReason(result)),
     row("Discipline Score", result.discipline?.discipline_score !== undefined ? score(result.discipline.discipline_score) : "-"),
     row("Data Quality", result.data_quality?.allowed ? "PASS" : "WAIT"),
     row("Theta Risk", result.options_risk?.theta_risk_score !== undefined ? score(result.options_risk.theta_risk_score) : "-"),
@@ -487,7 +506,7 @@ function renderDataSourcePanel(result = {}) {
 }
 
 function renderIndexTickStreams() {
-  const ticks = (state.status.index_ticks || state.lastResult.index_ticks || []).slice(-8);
+  const ticks = (state.status.index_ticks || state.lastResult.index_ticks || []).slice(-80);
   const latest = ticks[ticks.length - 1] || {};
   const scan = state.status.live_scan || state.lastResult.live_scan || {};
   const running = Boolean(scan.running);
@@ -506,15 +525,82 @@ function renderIndexTickStreams() {
       </div>`
     : `<p class="oa-empty-state">No index ticks yet.</p>`;
   const rows = ticks.slice().reverse().map(tick => `<div class="oa-index-tick-row">
-      <div><span>Time</span><strong>${escapeHtml(tick.observed_at || "-")}</strong></div>
-      <div><span>Mode</span><strong>${escapeHtml(tick.mode || "-")}</strong></div>
+      <div><span>Observed</span><strong>${escapeHtml(shortTime(tick.observed_at) || "-")}</strong></div>
       <div><span>Spot</span><strong>${escapeHtml(tick.spot ?? "-")}</strong></div>
-      <div><span>Quote Key</span><strong>${escapeHtml(tick.quote_key || "-")}</strong></div>
+      <div><span>Source</span><strong>${escapeHtml(tick.spot_source || "-")}</strong></div>
+      <div><span>Age</span><strong>${escapeHtml(tick.age_seconds ?? "-")}s</strong></div>
+      <div><span>Scan</span><strong>#${escapeHtml(tick.live_scan_cycle ?? "-")}</strong></div>
     </div>`).join("");
   const body = `${latestHtml}${rows ? `<div class="oa-index-tick-list">${rows}</div>` : ""}`;
   $$("[data-index-tick-panel]").forEach(node => {
     node.innerHTML = body;
   });
+}
+
+function renderContractLockCards() {
+  const lock = contractLockFromState();
+  const hasLock = Boolean(lock && (lock.ce?.tradingsymbol || lock.pe?.tradingsymbol));
+  $$("[data-contract-lock-badge]").forEach(node => {
+    node.className = `oa-status-badge ${badgeClass(hasLock ? "green" : "grey")}`;
+    node.textContent = hasLock ? (lock.status || "CONTRACTS_LOCKED") : "No Lock";
+  });
+  const body = hasLock ? [
+    row("Lock Status", lock.status || "CONTRACTS_LOCKED"),
+    row("Underlying", lock.underlying || "-"),
+    row("Spot at Lock", lock.spot_at_lock ?? "-"),
+    row("Major Step", lock.major_strike_step || lock.major_step || "-"),
+    row("Expiry", lock.expiry || "-"),
+    row("Lots", lock.lots || lock.ce?.lots || lock.pe?.lots || "-"),
+    row("Fetched Lot Size", lock.ce?.lot_size || lock.pe?.lot_size || "-"),
+    row("Final Quantity", lock.ce?.quantity || lock.pe?.quantity || "-"),
+    row("CE Selected", lock.ce?.tradingsymbol || lock.ce?.strike || "-"),
+    row("CE Premium", lock.ce?.premium ?? "-"),
+    row("CE Margin", lock.ce?.margin_required_estimate !== undefined ? money(lock.ce.margin_required_estimate) : "-"),
+    row("CE Reason", lock.ce?.hop_reason || "-"),
+    row("PE Selected", lock.pe?.tradingsymbol || lock.pe?.strike || "-"),
+    row("PE Premium", lock.pe?.premium ?? "-"),
+    row("PE Margin", lock.pe?.margin_required_estimate !== undefined ? money(lock.pe.margin_required_estimate) : "-"),
+    row("PE Reason", lock.pe?.hop_reason || "-"),
+    row("Reselect In", lock.valid_until ? timeLeftText(lock.valid_until) : "-"),
+  ].join("") : `<p class="oa-empty-state">No locked CE/PE contracts yet.</p>`;
+  $$("[data-contract-lock-card]").forEach(node => {
+    node.innerHTML = body;
+  });
+}
+
+function contractLockFromState() {
+  const resultLock = state.lastResult.contract_lock || {};
+  if (resultLock.ce || resultLock.pe) return resultLock;
+  const statusLock = state.status.contract_lock?.lock || {};
+  if (statusLock.ce || statusLock.pe) return statusLock;
+  const metaLock = state.lastBacktest?.contract_lock || state.lastBacktest?.source_metadata?.contract_lock || {};
+  if (metaLock.ce || metaLock.pe) return metaLock;
+  return {};
+}
+
+function timeLeftText(value) {
+  const deadline = new Date(value).getTime();
+  if (!Number.isFinite(deadline)) return "-";
+  const remaining = Math.max(0, Math.floor((deadline - Date.now()) / 1000));
+  const minutes = Math.floor(remaining / 60);
+  const seconds = remaining % 60;
+  return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+}
+
+function noTradeReason(result = {}) {
+  if (result.allowed) return "Trade selected.";
+  const blockers = result.blockers || result.governor?.blockers || result.selection?.blockers || [];
+  if (blockers.length) return blockers[0];
+  if (result.regime?.recommended_side === "WAIT") return result.regime.no_trade_reason || "Regime says WAIT.";
+  if (!result.selection?.selected) return "No selected trade candidate.";
+  return result.explanation || "Waiting for valid setup.";
+}
+
+function shortTime(value) {
+  if (!value) return "";
+  const textValue = String(value);
+  const match = textValue.match(/T?(\d{2}:\d{2}:\d{2})/);
+  return match ? match[1] : textValue;
 }
 
 function readableBlockers(result) {
@@ -626,6 +712,12 @@ function renderBacktestResults(result = state.lastBacktest) {
     metric("Option Series", result.option_frames || 0),
     metric("Spot Source", meta.spot_source || "-"),
     metric("Backtest Spot", meta.spot || "-"),
+    metric("Major Strike Step", meta.major_strike_step || result.major_strike_step || "-"),
+    metric("CE Locked", meta.selected_ce?.tradingsymbol || result.contract_lock?.ce?.tradingsymbol || "-"),
+    metric("PE Locked", meta.selected_pe?.tradingsymbol || result.contract_lock?.pe?.tradingsymbol || "-"),
+    metric("Lots", meta.lots || result.contract_lock?.lots || "-"),
+    metric("Fetched Lot Size", meta.fetched_lot_size?.CE || result.contract_lock?.ce?.lot_size || "-"),
+    metric("Final Quantity", meta.final_quantity?.CE || result.contract_lock?.ce?.quantity || "-"),
     metric("ATM Strike", meta.atm_strike || "-"),
     metric("Contracts Requested", meta.contracts_requested || 0),
     metric("Contracts Found", meta.contracts_found || 0),
@@ -1152,8 +1244,10 @@ function applySettings(settings) {
   const pairs = [
     ["#oa-setting-mode", settings.mode],
     ["#oa-underlying", settings.underlying],
+    ["#oa-expiry-date", settings.expiry || settings.option_expiry],
     ["#oa-profile", settings.strategy_profile],
     ["#oa-chart-interval", settings.chart_interval],
+    ["#oa-lots", settings.number_of_lots],
     ["#oa-score-threshold", settings.buy_score_threshold],
     ["#oa-paper-balance", settings.paper_starting_balance],
     ["#oa-approval-timeout", settings.approval_timeout_seconds],
@@ -1170,6 +1264,8 @@ function applySettings(settings) {
     ["#oa-square-off", settings.square_off_time],
     ["#oa-max-holding", settings.max_holding_minutes],
     ["#oa-expiry-mode", settings.expiry_preference],
+    ["#oa-major-strike-step", settings.major_strike_step],
+    ["#oa-contract-reselect-minutes", settings.contract_reselection_minutes],
     ["#oa-min-volume", settings.min_volume],
     ["#oa-min-oi", settings.min_oi],
     ["#oa-max-spread", settings.max_spread_pct],
@@ -1181,6 +1277,9 @@ function applySettings(settings) {
     ["#oa-slippage-buffer", settings.slippage_buffer_points],
     ["#oa-backtest-balance", settings.paper_starting_balance],
     ["#oa-backtest-interval", settings.chart_interval],
+    ["#oa-backtest-expiry", settings.expiry || settings.option_expiry],
+    ["#oa-backtest-lots", settings.number_of_lots],
+    ["#oa-backtest-major-step", settings.major_strike_step],
     ["#oa-backtest-profile", settings.strategy_profile],
     ["#oa-backtest-score", settings.buy_score_threshold],
     ["#oa-backtest-span", settings.atm_scan_strike_span],
@@ -1201,6 +1300,7 @@ function applySettings(settings) {
     ["#oa-reversal", settings.reversal_exit_enabled],
     ["#oa-time-exit", settings.time_exit_enabled],
     ["#oa-allow-deep-otm", settings.allow_deep_otm],
+    ["#oa-strict-liquidity", settings.strict_liquidity_filter],
     ["#oa-confirm-real", settings.confirm_real_mode],
     ["#oa-static-ip", settings.static_ip_confirmed],
   ];

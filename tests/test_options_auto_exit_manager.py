@@ -122,7 +122,9 @@ class OptionsAutoExitManagerTests(unittest.TestCase):
 
     def test_paper_market_process_can_move_sl_to_breakeven(self):
         service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
-        service.execute_paper_plan(sample_payload())
+        payload = sample_payload()
+        payload["settings"] = {**payload["settings"], "number_of_lots": 2}
+        service.execute_paper_plan(payload)
         service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
 
         result = service.process_paper_market({"market": {"ltp": 49, "high": 49, "low": 49}})

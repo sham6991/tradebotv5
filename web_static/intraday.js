@@ -126,6 +126,7 @@ function payloadFromForm() {
   return {
     mode: $("#mode").value,
     broker: "Zerodha",
+    strategy_profile: $("#strategy-profile").value,
     stocks: $$(".symbol-pair").map((wrap) => ({
       symbol: wrap.querySelector("input").value.trim().toUpperCase(),
       exchange: wrap.querySelector("select").value,
@@ -208,6 +209,7 @@ function applyPayloadToForm(payload = {}) {
     if ($("#symbols-grid")) renderSymbols();
   }
   setFieldValue("#mode", payload.mode || "PAPER");
+  setFieldValue("#strategy-profile", payload.strategy_profile || "BALANCED");
   setFieldValue("#permission", payload.ask_permission_before_entry === false ? "no" : "yes");
   setFieldValue("#side", payload.side_permission || (payload.allow_long === false ? "SHORT_ONLY" : payload.allow_short === false ? "LONG_ONLY" : "BOTH"));
   setFieldValue("#chart-interval", payload.candle_interval || "minute");
@@ -364,6 +366,9 @@ function renderStatus(data) {
     export_path: data.export_path || "",
     event_blackout_blockers: data.event_blackout_blockers || [],
     data_source_status: data.data_source_status || {},
+    stock_data_health: data.stock_data_health || {},
+    stock_live_feed: data.stock_live_feed || {},
+    profile_policy: data.profile_policy || {},
     kill_switch_report: data.kill_switch_report || {},
     engine,
   }, null, 2);
@@ -381,6 +386,9 @@ function renderStatus(data) {
 
 function renderDataSource(data = {}) {
   const policy = data.data_source_status || data.data_source_policy || {};
+  const stockHealth = data.stock_data_health || {};
+  const liveFeed = data.stock_live_feed || {};
+  const profile = data.profile_policy || data.settings?.profile_policy || {};
   const snapshots = data.snapshots || [];
   const first = snapshots[0] || {};
   const source = policy.source || first.data_source || "data_unavailable";
@@ -400,9 +408,15 @@ function renderDataSource(data = {}) {
       ["Market Data", sourceLabel(source)],
       ["Order Execution", orderExecution],
       ["Data Mode", "Candle Polling"],
+      ["Stock Data Health", stockHealth.status || "WAITING"],
+      ["Live Tick Status", liveFeed.running ? "RUNNING" : "STOPPED"],
       ["Source Status", status],
       ["Source Error", sourceError || "None"],
       ["Last Candle", first.last_candle_time || ""],
+      ["Backfill Status", (stockHealth.warnings || [])[0] || first.reason?.data_source?.backfill_status || "None"],
+      ["Profile", data.settings?.strategy_profile || $("#strategy-profile")?.value || "BALANCED"],
+      ["Profile Min Score", profile.minimum_entry_score ?? data.settings?.minimum_entry_score ?? "-"],
+      ["Profile RVOL", profile.relative_volume_threshold ?? data.settings?.relative_volume_threshold ?? "-"],
       ["Quote Time", first.quote_timestamp || ""],
       ["Paper Fill Model", paperFillLabel(data.settings?.paper_fill_model || $("#paper-fill-model")?.value)],
       ["Real Auto Orders", data.settings?.auto_real_orders_confirmed ? "Confirmed" : "Not confirmed"],

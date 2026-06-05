@@ -20,7 +20,10 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-data-source-panel"', html)
         self.assertIn('id="oa-demo-banner"', html)
         self.assertEqual(html.count('data-index-tick-panel'), 3)
+        self.assertEqual(html.count('data-contract-lock-card'), 3)
+        self.assertEqual(html.count('data-contract-lock-badge'), 3)
         self.assertIn("Index Tick Stream", html)
+        self.assertIn("Contract Lock", html)
         self.assertIn('id="oa-stop-engine-top"', html)
         self.assertIn('id="oa-kill-switch-top"', html)
         self.assertIn('id="oa-paper-kill"', html)
@@ -53,10 +56,16 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIsNotNone(match)
         body = match.group("body")
         self.assertIn('id="oa-backtest-spot"', html)
+        self.assertIn('id="oa-backtest-expiry"', html)
+        self.assertIn('id="oa-backtest-lots"', html)
+        self.assertIn('id="oa-backtest-major-step"', html)
         self.assertIn('id="oa-backtest-span"', html)
         self.assertIn('data_source: "zerodha_historical"', body)
         self.assertIn("trade_date: tradeDate", body)
+        self.assertIn("option_expiry: expiry", body)
         self.assertIn("backtest_spot: backtestSpot", body)
+        self.assertIn("number_of_lots", body)
+        self.assertIn("major_strike_step", body)
         self.assertIn("atm_scan_strike_span: span", body)
         self.assertIn("underlying", body)
         self.assertIn("interval", body)
@@ -77,6 +86,12 @@ class OptionsAutoStaticUITests(unittest.TestCase):
             "Next Action",
             "Index Candles",
             "Candle Interval",
+            "No Trade Reason",
+            "Major Strike Step",
+            "CE Locked",
+            "PE Locked",
+            "Fetched Lot Size",
+            "Final Quantity",
             "ZERODHA_REQUIRED",
         ):
             self.assertIn(token, js)
@@ -86,9 +101,20 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
 
         self.assertIn("function renderIndexTickStreams", js)
+        self.assertIn("function renderContractLockCards", js)
         self.assertIn("state.status.index_ticks", js)
+        self.assertIn("slice(-80)", js)
         self.assertIn("data-index-tick-badge", js)
         self.assertIn("live_index_candles", js)
+        self.assertIn("function noTradeReason", js)
+        self.assertIn("function shortTime", js)
+        self.assertIn("data-contract-lock-card", js)
+
+        css = (ROOT / "web_static" / "options_auto.css").read_text(encoding="utf-8")
+        self.assertRegex(css, r"\.oa-index-tick-panel\s*\{[^}]*max-height:\s*356px", re.DOTALL)
+        self.assertRegex(css, r"\.oa-index-tick-list\s*\{[^}]*overflow-y:\s*auto", re.DOTALL)
+        self.assertRegex(css, r"\.oa-index-tick-row\s*\{[^}]*grid-template-columns:", re.DOTALL)
+        self.assertRegex(css, r"\.oa-contract-lock-card\s+\.oa-plan-body\s*\{[^}]*overflow-y:\s*auto", re.DOTALL)
 
     def test_stop_and_kill_controls_call_live_engine_routes(self):
         js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")

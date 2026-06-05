@@ -178,9 +178,12 @@ class OptionsAutoAutoSpotTests(unittest.TestCase):
         self.assertEqual(result["spot_value"], 22540)
         self.assertEqual(result["spot_source"], "zerodha_paper_data")
         self.assertEqual(result["atm_strike"], 22550)
-        self.assertEqual(result["candidate_count"], 6)
+        self.assertEqual(result["candidate_count"], 2)
+        self.assertEqual(result["contract_lock"]["ce"]["strike"], 22600)
+        self.assertEqual(result["contract_lock"]["pe"]["strike"], 22500)
+        self.assertEqual(result["contract_lock"]["ce"]["quantity"], 50)
         self.assertGreater(result["valid_quote_count"], 0)
-        self.assertTrue(any(len(call) == 6 for call in client.quote_calls))
+        self.assertTrue(any(len(call) == 2 for call in client.quote_calls))
         self.assertEqual(service.status()["index_ticks"][-1]["spot"], 22540)
         self.assertEqual(service.status()["index_ticks"][-1]["spot_source"], "zerodha_paper_data")
 
@@ -215,8 +218,8 @@ class OptionsAutoAutoSpotTests(unittest.TestCase):
         self.assertIn("NIFTY spot quote unavailable from Paper Data Zerodha.", result["blockers"])
         self.assertIn("NSE:NIFTY 50", result["next_action"])
 
-    def test_missing_option_quote_keys_are_recorded_and_remaining_quotes_continue(self):
-        returned = {"NFO:NIFTY26JUN22550CE"}
+    def test_missing_locked_option_quote_blocks_contract_lock(self):
+        returned = {"NFO:NIFTY26JUN22600CE"}
         client = FakeOptionsZerodha(spot=22540, returned_option_keys=returned)
         with tempfile.TemporaryDirectory() as temp_dir:
             service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: client)
@@ -226,9 +229,10 @@ class OptionsAutoAutoSpotTests(unittest.TestCase):
                 "settings": {"underlying": "NIFTY", "atm_scan_strike_span": 0, "market_cue_alignment_required": False},
             })
 
-        self.assertEqual(result["candidate_count"], 2)
-        self.assertEqual(result["valid_quote_count"], 1)
-        self.assertIn("NFO:NIFTY26JUN22550PE", result["missing_quote_keys"])
+        self.assertFalse(result["allowed"])
+        self.assertIn("Quote missing for selected contract.", result["blockers"])
+        self.assertTrue(any(call == ["NFO:NIFTY26JUN22600CE"] for call in client.quote_calls))
+        self.assertTrue(any(call == ["NFO:NIFTY26JUN22500PE"] for call in client.quote_calls))
 
 
 if __name__ == "__main__":

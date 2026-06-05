@@ -131,6 +131,13 @@
                 </div>
                 <div class="oa-index-tick-panel" data-index-tick-panel></div>
               </article>
+              <article class="oa-card oa-contract-lock-card">
+                <div class="oa-card-head">
+                  <h2>Contract Lock</h2>
+                  <span class="oa-status-badge oa-badge-grey" data-contract-lock-badge>Waiting</span>
+                </div>
+                <div class="oa-plan-body" data-contract-lock-card></div>
+              </article>
               <article class="oa-card">
                 <div class="oa-card-head">
                   <h2>Session Health</h2>
@@ -168,6 +175,7 @@
                   </select>
                 </label>
                 <label>Date <input id="oa-backtest-date" type="date"></label>
+                <label>Expiry Date <input id="oa-backtest-expiry" type="date"></label>
                 <label>Backtest Spot Price <input id="oa-backtest-spot" type="number" min="0" step="0.05" placeholder="Infer from first candle"></label>
                 <label>Interval
                   <select id="oa-backtest-interval">
@@ -179,6 +187,8 @@
                   </select>
                 </label>
                 <label>Starting Balance <input id="oa-backtest-balance" type="number" min="0" step="100"></label>
+                <label>Lots <input id="oa-backtest-lots" type="number" min="1" step="1"></label>
+                <label>Major Strike Step <input id="oa-backtest-major-step" type="number" min="1" step="50"></label>
                 <label>Profile
                   <select id="oa-backtest-profile">
                     <option>BALANCED</option>
@@ -271,6 +281,13 @@
               </div>
               <div class="oa-index-tick-panel" data-index-tick-panel></div>
             </article>
+            <article class="oa-card oa-contract-lock-card">
+              <div class="oa-card-head">
+                <h2>Contract Lock</h2>
+                <span class="oa-status-badge oa-badge-grey" data-contract-lock-badge>Waiting</span>
+              </div>
+              <div class="oa-plan-body" data-contract-lock-card></div>
+            </article>
           </div>
 
           <div class="oa-card-grid oa-card-grid-two">
@@ -327,6 +344,13 @@
                 <span class="oa-status-badge oa-badge-grey" data-index-tick-badge>Waiting</span>
               </div>
               <div class="oa-index-tick-panel" data-index-tick-panel></div>
+            </article>
+            <article class="oa-card oa-contract-lock-card">
+              <div class="oa-card-head">
+                <h2>Contract Lock</h2>
+                <span class="oa-status-badge oa-badge-grey" data-contract-lock-badge>Waiting</span>
+              </div>
+              <div class="oa-plan-body" data-contract-lock-card></div>
             </article>
           </div>
 
@@ -472,6 +496,10 @@
             <details class="oa-collapsible">
               <summary>Option Selection</summary>
               <div class="oa-form-grid">
+                <label>Expiry Date <input id="oa-expiry-date" type="date"></label>
+                <label>Lots <input id="oa-lots" type="number" min="1" step="1"></label>
+                <label>Major Strike Step <input id="oa-major-strike-step" type="number" min="1" step="50"></label>
+                <label>Contract Reselect Minutes <input id="oa-contract-reselect-minutes" type="number" min="1" step="1"></label>
                 <label>Expiry Mode
                   <select id="oa-expiry-mode">
                     <option>AUTO</option>
@@ -483,6 +511,10 @@
                 <label>Min OI <input id="oa-min-oi" type="number" min="0" step="1"></label>
                 <label>Max Spread % <input id="oa-max-spread" type="number" min="0" step="0.01"></label>
               </div>
+              <div class="oa-toggle-row">
+                <label><input id="oa-strict-liquidity" type="checkbox"> Strict Liquidity Filter</label>
+              </div>
+              <p class="oa-muted">Fast contract selection mode: OI/volume ranking disabled unless strict liquidity is enabled.</p>
             </details>
 
             <details class="oa-collapsible">

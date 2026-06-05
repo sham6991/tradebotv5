@@ -62,6 +62,34 @@ class PositionSizer:
         available_capital = float(available_capital or 0)
         if lot_size <= 0 or premium <= 0 or available_capital <= 0:
             return {"quantity": 0, "lots": 0, "reason": "Missing lot size, premium, or capital."}
+        requested_lots_value = settings.get("number_of_lots")
+        if requested_lots_value not in ("", None):
+            try:
+                requested_lots = int(float(requested_lots_value))
+            except (TypeError, ValueError):
+                requested_lots = 0
+            if requested_lots <= 0:
+                return {"quantity": 0, "lots": 0, "reason": "Lots must be greater than zero."}
+            charges_per_lot = float(settings.get("estimated_charges_per_lot") or settings.get("estimated_total_charges") or 40.0)
+            quantity = requested_lots * lot_size
+            required = premium * quantity + charges_per_lot * requested_lots
+            if required > available_capital:
+                return {
+                    "quantity": 0,
+                    "lots": 0,
+                    "required": required,
+                    "reason": "Insufficient available margin for requested lots.",
+                }
+            stop_distance = float(settings.get("stop_distance_points") or settings.get("minimum_stoploss_points") or max(2.0, premium * 0.03))
+            return {
+                "quantity": quantity,
+                "lots": requested_lots,
+                "required": required,
+                "risk": stop_distance * quantity + charges_per_lot * requested_lots,
+                "cost_per_lot": premium * lot_size + charges_per_lot,
+                "risk_per_lot": stop_distance * lot_size + charges_per_lot,
+                "reason": "",
+            }
         cap_pct = float(settings.get("max_capital_per_trade_pct") or 20)
         risk_pct = float(settings.get("max_risk_per_trade_pct") or 2.5)
         capital_cap = available_capital * cap_pct / 100.0

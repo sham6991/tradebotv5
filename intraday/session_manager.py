@@ -42,6 +42,8 @@ from .paper_broker import PaperBroker
 from .simulated_market_data import generate_stock_day
 from .risk_manager import RiskManager
 from .scoring import score_snapshot
+from .stock_data_readiness import evaluate_stock_data_readiness
+from .stock_live_feed import StockLiveFeed
 from .stock_selector import select_best_signal
 from .traps import detect_trap
 from .trade_gates import event_blackout_blockers, signal_eligibility_blockers
@@ -98,6 +100,14 @@ class IntradaySessionManager:
         self.cached_funds_at = ""
         self.cached_broker_health: dict[str, Any] = {}
         self.last_broker_error = ""
+        self.stock_live_feed = StockLiveFeed()
+        self.last_stock_data_health: dict[str, Any] = {
+            "status": "IDLE",
+            "new_entries_allowed": False,
+            "blockers": ["No intraday session is running."],
+            "warnings": [],
+            "symbols": [],
+        }
 
     def default_settings(self) -> dict[str, Any]:
         sample = IntradaySettings(
@@ -153,6 +163,7 @@ class IntradaySessionManager:
             instrument_rows=instrument_rows,
         )
         self.status = SESSION_STATUS_RUNNING
+        self.stock_live_feed = StockLiveFeed(settings.candle_interval)
         self.snapshots = []
         self.last_market_data = {}
         self.live_candle_cursor = 79
@@ -161,6 +172,8 @@ class IntradaySessionManager:
         self.pending_signal = None
         self.last_signal = None
         selected = [stock.key for stock in settings.stocks]
+        if settings.mode in {MODE_PAPER, MODE_REAL}:
+            self.stock_live_feed.start([stock.symbol for stock in settings.stocks])
         self.database.create_session({
             "session_id": self.session_id,
             "mode": settings.mode,
@@ -239,6 +252,7 @@ class IntradaySessionManager:
         snapshots = []
         market_data = self._market_data_for_payload(payload)
         self.last_market_data = market_data
+        self.last_stock_data_health = evaluate_stock_data_readiness(settings, market_data, now=now)
         for stock in settings.stocks:
             row = market_data.get(stock.symbol) if isinstance(market_data, dict) else None
             if row is None:
@@ -272,9 +286,10 @@ class IntradaySessionManager:
         signal = select_best_signal(snapshots, settings, self.session_id)
         if signal:
             single_trade_blockers = self._single_trade_blockers() if signal.side in {SIDE_LONG, SIDE_SHORT} else []
+            data_readiness_blockers = list(self.last_stock_data_health.get("blockers") or []) if signal.side in {SIDE_LONG, SIDE_SHORT} else []
             hard_gate_blockers = self._trade_allowed_blockers(signal, payload, now=now) if signal.side in {SIDE_LONG, SIDE_SHORT} else []
             real_execution_blockers = self._real_execution_blockers(signal) if signal.side in {SIDE_LONG, SIDE_SHORT} else []
-            signal.blockers = _dedupe_signal_blockers(list(signal.blockers) + single_trade_blockers + hard_gate_blockers + real_execution_blockers)
+            signal.blockers = _dedupe_signal_blockers(list(signal.blockers) + single_trade_blockers + data_readiness_blockers + hard_gate_blockers + real_execution_blockers)
             signal.blockers = self.risk.pre_trade_blockers(signal) if self.risk else signal.blockers
             if signal.blockers:
                 signal.final_decision = "BLOCKED"
@@ -553,6 +568,7 @@ class IntradaySessionManager:
             self.audit.log("CRITICAL", "risk", "kill_switch", {"message": "Intraday kill switch activated", "report": report})
         if self.session_id:
             self.database.update_session(self.session_id, {"status": self.status})
+        self.stock_live_feed.stop("Kill switch activated.")
         return self.status_payload()
 
     def _real_emergency_kill_switch(self) -> dict[str, Any]:
@@ -661,6 +677,7 @@ class IntradaySessionManager:
         if self.audit:
             self.audit.log("INFO", "session", "session_stopped", {"export_path": self.last_export_path})
         self.mode_manager.stop()
+        self.stock_live_feed.stop("Session stopped.")
         return self.status_payload()
 
     def status_payload(self) -> dict[str, Any]:
@@ -675,6 +692,9 @@ class IntradaySessionManager:
             "last_market_data_symbols": sorted(self.last_market_data.keys()),
             "data_source_policy": dict(self.current_data_source_policy),
             "data_source_status": dict(self.last_data_source_status),
+            "stock_data_health": dict(self.last_stock_data_health),
+            "stock_live_feed": self.stock_live_feed.snapshot(),
+            "profile_policy": dict(getattr(self.settings, "profile_policy", {}) if self.settings else {}),
             "last_data_fetch_error": self.last_data_fetch_error,
             "latest_news": list(self.latest_news),
             "latest_news_status": dict(self.latest_news_status),

@@ -23,8 +23,11 @@ from options_auto.core.session_state import OptionsAutoSessionState
 from options_auto.core.watchdog import WatchdogService
 from options_auto.data.index_data_provider import OptionsAutoIndexDataProvider
 from options_auto.data.live_index_candles import LiveIndexCandleStore
+from options_auto.data.locked_contract_manager import LockedContractManager, build_valid_until
+from options_auto.data.major_strike_selector import select_major_strikes_for_spot
 from options_auto.data.option_chain_builder import OptionChainBuilder
-from options_auto.data.options_quote_provider import OptionsQuoteProvider
+from options_auto.data.options_instrument_cache import OptionsInstrumentCache, get_contract_lot_size
+from options_auto.data.options_quote_provider import OptionsQuoteProvider, quote_key_for
 from options_auto.execution.execution_safety import DataQualityEngine, RealOrderPreflight
 from options_auto.execution.kite_api_manager import KiteApiManager, RateLimiter
 from options_auto.execution.kite_order_adapter import KiteOrderAdapter
@@ -98,6 +101,8 @@ class OptionsAutoTerminalService:
         self.latest_fii_dii_snapshot: dict[str, Any] | None = None
         self.index_ticks: list[dict[str, Any]] = []
         self.live_index_candles = LiveIndexCandleStore()
+        self.options_instrument_cache = OptionsInstrumentCache()
+        self.locked_contract_manager = LockedContractManager()
         self._lock = threading.RLock()
         self._live_scan_stop = threading.Event()
         self._live_scan_thread: threading.Thread | None = None
@@ -136,6 +141,7 @@ class OptionsAutoTerminalService:
                 "fii_dii": self.latest_fii_dii_status(),
                 "index_ticks": self.index_ticks[-80:],
                 "live_index_candles": self.live_index_candles.snapshot(),
+                "contract_lock": self.locked_contract_manager.snapshot(),
                 "live_scan": self._live_scan_state_locked(),
             }
 
@@ -318,49 +324,124 @@ class OptionsAutoTerminalService:
                 "diagnostics": base_diagnostics,
             }
 
-        config = SYMBOL_CONFIG.get(underlying) or SYMBOL_CONFIG["NIFTY"]
-        option_exchange = str(config.get("option_exchange") or ("BFO" if underlying == "SENSEX" else "NFO")).upper()
-        instruments = self._client_instruments(client, option_exchange)
-        chain = OptionChainBuilder().build(
-            instruments,
-            underlying,
-            float(spot.get("spot") or 0),
-            span=_int_setting(settings.get("atm_scan_strike_span"), 4),
-            strike_step=config.get("strike_step"),
-            expiry=payload.get("expiry") or payload.get("option_expiry"),
+        return self._locked_option_market_context(
+            client=client,
+            mode=mode,
+            settings=settings,
+            payload=payload,
+            underlying=underlying,
+            spot=spot,
+            candle_context=candle_context,
+            source=source,
+            base_diagnostics=base_diagnostics,
         )
+
+    def _locked_option_market_context(
+        self,
+        *,
+        client: Any,
+        mode: str,
+        settings: dict[str, Any],
+        payload: dict[str, Any],
+        underlying: str,
+        spot: dict[str, Any],
+        candle_context: dict[str, Any],
+        source: str,
+        base_diagnostics: dict[str, Any],
+    ) -> dict[str, Any]:
+        config = SYMBOL_CONFIG.get(underlying) or SYMBOL_CONFIG["NIFTY"]
+        option_exchange = str(config.get("option_exchange") or ("BFO" if underlying in {"SENSEX", "BANKEX"} else "NFO")).upper()
+        instruments = self.options_instrument_cache.instruments(client, option_exchange)
+        expiry_requested = payload.get("expiry") or payload.get("option_expiry") or settings.get("expiry")
+        expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+        warnings = list(base_diagnostics.get("warnings") or [])
+        if not expiry_requested and expiry:
+            warnings.append("Expiry date was blank; using nearest valid Zerodha expiry. Select Expiry Date to lock a specific expiry.")
+        expiry_blocker = self._expiry_selection_blocker(expiry, settings)
+        major_step = _int_setting(settings.get("major_strike_step"), 100)
         diagnostics = {
             **base_diagnostics,
-            "atm_strike": chain.get("atm"),
-            "strike_step": chain.get("strike_step"),
-            "candidate_span": chain.get("span"),
-            "candidate_count": chain.get("contracts_requested"),
-            "contracts_found": chain.get("contracts_found"),
-            "contracts_requested": chain.get("contracts_requested"),
-            "missing_contracts": chain.get("missing_contracts") or [],
+            "warnings": warnings,
+            "option_exchange": option_exchange,
+            "expiry": _expiry_text(expiry),
+            "major_strike_selection_enabled": bool(settings.get("major_strike_selection_enabled", True)),
+            "use_major_strikes_only": bool(settings.get("use_major_strikes_only", True)),
+            "major_strike_step": major_step,
+            "contract_selection_mode": "FAST_MAJOR_LOCKED",
+            "strict_liquidity_filter": bool(settings.get("strict_liquidity_filter")),
+            "fast_contract_selection_note": "Fast contract selection mode: OI/volume ranking disabled." if not settings.get("strict_liquidity_filter") else "Strict liquidity filter enabled.",
             "options_data_health": {
                 "underlying": underlying,
                 "spot_source": spot.get("spot_source"),
                 "spot": spot.get("spot"),
-                "atm_strike": chain.get("atm"),
-                "strike_step": chain.get("strike_step"),
-                "candidate_span": chain.get("span"),
-                "candidate_count": chain.get("contracts_requested"),
-                "contracts_found": chain.get("contracts_found"),
+                "major_strike_step": major_step,
+                "strict_liquidity_filter": bool(settings.get("strict_liquidity_filter")),
             },
         }
-        if not chain.get("contracts"):
+        if expiry_blocker:
+            self.locked_contract_manager.blocked(expiry_blocker)
             return {
                 "blocked": True,
-                "blockers": [f"No {underlying} option contracts found around ATM {chain.get('atm')} on {option_exchange}."],
-                "warnings": [],
-                "next_action": "Refresh Paper Data Zerodha instruments or select a valid expiry.",
-                "diagnostics": diagnostics,
+                "blockers": [expiry_blocker],
+                "warnings": warnings,
+                "next_action": "Enable expiry scalping mode or choose another expiry.",
+                "diagnostics": {**diagnostics, "contract_lock": self.locked_contract_manager.snapshot()},
+            }
+        if not expiry:
+            blocker = f"No {underlying} option expiry found on {option_exchange}."
+            self.locked_contract_manager.blocked(blocker)
+            return {
+                "blocked": True,
+                "blockers": [blocker],
+                "warnings": warnings,
+                "next_action": "Refresh options instrument cache or select a valid expiry.",
+                "diagnostics": {**diagnostics, "contract_lock": self.locked_contract_manager.snapshot()},
             }
 
-        quote_result = OptionsQuoteProvider(client, source=source).quote_candidates(chain["contracts"])
+        active_trade = bool(self.session.active_trades or getattr(self.paper_lifecycle, "active_trades", []))
+        current_lock = self.locked_contract_manager.current(underlying, expiry)
+        if not current_lock or self.locked_contract_manager.should_reselect(settings, active_trade=active_trade):
+            selection = self._select_and_lock_major_contracts(
+                client=client,
+                mode=mode,
+                underlying=underlying,
+                exchange=option_exchange,
+                expiry=expiry,
+                spot_value=float(spot.get("spot") or 0),
+                settings=settings,
+                source=source,
+            )
+            if not selection.get("allowed"):
+                blocker = (selection.get("blockers") or ["Could not lock Options Auto contracts."])[0]
+                self.locked_contract_manager.blocked(blocker)
+                return {
+                    "blocked": True,
+                    "blockers": selection.get("blockers") or [blocker],
+                    "warnings": warnings + list(selection.get("warnings") or []),
+                    "next_action": selection.get("next_action") or "Refresh options instrument cache, margin, and live quotes.",
+                    "diagnostics": {**diagnostics, **selection, "contract_lock": self.locked_contract_manager.snapshot()},
+                }
+            current_lock = selection["lock"]
+        else:
+            self.locked_contract_manager.mark_scanning()
+
+        contracts = [dict(current_lock.get("ce") or {}), dict(current_lock.get("pe") or {})]
+        quote_result = OptionsQuoteProvider(client, source=source).quote_candidates(contracts)
         valid_quote_count = int(quote_result.get("valid_quote_count") or 0)
+        selected_symbols = [contract.get("tradingsymbol") for contract in contracts if contract.get("tradingsymbol")]
         diagnostics.update({
+            "atm_strike": _round_to_step(float(spot.get("spot") or 0), config.get("strike_step") or major_step),
+            "major_floor_strike": (current_lock.get("major_selection") or {}).get("floor_major"),
+            "strike_step": major_step,
+            "candidate_span": 0,
+            "candidate_count": len(contracts),
+            "contracts_found": len(contracts),
+            "contracts_requested": len(contracts),
+            "missing_contracts": [],
+            "selected_contract_symbols": selected_symbols,
+            "contract_lock": current_lock,
+            "contract_lock_status": current_lock.get("status"),
+            "margin_hop_history": current_lock.get("margin_hop_history") or [],
             "quotes": quote_result.get("quotes") or {},
             "missing_quote_keys": quote_result.get("missing_quote_keys") or [],
             "quote_warnings": quote_result.get("warnings") or [],
@@ -368,6 +449,10 @@ class OptionsAutoTerminalService:
             "requested_quote_keys": quote_result.get("requested_quote_keys") or [],
             "options_data_health": {
                 **diagnostics["options_data_health"],
+                "contract_lock_status": current_lock.get("status"),
+                "selected_contracts": selected_symbols,
+                "candidate_count": len(contracts),
+                "contracts_found": len(contracts),
                 "valid_quote_count": valid_quote_count,
                 "missing_quote_keys": quote_result.get("missing_quote_keys") or [],
             },
@@ -375,12 +460,11 @@ class OptionsAutoTerminalService:
         if valid_quote_count <= 0:
             return {
                 "blocked": True,
-                "blockers": [f"No valid {underlying} option quotes returned from {'Real Zerodha' if mode == MODE_REAL else 'Paper Data Zerodha'}."],
-                "warnings": quote_result.get("warnings") or [],
-                "next_action": "Check option quote permissions, instrument expiry, and Zerodha quote availability.",
+                "blockers": [f"No valid {underlying} option quotes returned from {'Real Zerodha' if mode == MODE_REAL else 'Paper Data Zerodha'} for locked contracts."],
+                "warnings": warnings + list(quote_result.get("warnings") or []),
+                "next_action": "Check locked contract quote permissions, selected expiry, and Zerodha quote availability.",
                 "diagnostics": diagnostics,
             }
-
         return {
             "payload": {
                 "spot": spot.get("spot"),
@@ -389,9 +473,252 @@ class OptionsAutoTerminalService:
                 "index_history": candle_context.get("candles") or [],
                 "index_candles": candle_context.get("candles") or [],
             },
-            "instruments": chain["contracts"],
+            "instruments": contracts,
             "quotes": quote_result.get("quotes") or {},
             "diagnostics": diagnostics,
+        }
+
+    def _select_and_lock_major_contracts(
+        self,
+        *,
+        client: Any,
+        mode: str,
+        underlying: str,
+        exchange: str,
+        expiry: Any,
+        spot_value: float,
+        settings: dict[str, Any],
+        source: str,
+    ) -> dict[str, Any]:
+        lots = _int_setting(settings.get("number_of_lots"), 1)
+        if lots <= 0:
+            return {"allowed": False, "blockers": ["Lots must be greater than zero."]}
+        major_step = _int_setting(settings.get("major_strike_step"), 100)
+        try:
+            major = select_major_strikes_for_spot(spot_value, major_step)
+        except ValueError as exc:
+            return {"allowed": False, "blockers": [str(exc)]}
+        provider = OptionsQuoteProvider(client, source=source)
+        available = self._available_capital(mode)
+        if available <= 0:
+            return {"allowed": False, "blockers": ["Available margin is unavailable for contract lock."]}
+        max_hops = max(0, _int_setting(settings.get("max_hop_strikes"), 5))
+        ce = self._select_affordable_major_contract(
+            provider=provider,
+            underlying=underlying,
+            exchange=exchange,
+            expiry=expiry,
+            option_type="CE",
+            initial_strike=int(major["ce_strike"]),
+            hop_direction=1,
+            major_step=major_step,
+            lots=lots,
+            available_margin=available,
+            max_hops=max_hops,
+            settings=settings,
+        )
+        pe = self._select_affordable_major_contract(
+            provider=provider,
+            underlying=underlying,
+            exchange=exchange,
+            expiry=expiry,
+            option_type="PE",
+            initial_strike=int(major["pe_strike"]),
+            hop_direction=-1,
+            major_step=major_step,
+            lots=lots,
+            available_margin=available,
+            max_hops=max_hops,
+            settings=settings,
+        )
+        blockers = list(ce.get("blockers") or []) + list(pe.get("blockers") or [])
+        if blockers:
+            return {
+                "allowed": False,
+                "blockers": list(dict.fromkeys(blockers)),
+                "margin_hop_history": list(ce.get("hop_history") or []) + list(pe.get("hop_history") or []),
+            }
+        lock = {
+            "underlying": underlying,
+            "expiry": _expiry_text(expiry),
+            "spot_at_lock": spot_value,
+            "major_strike_step": major_step,
+            "major_selection": major,
+            "lots": lots,
+            "ce": ce["contract"],
+            "pe": pe["contract"],
+            "locked_at": datetime.now().isoformat(timespec="seconds"),
+            "valid_until": build_valid_until(settings.get("contract_reselection_minutes") or 60),
+            "status": "CONTRACTS_LOCKED",
+            "margin_hop_history": list(ce.get("hop_history") or []) + list(pe.get("hop_history") or []),
+        }
+        lock = self.locked_contract_manager.lock_contracts(lock)
+        self.logger.log(
+            "INFO",
+            "Options Auto contracts locked",
+            underlying=underlying,
+            expiry=_expiry_text(expiry),
+            ce=lock["ce"].get("tradingsymbol"),
+            pe=lock["pe"].get("tradingsymbol"),
+            lots=lots,
+            major_step=major_step,
+        )
+        return {"allowed": True, "lock": lock}
+
+    def _select_affordable_major_contract(
+        self,
+        *,
+        provider: OptionsQuoteProvider,
+        underlying: str,
+        exchange: str,
+        expiry: Any,
+        option_type: str,
+        initial_strike: int,
+        hop_direction: int,
+        major_step: int,
+        lots: int,
+        available_margin: float,
+        max_hops: int,
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        hop_history: list[dict[str, Any]] = []
+        initial_symbol = ""
+        for hop in range(max_hops + 1):
+            strike = initial_strike + hop_direction * major_step * hop
+            contract = self.options_instrument_cache.find_option_contract(
+                client=provider.client,
+                underlying=underlying,
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+                exchange=exchange,
+            )
+            if not contract:
+                hop_history.append({"option_type": option_type, "strike": strike, "hop_count": hop, "status": "MISSING_CONTRACT"})
+                continue
+            lot_size = get_contract_lot_size(contract)
+            if lot_size <= 0:
+                return {
+                    "blockers": ["Lot size missing for selected contract. Refresh options instrument cache."],
+                    "hop_history": hop_history,
+                }
+            quote_result = provider.quote_candidates([contract])
+            quote = self._quote_for_contract(contract, quote_result.get("quotes") or {})
+            premium = self._quote_premium(quote)
+            quantity = lots * lot_size
+            symbol = contract.get("tradingsymbol") or ""
+            if hop == 0:
+                initial_symbol = symbol
+            entry = {
+                "option_type": option_type,
+                "contract": symbol,
+                "strike": strike,
+                "hop_count": hop,
+                "lot_size": lot_size,
+                "lots": lots,
+                "quantity": quantity,
+                "premium": premium,
+                "requested_quote_keys": quote_result.get("requested_quote_keys") or [],
+            }
+            quote_blocker = self._contract_quote_blocker(quote, settings)
+            if quote_blocker:
+                entry.update({"status": "BLOCKED", "reason": quote_blocker})
+                hop_history.append(entry)
+                return {"blockers": [quote_blocker], "hop_history": hop_history}
+            margin = self._margin_requirement(premium, quantity, lots, settings)
+            entry.update(margin)
+            if margin["total_required"] <= available_margin:
+                reason = "" if hop == 0 else f"{initial_symbol or initial_strike}{option_type} exceeded available margin."
+                selected = {
+                    **contract,
+                    "strike": int(strike),
+                    "lot_size": lot_size,
+                    "lots": lots,
+                    "quantity": quantity,
+                    "premium": premium,
+                    "required_cash": margin["required_cash"],
+                    "margin_required_estimate": margin["total_required"],
+                    "selected_after_hop": hop > 0,
+                    "hop_count": hop,
+                    "hop_reason": reason,
+                }
+                entry.update({"status": "SELECTED", "hop_reason": reason})
+                hop_history.append(entry)
+                return {"contract": selected, "hop_history": hop_history}
+            entry.update({"status": "MARGIN_EXCEEDED", "reason": f"{symbol or strike}{option_type} exceeded available margin."})
+            hop_history.append(entry)
+        return {
+            "blockers": [f"No affordable {underlying} {option_type} contract found within {max_hops} major-strike hops."],
+            "hop_history": hop_history,
+        }
+
+    def _nearest_option_expiry(self, instruments: list[dict[str, Any]], underlying: str) -> str:
+        today_text = date.today().isoformat()
+        expiries = sorted({
+            _expiry_text(row.get("expiry"))
+            for row in instruments or []
+            if str(row.get("instrument_type") or row.get("option_type") or "").upper() in {"CE", "PE"}
+            and _is_underlying_row(row, underlying)
+            and _expiry_text(row.get("expiry")) >= today_text
+        })
+        return expiries[0] if expiries else ""
+
+    def _expiry_selection_blocker(self, expiry: Any, settings: dict[str, Any]) -> str:
+        expiry_text = _expiry_text(expiry)
+        if not expiry_text:
+            return ""
+        if bool(settings.get("auto_expiry_switch")):
+            return ""
+        try:
+            expiry_date = datetime.fromisoformat(expiry_text).date()
+        except ValueError:
+            return ""
+        if expiry_date != date.today() or bool(settings.get("expiry_scalping_mode") or settings.get("expiry_scalp_enabled")):
+            return ""
+        cutoff = _parse_time_text(settings.get("same_day_expiry_cutoff_time") or "11:30")
+        if cutoff and datetime.now().time() > cutoff:
+            return "Selected expiry has high theta risk after cutoff. Enable expiry scalping mode or choose another expiry."
+        return ""
+
+    def _quote_for_contract(self, contract: dict[str, Any], quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        keys = [
+            quote_key_for(contract),
+            str(contract.get("instrument_token") or contract.get("token") or ""),
+            str(contract.get("tradingsymbol") or "").upper(),
+        ]
+        for key in keys:
+            if key and key in quotes:
+                return dict(quotes[key] or {})
+        return {}
+
+    def _quote_premium(self, quote: dict[str, Any]) -> float:
+        return _number(quote.get("ask"), _number(quote.get("ltp"), quote.get("last_price")))
+
+    def _contract_quote_blocker(self, quote: dict[str, Any], settings: dict[str, Any]) -> str:
+        if not quote:
+            return "Quote missing for selected contract."
+        if quote.get("demo_data"):
+            return "Demo data is not allowed for Paper or Real Options Auto."
+        if self._quote_premium(quote) <= 0:
+            return "Selected contract premium is unavailable."
+        bid = _number(quote.get("bid"))
+        ask = _number(quote.get("ask"))
+        if bid < 0 or ask < 0 or (bid > 0 and ask > 0 and ask < bid):
+            return "Invalid bid/ask spread."
+        if quote.get("age_seconds") not in ("", None) and _number(quote.get("age_seconds"), 9999) > _number(settings.get("quote_stale_seconds"), 3):
+            return "Quote is stale."
+        return ""
+
+    def _margin_requirement(self, premium: float, quantity: int, lots: int, settings: dict[str, Any]) -> dict[str, float]:
+        required_cash = float(premium or 0) * int(quantity or 0)
+        charges = float(settings.get("estimated_charges_per_lot") or settings.get("estimated_total_charges") or 40.0) * int(lots or 0)
+        buffer = required_cash * float(settings.get("capital_buffer_pct") or 0.0) / 100.0
+        total = required_cash + charges + buffer
+        return {
+            "required_cash": round(required_cash, 2),
+            "estimated_charges": round(charges, 2),
+            "capital_buffer": round(buffer, 2),
+            "total_required": round(total, 2),
         }
 
     def _live_index_candle_context(self, client: Any, underlying: str, mode: str, settings: dict[str, Any], spot: dict[str, Any]) -> dict[str, Any]:
@@ -997,6 +1324,12 @@ class OptionsAutoTerminalService:
         result["data_source"] = source_metadata.get("data_source")
         result["data_source_label"] = source_metadata.get("data_source_label")
         result["source_metadata"] = source_metadata
+        result["contract_lock"] = source_metadata.get("contract_lock") or {}
+        result["lock_history"] = source_metadata.get("lock_history") or []
+        result["major_strike_step"] = source_metadata.get("major_strike_step")
+        result["margin_hop_history"] = source_metadata.get("margin_hop_history") or []
+        result["spot_used"] = source_metadata.get("spot")
+        result["spot_source"] = source_metadata.get("spot_source")
         self.session.status = "BACKTEST_COMPLETE"
         self.session.record_decision({
             "mode": MODE_BACKTEST,
@@ -1031,33 +1364,70 @@ class OptionsAutoTerminalService:
         if spot_result.get("blockers"):
             raise ValueError((spot_result.get("blockers") or [f"Could not infer ATM strike from {underlying} historical candles."])[0])
         option_exchange = str(config.get("option_exchange") or "NFO").upper()
-        expiry = payload.get("expiry") or payload.get("option_expiry")
-        chain = OptionChainBuilder().build(
-            self._client_instruments(client, option_exchange),
-            underlying,
-            float(spot_result.get("spot") or 0),
-            span=_int_setting(settings.get("atm_scan_strike_span"), 4),
-            strike_step=config.get("strike_step"),
+        instruments = self.options_instrument_cache.instruments(client, option_exchange)
+        expiry_requested = payload.get("expiry") or payload.get("option_expiry") or settings.get("expiry")
+        expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+        if not expiry:
+            raise ValueError(f"No {underlying} option expiry found on {option_exchange}.")
+        major_step = _int_setting(settings.get("major_strike_step"), 100)
+        major = select_major_strikes_for_spot(float(spot_result.get("spot") or 0), major_step)
+        lots = _int_setting(settings.get("number_of_lots"), 1)
+        if lots <= 0:
+            raise ValueError("Lots must be greater than zero.")
+        available = float(settings.get("paper_starting_balance") or 0)
+        max_hops = max(0, _int_setting(settings.get("max_hop_strikes"), 5))
+        ce = self._select_backtest_major_contract(
+            client=client,
+            underlying=underlying,
+            exchange=option_exchange,
             expiry=expiry,
+            option_type="CE",
+            initial_strike=int(major["ce_strike"]),
+            hop_direction=1,
+            major_step=major_step,
+            lots=lots,
+            available_margin=available,
+            max_hops=max_hops,
+            settings=settings,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            interval=interval,
         )
-        contracts = list(chain.get("contracts") or [])
-        if not contracts:
-            raise ValueError(
-                f"Expired option instrument metadata unavailable for selected date."
-                if trade_day < date.today()
-                else f"No {underlying} option contracts found around ATM {chain.get('atm')} on {option_exchange}."
-            )
-        option_frames = []
-        for contract in contracts:
-            frame = self._historical_frame(
-                client,
-                contract.get("instrument_token"),
-                from_dt,
-                to_dt,
-                interval,
-                str(contract.get("tradingsymbol") or contract.get("instrument_token") or "option"),
-            )
-            option_frames.append(_decorate_option_frame(frame, contract, underlying, option_exchange))
+        pe = self._select_backtest_major_contract(
+            client=client,
+            underlying=underlying,
+            exchange=option_exchange,
+            expiry=expiry,
+            option_type="PE",
+            initial_strike=int(major["pe_strike"]),
+            hop_direction=-1,
+            major_step=major_step,
+            lots=lots,
+            available_margin=available,
+            max_hops=max_hops,
+            settings=settings,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            interval=interval,
+        )
+        contracts = [ce["contract"], pe["contract"]]
+        option_frames = [ce["frame"], pe["frame"]]
+        lock = {
+            "lock_id": f"OA_BACKTEST_LOCK_{trade_day.strftime('%Y%m%d')}_001",
+            "underlying": underlying,
+            "expiry": _expiry_text(expiry),
+            "spot_at_lock": spot_result.get("spot"),
+            "spot_source": spot_result.get("spot_source"),
+            "major_strike_step": major_step,
+            "major_selection": major,
+            "lots": lots,
+            "ce": ce["contract"],
+            "pe": pe["contract"],
+            "locked_at": from_dt.isoformat(sep=" "),
+            "valid_until": to_dt.isoformat(sep=" "),
+            "status": "CONTRACTS_LOCKED",
+            "margin_hop_history": list(ce.get("hop_history") or []) + list(pe.get("hop_history") or []),
+        }
         metadata = {
             "data_source": "zerodha_historical",
             "data_source_label": "Zerodha Historical (Paper Data)",
@@ -1069,15 +1439,116 @@ class OptionsAutoTerminalService:
             "index_token": index_token,
             "spot": spot_result.get("spot"),
             "spot_source": spot_result.get("spot_source"),
-            "atm_strike": chain.get("atm"),
-            "strike_step": chain.get("strike_step"),
-            "candidate_span": chain.get("span"),
-            "contracts_requested": chain.get("contracts_requested"),
-            "contracts_found": chain.get("contracts_found"),
+            "atm_strike": _round_to_step(float(spot_result.get("spot") or 0), config.get("strike_step") or major_step),
+            "major_floor_strike": major.get("floor_major"),
+            "strike_step": major_step,
+            "major_strike_step": major_step,
+            "candidate_span": 0,
+            "contracts_requested": 2,
+            "contracts_found": len(contracts),
             "contracts": [_contract_summary(contract) for contract in contracts],
+            "selected_ce": _contract_summary(ce["contract"]),
+            "selected_pe": _contract_summary(pe["contract"]),
+            "lots": lots,
+            "fetched_lot_size": {"CE": ce["contract"].get("lot_size"), "PE": pe["contract"].get("lot_size")},
+            "final_quantity": {"CE": ce["contract"].get("quantity"), "PE": pe["contract"].get("quantity")},
+            "margin_hop_history": lock["margin_hop_history"],
+            "contract_lock": lock,
+            "lock_history": [lock],
             "historical_proxy_quote_warning": "Backtest uses OHLC-derived historical quote proxies for option bid/ask/depth.",
         }
         return index_frame, option_frames, metadata
+
+    def _select_backtest_major_contract(
+        self,
+        *,
+        client: Any,
+        underlying: str,
+        exchange: str,
+        expiry: Any,
+        option_type: str,
+        initial_strike: int,
+        hop_direction: int,
+        major_step: int,
+        lots: int,
+        available_margin: float,
+        max_hops: int,
+        settings: dict[str, Any],
+        from_dt: datetime,
+        to_dt: datetime,
+        interval: str,
+    ) -> dict[str, Any]:
+        hop_history: list[dict[str, Any]] = []
+        initial_symbol = ""
+        for hop in range(max_hops + 1):
+            strike = initial_strike + hop_direction * major_step * hop
+            contract = self.options_instrument_cache.find_option_contract(
+                client=client,
+                underlying=underlying,
+                expiry=expiry,
+                strike=strike,
+                option_type=option_type,
+                exchange=exchange,
+            )
+            if not contract:
+                hop_history.append({"option_type": option_type, "strike": strike, "hop_count": hop, "status": "MISSING_CONTRACT"})
+                continue
+            lot_size = get_contract_lot_size(contract)
+            if lot_size <= 0:
+                raise ValueError("Lot size missing for selected contract. Refresh options instrument cache.")
+            frame = self._historical_frame(
+                client,
+                contract.get("instrument_token"),
+                from_dt,
+                to_dt,
+                interval,
+                str(contract.get("tradingsymbol") or contract.get("instrument_token") or "option"),
+            )
+            premium = _first_close(frame)
+            quantity = lots * lot_size
+            margin = self._margin_requirement(premium, quantity, lots, settings)
+            symbol = contract.get("tradingsymbol") or ""
+            if hop == 0:
+                initial_symbol = symbol
+            entry = {
+                "option_type": option_type,
+                "contract": symbol,
+                "strike": strike,
+                "hop_count": hop,
+                "lot_size": lot_size,
+                "lots": lots,
+                "quantity": quantity,
+                "premium": premium,
+                **margin,
+            }
+            if premium <= 0:
+                entry.update({"status": "BLOCKED", "reason": "Historical option premium is unavailable."})
+                hop_history.append(entry)
+                raise ValueError("Historical option premium is unavailable.")
+            if margin["total_required"] <= available_margin:
+                reason = "" if hop == 0 else f"{initial_symbol or initial_strike}{option_type} exceeded available margin."
+                selected = {
+                    **contract,
+                    "lot_size": lot_size,
+                    "lots": lots,
+                    "quantity": quantity,
+                    "premium": premium,
+                    "required_cash": margin["required_cash"],
+                    "margin_required_estimate": margin["total_required"],
+                    "selected_after_hop": hop > 0,
+                    "hop_count": hop,
+                    "hop_reason": reason,
+                }
+                entry.update({"status": "SELECTED", "hop_reason": reason})
+                hop_history.append(entry)
+                return {
+                    "contract": selected,
+                    "frame": _decorate_option_frame(frame, selected, underlying, exchange),
+                    "hop_history": hop_history,
+                }
+            entry.update({"status": "MARGIN_EXCEEDED", "reason": f"{symbol or strike}{option_type} exceeded available margin."})
+            hop_history.append(entry)
+        raise ValueError(f"No affordable {underlying} {option_type} historical contract found within {max_hops} major-strike hops.")
 
     def _index_token(self, client: Any, underlying: str, exchange: str) -> Any:
         if underlying == "NIFTY" and hasattr(client, "get_nifty50_token"):
@@ -1767,6 +2238,30 @@ def _expiry_text(value: Any) -> str:
     return str(value)[:10]
 
 
+def _parse_time_text(value: Any) -> dt_time | None:
+    if isinstance(value, dt_time):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%H:%M:%S", "%H:%M"):
+        try:
+            return datetime.strptime(text, fmt).time()
+        except ValueError:
+            pass
+    return None
+
+
+def _is_underlying_row(row: dict[str, Any], underlying: str) -> bool:
+    wanted = str(underlying or "").upper().replace(" ", "")
+    aliases = {wanted}
+    if wanted in {"BANKNIFTY", "NIFTYBANK"}:
+        aliases.update({"BANKNIFTY", "NIFTYBANK"})
+    name = str(row.get("name") or row.get("underlying") or "").upper().replace(" ", "")
+    symbol = str(row.get("tradingsymbol") or "").upper().replace(" ", "")
+    return name in {"", *aliases} or any(symbol.startswith(alias) for alias in aliases)
+
+
 def _decorate_option_frame(frame: pd.DataFrame, contract: dict[str, Any], underlying: str, exchange: str) -> pd.DataFrame:
     result = frame.copy()
     option_type = str(contract.get("instrument_type") or contract.get("option_type") or "").upper()
@@ -1792,4 +2287,11 @@ def _contract_summary(contract: dict[str, Any]) -> dict[str, Any]:
         "strike": contract.get("strike"),
         "expiry": _expiry_text(contract.get("expiry")),
         "exchange": contract.get("exchange"),
+        "lot_size": contract.get("lot_size"),
+        "lots": contract.get("lots"),
+        "quantity": contract.get("quantity"),
+        "premium": contract.get("premium"),
+        "margin_required_estimate": contract.get("margin_required_estimate"),
+        "hop_count": contract.get("hop_count"),
+        "hop_reason": contract.get("hop_reason"),
     }

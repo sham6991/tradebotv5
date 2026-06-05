@@ -183,7 +183,7 @@ class StrikeSelector:
             blockers.append("Spread too wide.")
         if int(float(candidate.get("bid_qty") or 0)) + int(float(candidate.get("ask_qty") or 0)) < int(settings.get("min_depth_qty") or 1):
             blockers.append("Depth too low.")
-        if float(candidate.get("liquidity_score") or 0) < 45:
+        if settings.get("strict_liquidity_filter") and float(candidate.get("liquidity_score") or 0) < 45:
             blockers.append("Liquidity score too low.")
         if not settings.get("allow_deep_otm", False) and candidate.get("moneyness") == "OTM" and float(candidate.get("distance_pct") or 0) > 1.2:
             blockers.append("Deep OTM disabled.")

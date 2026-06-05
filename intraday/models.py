@@ -105,6 +105,7 @@ class StockInput:
 class IntradaySettings:
     mode: str = MODE_PAPER
     broker: str = BROKER_ZERODHA
+    strategy_profile: str = "BALANCED"
     stocks: list[StockInput] = field(default_factory=list)
     ask_permission_before_entry: bool = True
     order_mode: str = ORDER_LIMIT_ONLY
@@ -138,6 +139,8 @@ class IntradaySettings:
     vwap_enabled: bool = True
     volume_profile_enabled: bool = True
     candle_interval: str = DEFAULT_CANDLE_INTERVAL
+    allow_forming_candle_entry: bool = False
+    forming_candle_min_completion_pct: float = 100.0
     require_live_data_for_paper: bool = True
     allow_simulated_fallback: bool = False
     show_data_source_warning: bool = True
@@ -195,6 +198,7 @@ class IntradaySettings:
     auto_real_orders_confirmed: bool = False
     emergency_exit_order_type: str = "AGGRESSIVE_LIMIT"
     emergency_slippage_points: float = 0.0
+    profile_policy: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "IntradaySettings":
@@ -220,6 +224,7 @@ class IntradaySettings:
         settings = cls(
             mode=mode,
             broker=str(payload.get("broker") or BROKER_ZERODHA).strip() or BROKER_ZERODHA,
+            strategy_profile=str(payload.get("strategy_profile") or payload.get("profile") or "BALANCED").strip().upper(),
             stocks=[StockInput.from_value(item) for item in stocks],
             ask_permission_before_entry=_bool(payload.get("ask_permission_before_entry"), True),
             order_mode=ORDER_LIMIT_ONLY,
@@ -253,6 +258,8 @@ class IntradaySettings:
             vwap_enabled=_bool(payload.get("vwap_enabled"), True),
             volume_profile_enabled=_bool(payload.get("volume_profile_enabled"), True),
             candle_interval=str(payload.get("candle_interval") or DEFAULT_CANDLE_INTERVAL).strip(),
+            allow_forming_candle_entry=_bool(payload.get("allow_forming_candle_entry"), False),
+            forming_candle_min_completion_pct=_float(payload.get("forming_candle_min_completion_pct"), 100.0),
             require_live_data_for_paper=_bool(payload.get("require_live_data_for_paper"), True),
             allow_simulated_fallback=_bool(payload.get("allow_simulated_fallback"), False),
             show_data_source_warning=_bool(payload.get("show_data_source_warning"), True),
@@ -311,12 +318,22 @@ class IntradaySettings:
             emergency_exit_order_type=str(payload.get("emergency_exit_order_type") or "AGGRESSIVE_LIMIT").strip().upper(),
             emergency_slippage_points=_float(payload.get("emergency_slippage_points"), 0.0),
         )
+        from .stock_strategy_profile_policy import apply_intraday_strategy_profile
+
+        explicit_thresholds: dict[str, Any] = {}
+        if payload.get("max_allowed_spread_pct") not in ("", None):
+            explicit_thresholds["max_allowed_spread_pct"] = _float(payload.get("max_allowed_spread_pct"), settings.max_allowed_spread_pct)
+        if payload.get("min_liquidity_score") not in ("", None):
+            explicit_thresholds["min_liquidity_score"] = _float(payload.get("min_liquidity_score"), settings.min_liquidity_score)
+        settings = apply_intraday_strategy_profile(settings, explicit_thresholds)
         settings.validate()
         return settings
 
     def validate(self) -> None:
         if self.mode not in SUPPORTED_MODES:
             raise ValueError("Mode must be PAPER, REAL, BACKTEST, or REPLAY.")
+        if self.strategy_profile not in {"CONSERVATIVE", "BALANCED", "AGGRESSIVE"}:
+            raise ValueError("Strategy profile must be CONSERVATIVE, BALANCED, or AGGRESSIVE.")
         if len(self.stocks) != MAX_STOCKS:
             raise ValueError(f"Intraday Stocks Terminal requires exactly {MAX_STOCKS} stocks.")
         seen = set()

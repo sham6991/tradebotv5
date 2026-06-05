@@ -28,6 +28,7 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "allow_real_emergency_orders": False,
     "max_capital_per_trade_pct": 20.0,
     "max_risk_per_trade_pct": 2.5,
+    "number_of_lots": 1,
     "max_lots_per_trade": 2,
     "max_trades_per_day": 3,
     "max_open_trades": 1,
@@ -68,6 +69,7 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "minimum_profit_buffer_points": 1.0,
     "estimated_total_charges": 40.0,
     "estimated_charges_per_lot": 40.0,
+    "capital_buffer_pct": 5.0,
     "expected_holding_minutes": 15,
     "adaptive_scan_seconds_aggressive": 1,
     "adaptive_scan_seconds_balanced": 2,
@@ -94,6 +96,17 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "final_validation_latency_warning_ms": 200.0,
     "action_latency_warning_ms": 500.0,
     "atm_scan_strike_span": 4,
+    "major_strike_selection_enabled": True,
+    "major_strike_step": 100,
+    "use_major_strikes_only": True,
+    "contract_reselection_minutes": 60,
+    "max_hop_strikes": 5,
+    "lock_contracts_until_trade_or_timeout": True,
+    "reselect_after_exit_cooldown": True,
+    "strict_liquidity_filter": False,
+    "auto_expiry_switch": False,
+    "expiry_scalping_mode": False,
+    "same_day_expiry_cutoff_time": "11:30",
     "premium_expansion_required": True,
     "expiry_scalp_enabled": False,
     "allow_expiry_far_otm": False,
@@ -189,6 +202,13 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "allow_deep_otm",
         "dry_run_real_only",
         "require_telegram_position_preview",
+        "major_strike_selection_enabled",
+        "use_major_strikes_only",
+        "lock_contracts_until_trade_or_timeout",
+        "reselect_after_exit_cooldown",
+        "strict_liquidity_filter",
+        "auto_expiry_switch",
+        "expiry_scalping_mode",
     ):
         settings[key] = _bool(settings.get(key), bool(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 
@@ -215,6 +235,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "minimum_profit_buffer_points",
         "estimated_total_charges",
         "estimated_charges_per_lot",
+        "capital_buffer_pct",
         "target_extension_atr_fraction",
         "target_extension_target_fraction",
         "target_extension_profit_protection_pct",
@@ -230,6 +251,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
 
     for key in (
         "approval_timeout_seconds",
+        "number_of_lots",
         "max_lots_per_trade",
         "max_trades_per_day",
         "max_open_trades",
@@ -260,6 +282,9 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "early_exit_min_conditions",
         "low_aggression_quantity_pct",
         "atm_scan_strike_span",
+        "major_strike_step",
+        "contract_reselection_minutes",
+        "max_hop_strikes",
         "sl_modify_throttle_seconds",
         "telegram_command_cooldown_seconds",
         "telegram_duplicate_window_seconds",
@@ -273,4 +298,5 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     settings["strategy_profile"] = str(settings.get("strategy_profile") or "BALANCED").strip().upper()
     settings["expiry_preference"] = str(settings.get("expiry_preference") or "AUTO").strip().upper()
     settings["backtest_entry_mode"] = str(settings.get("backtest_entry_mode") or "NEXT_CANDLE_OPEN_PLUS_SLIPPAGE").strip().upper()
+    settings["same_day_expiry_cutoff_time"] = str(settings.get("same_day_expiry_cutoff_time") or "11:30").strip()
     return settings

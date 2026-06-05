@@ -43,6 +43,7 @@ class FakePaperZerodha:
             256265: _index_rows(),
             1001: _option_rows("NIFTY26JUN22500CE", 1001, "CE"),
             1002: _option_rows("NIFTY26JUN22500PE", 1002, "PE"),
+            1003: _option_rows("NIFTY26JUN22400PE", 1003, "PE"),
         }
 
     def instruments(self, exchange=None):
@@ -52,6 +53,7 @@ class FakePaperZerodha:
             return [
                 {"tradingsymbol": "NIFTY26JUN22500CE", "name": "NIFTY", "instrument_token": 1001, "instrument_type": "CE", "segment": "NFO-OPT", "strike": 22500, "expiry": date(2026, 6, 25), "lot_size": 50, "tick_size": 0.05, "exchange": "NFO"},
                 {"tradingsymbol": "NIFTY26JUN22500PE", "name": "NIFTY", "instrument_token": 1002, "instrument_type": "PE", "segment": "NFO-OPT", "strike": 22500, "expiry": date(2026, 6, 25), "lot_size": 50, "tick_size": 0.05, "exchange": "NFO"},
+                {"tradingsymbol": "NIFTY26JUN22400PE", "name": "NIFTY", "instrument_token": 1003, "instrument_type": "PE", "segment": "NFO-OPT", "strike": 22400, "expiry": date(2026, 6, 25), "lot_size": 50, "tick_size": 0.05, "exchange": "NFO"},
             ]
         return []
 
@@ -88,6 +90,10 @@ class OptionsAutoBacktestHistoryTests(unittest.TestCase):
 
         self.assertEqual(result["data_source"], "zerodha_historical")
         self.assertEqual(result["source_metadata"]["atm_strike"], 22500)
+        self.assertEqual(result["source_metadata"]["major_strike_step"], 100)
+        self.assertEqual(result["contract_lock"]["ce"]["strike"], 22500)
+        self.assertEqual(result["contract_lock"]["pe"]["strike"], 22400)
+        self.assertEqual(result["contract_lock"]["ce"]["quantity"], 50)
         self.assertEqual(result["option_frames"], 2)
         self.assertGreaterEqual(len(client.calls), 3)
         self.assertTrue([row for row in result["decisions"] if row["decision"] == "ENTRY"])

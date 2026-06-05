@@ -1925,13 +1925,27 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         try:
             self.route_get()
         except Exception as exc:
-            self.send_json({"error": str(exc)}, status=500)
+            if _is_client_disconnect(exc):
+                return
+            try:
+                self.send_json({"error": str(exc)}, status=500)
+            except Exception as send_exc:
+                if _is_client_disconnect(send_exc):
+                    return
+                raise
 
     def do_POST(self):
         try:
             self.route_post()
         except Exception as exc:
-            self.send_json({"error": str(exc)}, status=400)
+            if _is_client_disconnect(exc):
+                return
+            try:
+                self.send_json({"error": str(exc)}, status=400)
+            except Exception as send_exc:
+                if _is_client_disconnect(send_exc):
+                    return
+                raise
 
     def route_get(self):
         parsed = urlparse(self.path)
@@ -2104,13 +2118,18 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         return path
 
     def send_json(self, payload, status=200):
-        body = json.dumps(payload, default=json_default).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            body = json.dumps(payload, default=json_default).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as exc:
+            if _is_client_disconnect(exc):
+                return
+            raise
 
     def send_html(self, body, status=200):
         page = (
@@ -2124,11 +2143,16 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             "</main></body></html>"
         )
         encoded = page.encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(encoded)))
-        self.end_headers()
-        self.wfile.write(encoded)
+        try:
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+        except Exception as exc:
+            if _is_client_disconnect(exc):
+                return
+            raise
 
     def send_static_file(self, relative_path):
         relative_path = unquote(relative_path).replace("\\", "/").lstrip("/")
@@ -2138,15 +2162,28 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         content_type = mimetypes.guess_type(path)[0] or "application/octet-stream"
         with open(path, "rb") as handle:
             body = handle.read()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as exc:
+            if _is_client_disconnect(exc):
+                return
+            raise
 
     def log_message(self, _format, *_args):
         return
+
+
+def _is_client_disconnect(exc: BaseException) -> bool:
+    return (
+        isinstance(exc, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError))
+        or getattr(exc, "winerror", None) in {10053, 10054, 109}
+        or getattr(exc, "errno", None) in {32, 54, 104}
+    )
 
 
 def create_server(host=WEB_HOST, port=WEB_PORT):

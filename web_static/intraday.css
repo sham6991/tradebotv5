@@ -283,13 +283,13 @@ h3 { font-size: 16px; color: var(--white); }
   background: #0a0d0b;
 }
 
-.watch-panel, .best-panel, .margin-panel, .active-panel, .news-panel, .orders-panel, .journal-panel, .backtest-report-panel {
+.watch-panel, .best-panel, .margin-panel, .active-panel, .news-panel, .orders-panel, .journal-panel, .backtest-report-panel, .data-source-card {
   border: 1px solid var(--line);
   background: var(--panel);
 }
 
-.watch-panel { margin-bottom: 12px; }
-.watch-panel h2, .best-panel h2, .margin-panel h2, .active-panel h2, .news-panel h2, .orders-panel h2, .journal-panel h2, .backtest-report-panel h2 {
+.watch-panel, .data-source-card { margin-bottom: 12px; }
+.watch-panel h2, .best-panel h2, .margin-panel h2, .active-panel h2, .news-panel h2, .orders-panel h2, .journal-panel h2, .backtest-report-panel h2, .data-source-card h2 {
   padding: 10px;
   border-bottom: 1px solid var(--line);
   background: var(--panel-2);
@@ -345,6 +345,24 @@ h3 { font-size: 16px; color: var(--white); }
   margin: 10px 10px 0;
   color: var(--amber);
   line-height: 1.45;
+}
+
+.setting-note {
+  margin: 0 12px 12px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.data-source-warning {
+  padding: 0 10px 10px;
+  color: var(--amber);
+  min-height: 22px;
+}
+
+#data-source-badge {
+  border: 1px solid currentColor;
+  padding: 3px 8px;
+  color: var(--amber);
 }
 
 .table-wrap { overflow: auto; }

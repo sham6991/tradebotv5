@@ -20,6 +20,8 @@ class IntradaySessionManagerTests(unittest.TestCase):
             "minimum_risk_reward": 1.2,
             "ask_permission_before_entry": True,
             "max_trades_per_day": 3,
+            "allow_simulated_fallback": True,
+            "require_live_data_for_paper": False,
         }
 
     def market_data(self):
@@ -131,6 +133,17 @@ class IntradaySessionManagerTests(unittest.TestCase):
             self.assertTrue(uploaded["fii_dii_upload"]["valid"])
             started = manager.start_session(self.payload())
             self.assertEqual(started["fii_dii_upload"]["status"], "OK")
+
+    def test_paper_start_without_data_connection_blocks_by_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = IntradaySessionManager(temp_dir)
+            self.upload_fii_dii(manager)
+            payload = self.payload()
+            payload["allow_simulated_fallback"] = False
+            payload["require_live_data_for_paper"] = True
+
+            with self.assertRaisesRegex(ValueError, "Connect Paper Data Zerodha"):
+                manager.start_session(payload)
 
 
 if __name__ == "__main__":

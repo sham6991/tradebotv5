@@ -21,7 +21,7 @@ from .execution_safeguards import (
     validate_stoploss_limit_relationship,
 )
 from .margin_engine import calculate_intraday_equity_quantity
-from .order_request import emergency_market_order, entry_order, stoploss_order, target_order
+from .order_request import emergency_exit_order, entry_order, stoploss_order, target_order
 from .stoploss_pricing import stoploss_limit_prices
 
 
@@ -173,11 +173,12 @@ class IntradayOrderLifecycle:
                 continue
             symbol = order["symbol"]
             latest = self._latest_bar(market_data.get(symbol) or {})
-            if now - self._parse_time(order.get("created_at")) >= timedelta(seconds=60):
+            timeout_seconds = max(1, int(getattr(self.settings, "limit_order_timeout_seconds", 60) or 60))
+            if now - self._parse_time(order.get("created_at")) >= timedelta(seconds=timeout_seconds):
                 cancel = self.broker.cancel_order(order.get("broker_order_id"))
                 order["status"] = "CANCELLED"
                 order["updated_at"] = now.isoformat(timespec="seconds")
-                order["status_message"] = "Entry LIMIT unfilled for 60 seconds; cancellation confirmed."
+                order["status_message"] = f"Entry LIMIT unfilled for {timeout_seconds} seconds; cancellation confirmed."
                 self.database.update_order_status(order["local_order_id"], "CANCELLED", order["status_message"], cancel)
                 if hasattr(self.database, "save_order_event"):
                     self.database.save_order_event(self.session_id, order, "CANCELLED", order["status_message"], cancel)
@@ -186,10 +187,10 @@ class IntradayOrderLifecycle:
                 fill_price = float(order["price"])
                 order["status"] = "COMPLETE"
                 order["updated_at"] = now.isoformat(timespec="seconds")
-                order["status_message"] = "Entry LIMIT filled in paper simulation."
-                self.database.update_order_status(order["local_order_id"], "COMPLETE", order["status_message"], {"fill_price": fill_price})
+                order["status_message"] = self._paper_fill_message(order)
+                self.database.update_order_status(order["local_order_id"], "COMPLETE", order["status_message"], {"fill_price": fill_price, "paper_fill_model": getattr(self.settings, "paper_fill_model", "CANDLE_TOUCH_CONSERVATIVE")})
                 if hasattr(self.database, "save_order_event"):
-                    self.database.save_order_event(self.session_id, order, "COMPLETE", order["status_message"], {"fill_price": fill_price})
+                    self.database.save_order_event(self.session_id, order, "COMPLETE", order["status_message"], {"fill_price": fill_price, "paper_fill_model": getattr(self.settings, "paper_fill_model", "CANDLE_TOUCH_CONSERVATIVE")})
                 self._open_trade(order, fill_price, latest, now)
 
     def _process_active_trades(
@@ -249,9 +250,10 @@ class IntradayOrderLifecycle:
         self._refresh_active_trade_reference()
 
     def _open_trade(self, entry_order_row: dict, fill_price: float, _latest: dict, now: datetime, filled_quantity: int | None = None) -> None:
-        stop_prices = stoploss_limit_prices(entry_order_row["side"], entry_order_row["signal_stoploss"], self.settings.stoploss_buffer)
+        exit_plan = self._exit_plan_from_fill(entry_order_row, fill_price, _latest)
+        stop_prices = stoploss_limit_prices(entry_order_row["side"], exit_plan["stoploss"], self.settings.stoploss_buffer)
         quantity = int(filled_quantity or entry_order_row["quantity"])
-        target = float(entry_order_row["signal_target"])
+        target = float(exit_plan["target"])
         stop = stoploss_order(
             entry_order_row["symbol"],
             entry_order_row["side"],
@@ -304,6 +306,7 @@ class IntradayOrderLifecycle:
                 "health_score": 50.0,
                 "partial_exit_done": False,
                 "events": 0,
+                "exit_plan_source": exit_plan["source"],
             },
         }
         if self.settings.mode == MODE_REAL:
@@ -328,7 +331,7 @@ class IntradayOrderLifecycle:
             "health_score": 50.0,
             "r_multiple": 0.0,
             "reason": "Entry fill confirmed; protective orders initialized.",
-            "details": {"fill_price": fill_price, "quantity": quantity},
+            "details": {"fill_price": fill_price, "quantity": quantity, "exit_plan": exit_plan},
         }, now, status="APPLIED")
 
     def _close_trade(self, reason: str, exit_price: float, now: datetime, trade: dict[str, Any] | None = None) -> None:
@@ -459,6 +462,9 @@ class IntradayOrderLifecycle:
     def _modify_stoploss(self, trade: dict[str, Any], new_trigger: float, decision: dict[str, Any], now: datetime) -> bool:
         side = str(trade.get("side") or "").upper()
         current_trigger = float(trade.get("stoploss_trigger") or 0)
+        if self._modification_throttled(trade, "last_sl_modified_at", getattr(self.settings, "min_seconds_between_sl_modifications", 15), now):
+            decision.setdefault("details", {})["throttle"] = "SL modification skipped due to throttle."
+            return False
         if side == SIDE_LONG and new_trigger <= current_trigger:
             return False
         if side == SIDE_SHORT and new_trigger >= current_trigger:
@@ -516,6 +522,9 @@ class IntradayOrderLifecycle:
     def _modify_target(self, trade: dict[str, Any], new_target: float, decision: dict[str, Any], now: datetime) -> bool:
         side = str(trade.get("side") or "").upper()
         current_target = float(trade.get("target") or 0)
+        if self._modification_throttled(trade, "last_target_modified_at", getattr(self.settings, "min_seconds_between_target_modifications", 15), now):
+            decision.setdefault("details", {})["throttle"] = "Target modification skipped due to throttle."
+            return False
         if side == SIDE_LONG and new_target <= current_target:
             return False
         if side == SIDE_SHORT and new_target >= current_target:
@@ -566,7 +575,8 @@ class IntradayOrderLifecycle:
             self._record_management_event(trade, decision, now, status="SKIPPED")
             return
         if self.settings.mode == MODE_REAL:
-            self._record_management_event(trade, decision, now, status="WAITING_REAL_EXIT_IMPLEMENTATION")
+            decision["reason"] = "Real partial exit is not implemented. Full exit and SL/target management only."
+            self._record_management_event(trade, decision, now, status="REAL_PARTIAL_EXIT_BLOCKED")
             return
         side = trade["side"]
         pnl = (float(exit_price) - trade["entry_price"]) * quantity if side == SIDE_LONG else (trade["entry_price"] - float(exit_price)) * quantity
@@ -651,11 +661,15 @@ class IntradayOrderLifecycle:
                 {"exit_reason": exit_reason},
             )
         net_quantity = quantity if trade.get("side") == SIDE_LONG else -quantity
-        request = emergency_market_order(
+        request = emergency_exit_order(
             trade["symbol"],
             net_quantity,
             exchange=trade.get("exchange") or "NSE",
             session_id=self.session_id,
+            settings=self.settings,
+            ltp=decision.get("exit_price") or trade.get("last_ltp") or trade.get("entry_price"),
+            lower_circuit_limit=decision.get("lower_circuit_limit"),
+            upper_circuit_limit=decision.get("upper_circuit_limit"),
         )
         try:
             if hasattr(self.broker, "place_emergency_order"):
@@ -674,7 +688,7 @@ class IntradayOrderLifecycle:
             trade.get("side", ""),
             response=response,
             status=response.get("status", "PLACED"),
-            status_message=f"Real {exit_reason} market square-off sent; waiting for broker fill confirmation.",
+            status_message=f"Real {exit_reason} {request.order_type} square-off sent; waiting for broker fill confirmation.",
             role=role,
         )
         order["parent_trade_id"] = trade.get("trade_id", "")
@@ -1114,9 +1128,74 @@ class IntradayOrderLifecycle:
         price = float(order.get("price") or 0)
         high = float(latest.get("high") or latest.get("close") or 0)
         low = float(latest.get("low") or latest.get("close") or 0)
+        ltp = float(latest.get("ltp") or latest.get("close") or 0)
+        if str(getattr(self.settings, "paper_fill_model", "CANDLE_TOUCH_CONSERVATIVE")).upper() == "LTP_TOUCH":
+            if order.get("transaction_type") == "BUY":
+                return ltp <= price
+            return ltp >= price
         if order.get("transaction_type") == "BUY":
             return low <= price
         return high >= price
+
+    def _paper_fill_message(self, order: dict) -> str:
+        model = str(getattr(self.settings, "paper_fill_model", "CANDLE_TOUCH_CONSERVATIVE") or "").upper()
+        if model == "LTP_TOUCH":
+            return "Paper fill based on latest LTP touching the entry limit."
+        if order.get("transaction_type") == "BUY":
+            return "Paper fill based on candle low touching buy limit."
+        return "Paper fill based on candle high touching sell limit."
+
+    def _exit_plan_from_fill(self, entry_order_row: dict, fill_price: float, latest: dict) -> dict[str, Any]:
+        side = str(entry_order_row.get("side") or "").upper()
+        planned_entry = float(entry_order_row.get("price") or fill_price or 0)
+        planned_stop = float(entry_order_row.get("signal_stoploss") or 0)
+        planned_target = float(entry_order_row.get("signal_target") or 0)
+        tick_size = self._tick_size(entry_order_row["symbol"], entry_order_row["exchange"])
+        if not getattr(self.settings, "recalculate_exit_from_actual_fill", True):
+            return {
+                "stoploss": planned_stop,
+                "target": planned_target,
+                "risk_points": abs(planned_entry - planned_stop),
+                "source": "ORIGINAL_SIGNAL",
+            }
+        if side == SIDE_SHORT:
+            original_risk = planned_stop - planned_entry
+        else:
+            original_risk = planned_entry - planned_stop
+        average_range = float(latest.get("average_range_14") or latest.get("avg_range_14") or 0)
+        if average_range <= 0:
+            high = float(latest.get("high") or fill_price)
+            low = float(latest.get("low") or fill_price)
+            average_range = abs(high - low)
+        if original_risk <= 0:
+            original_risk = max(fill_price * 0.003, tick_size * 2)
+        risk_points = max(original_risk, average_range * 0.75 if average_range > 0 else 0, fill_price * 0.002, tick_size * 2)
+        rr = float(getattr(self.settings, "minimum_risk_reward", 1.5) or 1.5)
+        if side == SIDE_SHORT:
+            stoploss = fill_price + risk_points
+            target = fill_price - risk_points * rr
+        else:
+            stoploss = fill_price - risk_points
+            target = fill_price + risk_points * rr
+        return {
+            "stoploss": self._round_price(max(tick_size, stoploss), tick_size),
+            "target": self._round_price(max(tick_size, target), tick_size),
+            "risk_points": round(risk_points, 4),
+            "source": "ACTUAL_FILL_RECALCULATED",
+            "planned_entry": planned_entry,
+            "actual_entry": fill_price,
+        }
+
+    def _modification_throttled(self, trade: dict[str, Any], key: str, seconds: int, now: datetime) -> bool:
+        seconds = max(1, int(seconds or 1))
+        value = (trade.get("management") or {}).get(key)
+        if not value:
+            return False
+        try:
+            previous = datetime.fromisoformat(str(value))
+        except ValueError:
+            return False
+        return now - previous < timedelta(seconds=seconds)
 
     def _parse_time(self, value: str) -> datetime:
         try:

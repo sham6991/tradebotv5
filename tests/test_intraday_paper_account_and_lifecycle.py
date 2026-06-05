@@ -20,6 +20,8 @@ class IntradayPaperAccountAndLifecycleTests(unittest.TestCase):
             "minimum_risk_reward": 1.1,
             "ask_permission_before_entry": True,
             "paper_starting_balance": 100000,
+            "allow_simulated_fallback": True,
+            "require_live_data_for_paper": False,
         }
         payload.update(overrides)
         return payload

@@ -201,21 +201,41 @@ def _context_score(snapshot: StockSnapshot, settings: IntradaySettings, context:
 
 
 def _trade_plan(snapshot: StockSnapshot, settings: IntradaySettings, side: str) -> dict:
+    structure = snapshot.reason.get("price_structure") or {}
+    avg_range = float(structure.get("average_range_14") or 0)
+    swing_low = float(structure.get("previous_swing_low") or 0)
+    swing_high = float(structure.get("previous_swing_high") or 0)
+    tick_size = 0.05
+    intrabar_range = abs(float(snapshot.high or 0) - float(snapshot.low or 0))
+    range_risk = avg_range * 0.75 if avg_range > 0 else intrabar_range
     if side == SIDE_LONG:
-        entry = round(snapshot.ltp + settings.entry_limit_offset, 2)
-        stop = round(max(0.05, min(snapshot.low or entry * 0.995, snapshot.vwap or entry) - settings.stoploss_buffer), 2)
-        risk = max(entry - stop, 0.05)
-        target = round(entry + risk * settings.minimum_risk_reward + settings.target_buffer, 2)
+        entry = _round_tick(snapshot.ltp + settings.entry_limit_offset, tick_size)
+        fallback_stop = snapshot.low if snapshot.low > 0 else entry * 0.995
+        candidates = [value for value in (swing_low, snapshot.vwap if snapshot.vwap > 0 else fallback_stop, fallback_stop) if value > 0]
+        structure_stop = min(candidates or [entry * 0.995]) - settings.stoploss_buffer
+        minimum_risk = max(entry * 0.002, tick_size * 2)
+        risk = max(entry - structure_stop, range_risk, minimum_risk)
+        stop = _round_tick(max(tick_size, entry - risk), tick_size)
+        target = _round_tick(entry + risk * settings.minimum_risk_reward + settings.target_buffer, tick_size)
     elif side == SIDE_SHORT:
-        entry = round(snapshot.ltp - settings.entry_limit_offset, 2)
-        stop = round(max(snapshot.high or entry * 1.005, snapshot.vwap or entry) + settings.stoploss_buffer, 2)
-        risk = max(stop - entry, 0.05)
-        target = round(max(0.05, entry - risk * settings.minimum_risk_reward - settings.target_buffer), 2)
+        entry = _round_tick(snapshot.ltp - settings.entry_limit_offset, tick_size)
+        fallback_stop = snapshot.high if snapshot.high > 0 else entry * 1.005
+        candidates = [value for value in (swing_high, snapshot.vwap if snapshot.vwap > 0 else fallback_stop, fallback_stop) if value > 0]
+        structure_stop = max(candidates or [entry * 1.005]) + settings.stoploss_buffer
+        minimum_risk = max(entry * 0.002, tick_size * 2)
+        risk = max(structure_stop - entry, range_risk, minimum_risk)
+        stop = _round_tick(entry + risk, tick_size)
+        target = _round_tick(max(tick_size, entry - risk * settings.minimum_risk_reward - settings.target_buffer), tick_size)
     else:
         entry = stop = target = risk = 0.0
     reward = abs(target - entry)
     risk_reward = round(reward / risk, 2) if risk else 0.0
     return {"entry": entry, "stoploss": stop, "target": target, "risk": risk, "risk_reward": risk_reward}
+
+
+def _round_tick(value: float, tick_size: float = 0.05) -> float:
+    tick = tick_size if tick_size > 0 else 0.05
+    return round(round(float(value or 0) / tick) * tick, 2)
 
 
 def _missing_side_state(side: str) -> dict:

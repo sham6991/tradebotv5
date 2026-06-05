@@ -89,6 +89,11 @@ class IntradayDatabase:
                     candles_available INTEGER,
                     last_candle_time TEXT,
                     data_source TEXT,
+                    source_status TEXT,
+                    source_error TEXT,
+                    fetched_at TEXT,
+                    quote_timestamp TEXT,
+                    data_mode TEXT,
                     ema20 REAL,
                     ema50 REAL,
                     rsi REAL,
@@ -316,6 +321,11 @@ class IntradayDatabase:
                     "candles_available": "INTEGER",
                     "last_candle_time": "TEXT",
                     "data_source": "TEXT",
+                    "source_status": "TEXT",
+                    "source_error": "TEXT",
+                    "fetched_at": "TEXT",
+                    "quote_timestamp": "TEXT",
+                    "data_mode": "TEXT",
                 },
             )
             conn.executescript(
@@ -386,11 +396,12 @@ class IntradayDatabase:
                 """
                 INSERT INTO intraday_stock_snapshots
                 (session_id, timestamp, symbol, ltp, open, high, low, close, volume,
-                 candle_interval, candles_available, last_candle_time, data_source, ema20, ema50, rsi,
+                 candle_interval, candles_available, last_candle_time, data_source, source_status,
+                 source_error, fetched_at, quote_timestamp, data_mode, ema20, ema50, rsi,
                  vwap, poc, vah, val, relative_volume, spread, bid_qty, ask_qty, depth_imbalance,
                  liquidity_score, trap_score, news_score, options_bias_score, final_long_score,
                  final_short_score, selected_side, reason_json)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session_id,
@@ -406,6 +417,11 @@ class IntradayDatabase:
                     snapshot.get("candles_available"),
                     snapshot.get("last_candle_time"),
                     snapshot.get("data_source"),
+                    snapshot.get("source_status"),
+                    snapshot.get("source_error"),
+                    snapshot.get("fetched_at"),
+                    snapshot.get("quote_timestamp"),
+                    snapshot.get("data_mode"),
                     snapshot.get("ema20"),
                     snapshot.get("ema50"),
                     snapshot.get("rsi"),

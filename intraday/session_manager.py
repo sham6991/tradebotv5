@@ -21,6 +21,7 @@ from .constants import (
     SIDE_SHORT,
 )
 from .database import IntradayDatabase
+from .data_source_policy import IntradayDataSource, resolve_intraday_data_source
 from .entry_structure import analyse_entry_structure
 from .execution_safeguards import real_execution_blockers
 from .export_excel import export_session
@@ -47,7 +48,7 @@ from .trade_gates import event_blackout_blockers, signal_eligibility_blockers
 from .volume_profile import calculate_volume_profile
 from .vwap import calculate_vwap
 from .zerodha_broker import ZerodhaBroker
-from .order_request import emergency_market_order
+from .order_request import emergency_exit_order
 
 
 class IntradaySessionManager:
@@ -79,6 +80,24 @@ class IntradaySessionManager:
         self.last_context: dict[str, Any] = {}
         self.last_event_blackout_blockers: list[str] = []
         self.last_kill_switch_report: dict[str, Any] = {}
+        self.current_data_source_policy: dict[str, Any] = {
+            "source": IntradayDataSource.UNAVAILABLE,
+            "allowed": False,
+            "status": "IDLE",
+            "reason": "No intraday session is running.",
+            "requires_fetch": False,
+            "allow_simulated": False,
+            "blockers": [],
+            "warnings": [],
+            "order_execution": "Paper Simulation",
+            "data_mode": "candle_polling",
+        }
+        self.last_data_source_status: dict[str, Any] = dict(self.current_data_source_policy)
+        self.last_data_fetch_error = ""
+        self.cached_funds: dict[str, Any] | None = None
+        self.cached_funds_at = ""
+        self.cached_broker_health: dict[str, Any] = {}
+        self.last_broker_error = ""
 
     def default_settings(self) -> dict[str, Any]:
         sample = IntradaySettings(
@@ -103,6 +122,12 @@ class IntradaySessionManager:
         if blocker:
             raise ValueError(blocker)
         self._require_fii_dii_upload_for_live_mode(settings.mode)
+        data_policy = self._data_policy_for_payload(settings, payload)
+        if not data_policy.get("allowed"):
+            raise ValueError("; ".join(data_policy.get("blockers") or [data_policy.get("reason") or "Intraday market data source is unavailable."]))
+        self.current_data_source_policy = data_policy
+        self.last_data_source_status = dict(data_policy)
+        self.last_data_fetch_error = ""
         if settings.mode == MODE_PAPER:
             if payload.get("reset_paper_balance"):
                 self.paper_account.reset(settings.paper_starting_balance)
@@ -116,6 +141,7 @@ class IntradaySessionManager:
         self.broker = self._build_broker(settings)
         instrument_rows = self._validate_stocks_against_broker(settings)
         self.instrument_rows = instrument_rows
+        self._refresh_cached_funds()
         self.mode_manager.start_session(settings.mode)
         self.audit = AuditLogger(self.database, self.session_id)
         self.lifecycle = IntradayOrderLifecycle(
@@ -145,8 +171,9 @@ class IntradaySessionManager:
                 **settings.locked_dict(),
                 **formula_metadata(),
                 "fii_dii_upload": upload_status(self.uploaded_fii_dii),
+                "data_source_policy": self.current_data_source_policy,
             },
-            "starting_balance": self.broker.get_funds().get("available", settings.paper_starting_balance),
+            "starting_balance": (self.cached_funds or {}).get("available", settings.paper_starting_balance),
             "status": self.status,
         })
         for stock in settings.stocks:
@@ -210,7 +237,7 @@ class IntradaySessionManager:
             "algo_adjustment": context.get("algo_adjustment", ""),
         })
         snapshots = []
-        market_data = payload.get("market_data") or self._load_session_candles(payload)
+        market_data = self._market_data_for_payload(payload)
         self.last_market_data = market_data
         for stock in settings.stocks:
             row = market_data.get(stock.symbol) if isinstance(market_data, dict) else None
@@ -274,7 +301,7 @@ class IntradaySessionManager:
             when = self._payload_time(payload) or datetime.now()
             if payload.get("force_entry_timeout"):
                 when = when + timedelta(seconds=61)
-            market_data = payload.get("market_data") or self._load_session_candles(payload)
+            market_data = self._market_data_for_payload(payload)
             self.last_market_data = market_data
             self.lifecycle.process_market_data(market_data, now=when, snapshots=self.snapshots)
             self._sync_risk_from_lifecycle()
@@ -293,6 +320,13 @@ class IntradaySessionManager:
         close_values = [float(candle.get("close") or 0) for candle in candles if candle.get("close") not in ("", None)]
         latest = candles[-1] if candles else row
         ltp = float(row.get("ltp") or latest.get("close") or 0)
+        source = str(row.get("source") or "").strip()
+        if not source and settings.mode in {MODE_PAPER, MODE_REAL}:
+            source = "unknown"
+        elif not source:
+            source = IntradayDataSource.PROVIDED
+        source_error = str(row.get("source_error") or row.get("quote_error") or "")
+        source_status = str(row.get("source_status") or ("WARNING" if source_error else "OK")).upper()
         ema20_values = ema(close_values or [ltp], settings.ema20_period)
         ema50_values = ema(close_values or [ltp], settings.ema50_period)
         rsi_values = rsi(close_values or [ltp], settings.rsi_period)
@@ -304,6 +338,7 @@ class IntradaySessionManager:
         long_trap = detect_trap(candles, SIDE_LONG, rvol, liquidity["spread_pct"])
         short_trap = detect_trap(candles, SIDE_SHORT, rvol, liquidity["spread_pct"])
         trap_probe = long_trap if float(long_trap.get("trap_score") or 0) >= float(short_trap.get("trap_score") or 0) else short_trap
+        price_structure = _price_structure(candles)
         snapshot = StockSnapshot(
             symbol=symbol,
             exchange=exchange,
@@ -316,7 +351,12 @@ class IntradaySessionManager:
             candle_interval=settings.candle_interval,
             candles_available=len(candles),
             last_candle_time=row.get("last_candle_time") or candle_timestamp(latest),
-            data_source=row.get("source") or "provided",
+            data_source=source,
+            source_status=source_status,
+            source_error=source_error,
+            fetched_at=str(row.get("fetched_at") or ""),
+            quote_timestamp=str(row.get("quote_timestamp") or row.get("last_tick_time") or ""),
+            data_mode=str(row.get("data_mode") or "candle_polling"),
             ema20=ema20_values[-1] if ema20_values else ltp,
             ema50=ema50_values[-1] if ema50_values else ltp,
             rsi=rsi_values[-1] if rsi_values else 50.0,
@@ -344,6 +384,16 @@ class IntradaySessionManager:
             "trap": trap_probe,
             "traps": {"long": long_trap, "short": short_trap},
             "market_context": context_alignment(payload),
+            "data_source": {
+                "source": source,
+                "source_status": source_status,
+                "source_error": source_error,
+                "fetched_at": row.get("fetched_at") or "",
+                "quote_timestamp": row.get("quote_timestamp") or row.get("last_tick_time") or "",
+                "data_mode": row.get("data_mode") or "candle_polling",
+                "depth_source": row.get("depth_source") or "",
+            },
+            "price_structure": price_structure,
         }
         snapshot.reason["entry_structure"] = analyse_entry_structure(
             candles,
@@ -539,7 +589,16 @@ class IntradaySessionManager:
             if str(position.get("product") or "MIS").upper() != "MIS":
                 continue
             try:
-                request = emergency_market_order(symbol, qty, exchange=str(position.get("exchange") or "NSE").upper(), session_id=self.session_id)
+                request = emergency_exit_order(
+                    symbol,
+                    qty,
+                    exchange=str(position.get("exchange") or "NSE").upper(),
+                    session_id=self.session_id,
+                    settings=self.settings,
+                    ltp=position.get("last_price") or position.get("average_price") or position.get("close"),
+                    lower_circuit_limit=position.get("lower_circuit_limit"),
+                    upper_circuit_limit=position.get("upper_circuit_limit"),
+                )
                 if hasattr(self.broker, "place_emergency_order"):
                     response = self.broker.place_emergency_order(request)
                 else:
@@ -614,13 +673,19 @@ class IntradaySessionManager:
             "settings": self.settings.locked_dict() if self.settings else None,
             "snapshots": [snapshot.to_dict() for snapshot in self.snapshots],
             "last_market_data_symbols": sorted(self.last_market_data.keys()),
+            "data_source_policy": dict(self.current_data_source_policy),
+            "data_source_status": dict(self.last_data_source_status),
+            "last_data_fetch_error": self.last_data_fetch_error,
             "latest_news": list(self.latest_news),
             "latest_news_status": dict(self.latest_news_status),
             "event_blackout_blockers": list(self.last_event_blackout_blockers),
             "pending_signal": self.pending_signal.to_dict() if self.pending_signal else None,
             "last_signal": self.last_signal.to_dict() if self.last_signal else None,
             "risk_state": self.risk.state.__dict__ if self.risk else None,
-            "funds": self.broker.get_funds() if self.broker else None,
+            "funds": dict(self.cached_funds or {}) if self.cached_funds is not None else None,
+            "cached_funds_at": self.cached_funds_at,
+            "cached_broker_health": dict(self.cached_broker_health),
+            "last_broker_error": self.last_broker_error,
             "paper_account": self.paper_account.snapshot(),
             "active_trade": self.lifecycle.active_trade if self.lifecycle else None,
             "active_trades": list(self.lifecycle.active_trades.values()) if self.lifecycle else [],
@@ -637,6 +702,23 @@ class IntradaySessionManager:
 
     def paper_account_status(self) -> dict[str, Any]:
         return self.paper_account.snapshot()
+
+    def _refresh_cached_funds(self) -> dict[str, Any]:
+        if not self.broker:
+            self.cached_funds = None
+            self.cached_funds_at = ""
+            return {}
+        try:
+            funds = dict(self.broker.get_funds() or {})
+            self.cached_funds = funds
+            self.cached_funds_at = datetime.now().isoformat(timespec="seconds")
+            self.cached_broker_health = {"ok": True, "updated_at": self.cached_funds_at}
+            self.last_broker_error = ""
+            return funds
+        except Exception as exc:
+            self.last_broker_error = str(exc)
+            self.cached_broker_health = {"ok": False, "error": self.last_broker_error, "updated_at": datetime.now().isoformat(timespec="seconds")}
+            return dict(self.cached_funds or {})
 
     def update_paper_account(self, payload: dict[str, Any]) -> dict[str, Any]:
         if self.status == SESSION_STATUS_RUNNING:
@@ -690,14 +772,24 @@ class IntradaySessionManager:
         }
 
     def _validate_stocks_against_broker(self, settings: IntradaySettings) -> dict[str, dict[str, Any]]:
+        client = self._client_for_mode(settings.mode)
         try:
-            instruments = self.broker.get_instruments() if self.broker else []
+            if settings.mode == MODE_PAPER and client:
+                instruments = _client_instruments(client)
+            elif settings.mode == MODE_REAL and client:
+                instruments = _client_instruments(client)
+            else:
+                instruments = self.broker.get_instruments() if self.broker else []
         except Exception as exc:
             if settings.mode == MODE_REAL:
                 raise ValueError(f"Real intraday stock validation failed before session start: {exc}") from exc
+            if settings.mode == MODE_PAPER and not settings.allow_simulated_fallback:
+                raise ValueError(f"Paper Data stock validation failed before session start: {exc}") from exc
             instruments = []
         if settings.mode == MODE_REAL and not instruments:
             raise ValueError("Real intraday stock validation failed before session start: instrument list is unavailable.")
+        if settings.mode == MODE_PAPER and client and not instruments and not settings.allow_simulated_fallback:
+            raise ValueError("Paper Data stock validation failed before session start: instrument list is unavailable.")
         if not instruments:
             return {}
         by_key = {}
@@ -714,6 +806,9 @@ class IntradaySessionManager:
             if stock.key not in by_key:
                 suggestions = symbols.get(stock.symbol) or _closest_symbols(stock.symbol, by_key.keys())
                 invalid.append(f"{stock.key} is invalid or unavailable. Suggestions: {', '.join(suggestions[:5]) or 'none'}")
+                continue
+            if settings.mode in {MODE_PAPER, MODE_REAL} and self.current_data_source_policy.get("requires_fetch") and by_key[stock.key].get("instrument_token") in ("", None):
+                invalid.append(f"Instrument token unavailable for {stock.key}. Cannot fetch Zerodha {'Paper' if settings.mode == MODE_PAPER else 'Real'} Data.")
         if invalid:
             raise ValueError("Stock validation failed before session start: " + " | ".join(invalid))
         return by_key
@@ -725,34 +820,135 @@ class IntradaySessionManager:
         row = self.last_market_data.get(signal.symbol) if isinstance(self.last_market_data, dict) else {}
         return real_execution_blockers(signal, row or {}, settings, broker=self.broker, now=datetime.now())
 
+    def _client_for_mode(self, mode: str):
+        mode = str(mode or "").upper()
+        if mode == MODE_REAL:
+            return self.zerodha_client_provider(MODE_REAL) or self.zerodha_client_provider("LIVE")
+        if mode == MODE_PAPER:
+            return self.zerodha_client_provider(MODE_PAPER) or self.zerodha_client_provider("PAPER")
+        return None
+
+    def _data_policy_for_payload(self, settings: IntradaySettings, payload: dict[str, Any]) -> dict[str, Any]:
+        return resolve_intraday_data_source(
+            settings.mode,
+            payload,
+            paper_connected=bool(self._client_for_mode(MODE_PAPER)),
+            live_connected=bool(self._client_for_mode(MODE_REAL)),
+            settings=settings,
+        )
+
+    def _market_data_for_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = self.settings
+        if not settings:
+            return {}
+        if payload.get("market_data"):
+            policy = self._data_policy_for_payload(settings, payload)
+            if not policy.get("allowed"):
+                raise ValueError("; ".join(policy.get("blockers") or [policy.get("reason") or "Provided market data is not allowed."]))
+            self.last_data_source_status = dict(policy)
+            return self._label_market_data(payload.get("market_data") or {}, policy)
+        return self._load_session_candles(payload)
+
     def _load_session_candles(self, payload: dict[str, Any]) -> dict[str, Any]:
         settings = self.settings
         if not settings:
             return {}
+        policy = self._data_policy_for_payload(settings, payload)
+        if not policy.get("allowed"):
+            self.last_data_source_status = dict(policy)
+            raise ValueError("; ".join(policy.get("blockers") or [policy.get("reason") or "Intraday market data source is unavailable."]))
         now = datetime.now()
         from_time, close_time = market_open_close(now.date().isoformat())
         to_time = min(max(now, from_time), close_time)
-        mode_key = MODE_REAL if settings.mode == MODE_REAL else MODE_PAPER
-        provider_key = "LIVE" if settings.mode == MODE_REAL else "PAPER"
-        client = self.zerodha_client_provider(mode_key) or self.zerodha_client_provider(provider_key)
+        client = self._client_for_mode(settings.mode)
         stocks = [stock.__dict__ for stock in settings.stocks]
-        if client:
+        if policy.get("requires_fetch"):
+            if not client:
+                self.last_data_source_status = {**policy, "status": "ERROR", "source_error": policy.get("reason") or "Zerodha client is not connected."}
+                raise ValueError(policy.get("reason") or "Zerodha client is not connected.")
             data = fetch_zerodha_stock_candles(
                 client,
                 stocks,
                 from_time,
                 to_time,
                 interval=settings.candle_interval,
-                source=f"{settings.mode.lower()}_zerodha_live",
+                source=policy["source"],
             )
-            if data:
-                return data
+            usable, errors = self._usable_fetch_data(data)
+            if usable:
+                status = "WARNING" if errors else "OK"
+                self.last_data_fetch_error = "; ".join(errors)
+                self.last_data_source_status = {**policy, "status": status, "source_error": self.last_data_fetch_error, "fetched_at": datetime.now().isoformat(timespec="seconds")}
+                return self._label_market_data(usable, self.last_data_source_status)
+            error = "; ".join(errors) or f"Could not fetch Zerodha {'Real' if settings.mode == MODE_REAL else 'Paper'} Data."
+            self.last_data_fetch_error = error
+            if settings.mode == MODE_PAPER and settings.allow_simulated_fallback:
+                policy = {
+                    **policy,
+                    "source": IntradayDataSource.SIMULATED_FALLBACK,
+                    "status": "WARNING",
+                    "reason": "Zerodha Paper Data fetch failed; simulated fallback is explicitly enabled.",
+                    "source_error": error,
+                    "allow_simulated": True,
+                    "warnings": list(policy.get("warnings") or []) + [error],
+                }
+                self.last_data_source_status = policy
+                return self._simulated_market_data(stocks, now, policy)
+            self.last_data_source_status = {**policy, "status": "ERROR", "source_error": error}
+            if settings.mode == MODE_REAL:
+                raise ValueError(f"Could not fetch Zerodha Real Data. {error}")
+            raise ValueError(f"Could not fetch Zerodha Paper Data for selected symbols. Simulated fallback is disabled. {error}")
         if settings.mode in {MODE_PAPER, MODE_BACKTEST, MODE_REPLAY}:
-            simulated = generate_stock_day(stocks, now.date().isoformat(), interval=settings.candle_interval)
-            cursor = min(max_candle_count(simulated) - 1, self.live_candle_cursor)
-            self.live_candle_cursor = max(0, min(max_candle_count(simulated) - 1, cursor + 1))
-            return market_slice(simulated, max(0, cursor), lookback=0)
+            if settings.mode == MODE_PAPER and not policy.get("allow_simulated"):
+                self.last_data_source_status = {**policy, "status": "ERROR"}
+                raise ValueError("Paper Data Zerodha is not connected. Connect Paper Data Zerodha or enable simulated fallback for testing.")
+            self.last_data_source_status = dict(policy)
+            return self._simulated_market_data(stocks, now, policy)
         return {}
+
+    def _usable_fetch_data(self, data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        usable = {}
+        errors = []
+        settings = self.settings
+        selected = {stock.symbol for stock in (settings.stocks if settings else [])}
+        for symbol in selected:
+            row = dict((data or {}).get(symbol) or {})
+            if row.get("source_status") == "ERROR" or not row.get("candles"):
+                errors.append(row.get("source_error") or f"No candles returned for {symbol}.")
+                continue
+            usable[symbol] = row
+            if row.get("quote_error"):
+                errors.append(f"{symbol} quote warning: {row.get('quote_error')}")
+        for symbol in selected - set((data or {}).keys()):
+            errors.append(f"No data returned for {symbol}.")
+        return usable, errors
+
+    def _simulated_market_data(self, stocks: list[dict[str, Any]], now: datetime, policy: dict[str, Any]) -> dict[str, Any]:
+        # Simulated fallback is never used silently for live paper trading.
+        simulated = generate_stock_day(stocks, now.date().isoformat(), interval=self.settings.candle_interval if self.settings else "minute")
+        cursor = min(max_candle_count(simulated) - 1, self.live_candle_cursor)
+        self.live_candle_cursor = max(0, min(max_candle_count(simulated) - 1, cursor + 1))
+        return self._label_market_data(market_slice(simulated, max(0, cursor), lookback=0), policy)
+
+    def _label_market_data(self, market_data: dict[str, Any], policy: dict[str, Any]) -> dict[str, Any]:
+        labeled = {}
+        fetched_at = policy.get("fetched_at") or datetime.now().isoformat(timespec="seconds")
+        for symbol, row in dict(market_data or {}).items():
+            row = dict(row or {})
+            source = policy.get("source") or IntradayDataSource.PROVIDED
+            if source not in {IntradayDataSource.PROVIDED, IntradayDataSource.PROVIDED_TEST_DATA}:
+                row["source"] = source
+            else:
+                row.setdefault("source", source)
+            row.setdefault("source_status", policy.get("status") or "OK")
+            row.setdefault("source_error", policy.get("source_error") or "")
+            row.setdefault("data_mode", policy.get("data_mode") or "candle_polling")
+            row.setdefault("fetched_at", fetched_at)
+            if row.get("candles") and not row.get("last_candle_time"):
+                row["last_candle_time"] = candle_timestamp(row["candles"][-1])
+            row.setdefault("candles_available", len(row.get("candles") or []))
+            labeled[str(symbol).upper()] = row
+        return labeled
 
     def _payload_time(self, payload: dict[str, Any]) -> datetime | None:
         value = payload.get("replay_time") or payload.get("current_time")
@@ -799,6 +995,48 @@ def _closest_symbols(symbol: str, keys) -> list[str]:
     prefix = [candidate for candidate in candidates if candidate.startswith(symbol[:3])]
     contains = [candidate for candidate in candidates if symbol and symbol in candidate and candidate not in prefix]
     return prefix[:5] + contains[: max(0, 5 - len(prefix))]
+
+
+def _client_instruments(client) -> list[dict[str, Any]]:
+    rows = []
+    if not client:
+        return rows
+    for exchange in ("NSE", "BSE"):
+        try:
+            part = client.instruments(exchange)
+        except TypeError:
+            try:
+                part = client.instruments()
+            except Exception:
+                part = []
+        except Exception:
+            part = []
+        rows.extend(list(part or []))
+    return rows
+
+
+def _price_structure(candles: list[dict[str, Any]]) -> dict[str, Any]:
+    completed = list(candles or [])
+    if len(completed) > 1:
+        completed = completed[:-1]
+    recent = completed[-5:]
+    ranges = [
+        max(0.0, _float(row.get("high")) - _float(row.get("low")))
+        for row in completed[-14:]
+        if row.get("high") not in ("", None) and row.get("low") not in ("", None)
+    ]
+    return {
+        "average_range_14": sum(ranges) / len(ranges) if ranges else 0.0,
+        "previous_swing_low": min((_float(row.get("low")) for row in recent), default=0.0),
+        "previous_swing_high": max((_float(row.get("high")) for row in recent), default=0.0),
+    }
+
+
+def _float(value: Any) -> float:
+    try:
+        return float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _is_selected_intraday_order(order: dict[str, Any], selected_symbols: set[str]) -> bool:

@@ -159,3 +159,54 @@ def emergency_market_order(
         price=None,
         tag=session_tag(session_id or datetime.now().strftime("%H%M%S"), "EMG"),
     )
+
+
+def emergency_exit_order(
+    symbol: str,
+    net_quantity: int,
+    exchange: str = EXCHANGE_NSE,
+    session_id: str = "",
+    settings: Any = None,
+    ltp: Any = None,
+    lower_circuit_limit: Any = None,
+    upper_circuit_limit: Any = None,
+) -> OrderRequest:
+    order_type = str(getattr(settings, "emergency_exit_order_type", "AGGRESSIVE_LIMIT") or "AGGRESSIVE_LIMIT").upper()
+    if order_type == "MARKET":
+        return emergency_market_order(symbol, net_quantity, exchange=exchange, session_id=session_id)
+    quantity = abs(int(net_quantity or 0))
+    if quantity <= 0:
+        raise ValueError("Emergency square-off quantity must be non-zero.")
+    transaction = "SELL" if int(net_quantity or 0) > 0 else "BUY"
+    ltp_value = _positive_float(ltp)
+    if ltp_value <= 0:
+        raise ValueError("Emergency aggressive LIMIT requires latest LTP; MARKET must be explicitly selected otherwise.")
+    slip = _positive_float(getattr(settings, "emergency_slippage_points", 0.0))
+    if slip <= 0:
+        slip = max(0.10, ltp_value * 0.002)
+    if transaction == "SELL":
+        price = ltp_value - slip
+        lower = _positive_float(lower_circuit_limit)
+        if lower > 0:
+            price = max(lower, price)
+    else:
+        price = ltp_value + slip
+        upper = _positive_float(upper_circuit_limit)
+        if upper > 0:
+            price = min(upper, price)
+    return OrderRequest(
+        exchange=exchange,
+        tradingsymbol=str(symbol).upper(),
+        transaction_type=transaction,
+        quantity=quantity,
+        order_type="LIMIT",
+        price=round(price, 2),
+        tag=session_tag(session_id or datetime.now().strftime("%H%M%S"), "EMG"),
+    )
+
+
+def _positive_float(value: Any) -> float:
+    try:
+        return max(0.0, float(value or 0))
+    except (TypeError, ValueError):
+        return 0.0

@@ -84,7 +84,7 @@ function applyModeLock() {
   $("#mode").disabled = running || Boolean(lockedMode);
   if (lockedMode === "PAPER") $("#mode").value = "PAPER";
   if (lockedMode === "REAL") $("#mode").value = "REAL";
-  ["#chart-interval", "#permission", "#side", "#min-score", "#min-rr", "#max-loss", "#max-trades", "#max-open-trades", "#risk-pct", "#capital-pct", "#estimated-leverage", "#max-quantity", "#max-capital", "#confirm-real", "#live-news-enabled", "#active-management-enabled", "#breakeven-enabled", "#trailing-enabled", "#partial-exit-enabled", "#trailing-method", "#paper-balance-input", "#save-paper-balance", "#reset-paper-balance"].forEach((selector) => {
+  ["#chart-interval", "#limit-timeout", "#permission", "#side", "#min-score", "#min-rr", "#max-loss", "#max-trades", "#max-open-trades", "#risk-pct", "#capital-pct", "#estimated-leverage", "#max-quantity", "#max-capital", "#confirm-real", "#auto-real-orders-confirmed", "#live-news-enabled", "#active-management-enabled", "#breakeven-enabled", "#trailing-enabled", "#partial-exit-enabled", "#allow-simulated-fallback", "#recalculate-exit-fill", "#trailing-method", "#paper-fill-model", "#emergency-exit-order-type", "#paper-balance-input", "#save-paper-balance", "#reset-paper-balance"].forEach((selector) => {
     const field = $(selector);
     if (field) field.disabled = running;
   });
@@ -134,6 +134,7 @@ function payloadFromForm() {
     order_mode: "LIMIT_ONLY",
     side_permission: side,
     candle_interval: $("#chart-interval").value,
+    limit_order_timeout_seconds: Number($("#limit-timeout").value || 30),
     minimum_entry_score: Number($("#min-score").value || 70),
     minimum_risk_reward: Number($("#min-rr").value || 1.5),
     max_daily_loss: Number($("#max-loss").value || 2500),
@@ -148,7 +149,14 @@ function payloadFromForm() {
     breakeven_sl_enabled: $("#breakeven-enabled").checked,
     active_trailing_sl_enabled: $("#trailing-enabled").checked,
     trailing_method: $("#trailing-method").value,
+    paper_fill_model: $("#paper-fill-model").value,
+    emergency_exit_order_type: $("#emergency-exit-order-type").value,
     partial_exit_enabled: $("#partial-exit-enabled").checked,
+    allow_simulated_fallback: $("#allow-simulated-fallback").checked,
+    require_live_data_for_paper: !$("#allow-simulated-fallback").checked,
+    show_data_source_warning: true,
+    status_refresh_uses_cached_broker_state: true,
+    recalculate_exit_from_actual_fill: $("#recalculate-exit-fill").checked,
     breakeven_trigger_r: 1,
     trail_activation_r: 1.2,
     partial_exit_trigger_r: 1,
@@ -160,7 +168,7 @@ function payloadFromForm() {
     live_news_enabled: $("#live-news-enabled").checked,
     paper_starting_balance: Number(state.accountStatus?.paper?.funds?.available || 100000),
     confirm_real_mode: $("#confirm-real").checked,
-    auto_real_orders_confirmed: false,
+    auto_real_orders_confirmed: $("#auto-real-orders-confirmed").checked,
   };
 }
 
@@ -203,6 +211,7 @@ function applyPayloadToForm(payload = {}) {
   setFieldValue("#permission", payload.ask_permission_before_entry === false ? "no" : "yes");
   setFieldValue("#side", payload.side_permission || (payload.allow_long === false ? "SHORT_ONLY" : payload.allow_short === false ? "LONG_ONLY" : "BOTH"));
   setFieldValue("#chart-interval", payload.candle_interval || "minute");
+  setFieldValue("#limit-timeout", payload.limit_order_timeout_seconds || 30);
   setFieldValue("#min-score", payload.minimum_entry_score || 70);
   setFieldValue("#min-rr", payload.minimum_risk_reward || payload.min_risk_reward || 1.5);
   setFieldValue("#max-loss", payload.max_daily_loss || 2500);
@@ -214,11 +223,16 @@ function applyPayloadToForm(payload = {}) {
   setFieldValue("#max-quantity", payload.max_quantity_per_trade || 0);
   setFieldValue("#max-capital", payload.max_capital_per_trade || 25000);
   setFieldValue("#trailing-method", payload.trailing_method || "HYBRID");
+  setFieldValue("#paper-fill-model", payload.paper_fill_model || "CANDLE_TOUCH_CONSERVATIVE");
+  setFieldValue("#emergency-exit-order-type", payload.emergency_exit_order_type || "AGGRESSIVE_LIMIT");
   setChecked("#live-news-enabled", payload.live_news_enabled !== false);
   setChecked("#active-management-enabled", payload.active_trade_management_enabled !== false);
   setChecked("#breakeven-enabled", payload.breakeven_sl_enabled !== false);
   setChecked("#trailing-enabled", payload.active_trailing_sl_enabled !== false);
   setChecked("#partial-exit-enabled", Boolean(payload.partial_exit_enabled));
+  setChecked("#allow-simulated-fallback", Boolean(payload.allow_simulated_fallback));
+  setChecked("#recalculate-exit-fill", payload.recalculate_exit_from_actual_fill !== false);
+  setChecked("#auto-real-orders-confirmed", Boolean(payload.auto_real_orders_confirmed));
   updateWorkflowForModeWithoutLock();
 }
 
@@ -341,6 +355,7 @@ function renderStatus(data) {
   renderNews(data.latest_news || [], data.snapshots || [], data.latest_news_status || {});
   renderOrders(data.order_history || []);
   renderFiiDiiStatus(data.fii_dii_upload);
+  renderDataSource(data);
   $("#journal-output").textContent = JSON.stringify({
     status: data.status,
     session_id: data.session_id,
@@ -348,6 +363,7 @@ function renderStatus(data) {
     funds,
     export_path: data.export_path || "",
     event_blackout_blockers: data.event_blackout_blockers || [],
+    data_source_status: data.data_source_status || {},
     kill_switch_report: data.kill_switch_report || {},
     engine,
   }, null, 2);
@@ -361,6 +377,80 @@ function renderStatus(data) {
     stopStatusPolling();
   }
   applyModeLock();
+}
+
+function renderDataSource(data = {}) {
+  const policy = data.data_source_status || data.data_source_policy || {};
+  const snapshots = data.snapshots || [];
+  const first = snapshots[0] || {};
+  const source = policy.source || first.data_source || "data_unavailable";
+  const status = policy.status || first.source_status || "ERROR";
+  const sourceError = policy.source_error || first.source_error || data.last_data_fetch_error || "";
+  const mode = data.settings?.mode || $("#mode")?.value || "";
+  const orderExecution = policy.order_execution || (mode === "REAL" ? "Real Zerodha Orders" : "Paper Simulation");
+  const warning = (policy.warnings || []).join("; ") || (source === "simulated_fallback" ? "Simulated fallback data is active. This is only for testing." : "");
+  const badge = $("#data-source-badge");
+  if (badge) {
+    badge.textContent = sourceLabel(source);
+    badge.className = status === "ERROR" ? "negative" : status === "WARNING" ? "neutral" : "positive";
+  }
+  const grid = $("#data-source-grid");
+  if (grid) {
+    const fields = [
+      ["Market Data", sourceLabel(source)],
+      ["Order Execution", orderExecution],
+      ["Data Mode", "Candle Polling"],
+      ["Source Status", status],
+      ["Source Error", sourceError || "None"],
+      ["Last Candle", first.last_candle_time || ""],
+      ["Quote Time", first.quote_timestamp || ""],
+      ["Paper Fill Model", paperFillLabel(data.settings?.paper_fill_model || $("#paper-fill-model")?.value)],
+      ["Real Auto Orders", data.settings?.auto_real_orders_confirmed ? "Confirmed" : "Not confirmed"],
+      ["Emergency Exit", data.settings?.emergency_exit_order_type || $("#emergency-exit-order-type")?.value || "AGGRESSIVE_LIMIT"],
+    ];
+    grid.innerHTML = fields.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+  }
+  const warningTarget = $("#data-source-warning");
+  if (warningTarget) {
+    warningTarget.textContent = sourceError ? `Data fetch error: ${sourceError}` : warning;
+  }
+}
+
+function renderUnavailableSource(message) {
+  renderDataSource({
+    data_source_status: {
+      source: "data_unavailable",
+      status: "ERROR",
+      source_error: message,
+      order_execution: $("#mode")?.value === "REAL" ? "Real Zerodha Orders" : "Paper Simulation",
+      warnings: [],
+    },
+    snapshots: [],
+    settings: { mode: $("#mode")?.value || "PAPER", paper_fill_model: $("#paper-fill-model")?.value, emergency_exit_order_type: $("#emergency-exit-order-type")?.value },
+  });
+}
+
+function sourceLabel(source) {
+  const labels = {
+    zerodha_paper_data: "Zerodha Paper Data",
+    zerodha_real_data: "Zerodha Real Data",
+    zerodha_cached: "Zerodha Cached",
+    provided: "Provided Test Data",
+    provided_test_data: "Provided Test Data",
+    simulated_fallback: "Simulated Fallback",
+    backtest_data: "Backtest Data",
+    replay_data: "Replay Data",
+    simulated_backtest_data: "Simulated Backtest Data",
+    data_unavailable: "Data Unavailable",
+    unknown: "Unknown",
+  };
+  return labels[source] || source || "Data Unavailable";
+}
+
+function paperFillLabel(value) {
+  const text = String(value || "CANDLE_TOUCH_CONSERVATIVE").toUpperCase();
+  if (text === "LTP_TOUCH") return "LTP touch simulation";
+  return "Candle OHLC simulation";
 }
 
 function renderFiiDiiStatus(upload) {
@@ -392,7 +482,7 @@ function renderWatch(rows) {
       <td>${Number(row.volume || 0).toLocaleString()}</td>
       <td>${Number(row.candles_available || 0).toLocaleString()}</td>
       <td>${String(row.last_candle_time || "").replace("T", " ").slice(0, 16)}</td>
-      <td>${row.data_source || ""}</td>
+      <td>${sourceLabel(row.data_source || "")}${row.source_status && row.source_status !== "OK" ? ` (${row.source_status})` : ""}</td>
       <td>${money(row.relative_volume)}</td>
       <td>${money(row.vwap)}</td>
       <td>${money(row.ema20)}</td>
@@ -735,6 +825,7 @@ async function init() {
       await updatePaperBalance(false);
     } catch (error) {
       $("#status-message").textContent = error.message;
+      renderUnavailableSource(error.message);
     }
   });
 
@@ -789,6 +880,7 @@ async function init() {
       startStatusPolling();
     } catch (error) {
       $("#journal-output").textContent = error.message;
+      renderUnavailableSource(error.message);
     }
   });
 
@@ -837,6 +929,7 @@ async function init() {
     await refreshAccounts();
   });
 
+  window.addEventListener("beforeunload", stopStatusPolling);
   const today = new Date().toISOString().slice(0, 10);
   $("#backtest-date").value = today;
 }

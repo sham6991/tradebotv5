@@ -27,13 +27,14 @@ class FakeKite:
                 "exchange": "NSE",
                 "product": "MIS",
                 "quantity": 10,
+                "last_price": 100.0,
             }
         ]
         self.placed = []
 
     def place_order(self, **params):
         self.placed.append(dict(params))
-        if params.get("tradingsymbol") == "INFY" and params.get("order_type") == "MARKET":
+        if params.get("tradingsymbol") == "INFY" and params.get("transaction_type") == "SELL":
             self.position_rows[0]["quantity"] = 0
             self.order_rows.append({
                 "order_id": "EMG1",
@@ -76,11 +77,12 @@ class FakeZerodhaClient:
                 "exchange": "NSE",
                 "tradingsymbol": symbol,
                 "name": symbol,
+                "instrument_token": str(index + 1),
                 "tick_size": 0.05,
                 "segment": "NSE",
                 "mis_allowed": 1,
             }
-            for symbol in SYMBOLS
+            for index, symbol in enumerate(SYMBOLS)
         ]
 
     def orders(self):
@@ -106,9 +108,11 @@ def payload(**overrides):
         "stocks": SYMBOLS,
         "minimum_entry_score": 1,
         "minimum_risk_reward": 1.1,
-        "ask_permission_before_entry": False,
-        "max_quantity_per_trade": 1,
-    }
+            "ask_permission_before_entry": False,
+            "max_quantity_per_trade": 1,
+            "allow_simulated_fallback": True,
+            "require_live_data_for_paper": False,
+        }
     row.update(overrides)
     return row
 
@@ -151,8 +155,9 @@ class IntradayRealKillSwitchAndGateTests(unittest.TestCase):
             self.assertTrue(report["attempted"])
             self.assertTrue(report["flat_verified"])
             self.assertEqual(fake_client.cancelled[0]["order_id"], "OPEN1")
-            self.assertEqual(fake_client.kite.placed[0]["order_type"], "MARKET")
+            self.assertEqual(fake_client.kite.placed[0]["order_type"], "LIMIT")
             self.assertEqual(fake_client.kite.placed[0]["transaction_type"], "SELL")
+            self.assertGreater(fake_client.kite.placed[0]["price"], 0)
 
     def test_event_blackout_blocks_new_intraday_entry(self):
         with tempfile.TemporaryDirectory() as temp_dir:

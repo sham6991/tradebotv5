@@ -138,11 +138,17 @@ class IntradaySettings:
     vwap_enabled: bool = True
     volume_profile_enabled: bool = True
     candle_interval: str = DEFAULT_CANDLE_INTERVAL
+    require_live_data_for_paper: bool = True
+    allow_simulated_fallback: bool = False
+    show_data_source_warning: bool = True
+    status_refresh_uses_cached_broker_state: bool = True
     higher_timeframe_confirmation: bool = False
     entry_limit_offset: float = 0.0
     stoploss_buffer: float = 0.05
     target_buffer: float = 0.05
     limit_order_timeout_seconds: int = 30
+    paper_fill_model: str = "CANDLE_TOUCH_CONSERVATIVE"
+    recalculate_exit_from_actual_fill: bool = True
     retry_limit_order: bool = False
     max_retries: int = 0
     chase_limit_order: bool = False
@@ -157,6 +163,7 @@ class IntradaySettings:
     trail_activation_r: float = 1.2
     min_sl_modification_gap: float = 0.05
     min_seconds_between_sl_modifications: int = 15
+    min_seconds_between_target_modifications: int = 15
     partial_exit_enabled: bool = False
     partial_exit_trigger_r: float = 1.0
     partial_exit_qty_pct: float = 50.0
@@ -186,6 +193,8 @@ class IntradaySettings:
     options_bias_enabled: bool = False
     confirm_real_mode: bool = False
     auto_real_orders_confirmed: bool = False
+    emergency_exit_order_type: str = "AGGRESSIVE_LIMIT"
+    emergency_slippage_points: float = 0.0
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any] | None) -> "IntradaySettings":
@@ -244,11 +253,17 @@ class IntradaySettings:
             vwap_enabled=_bool(payload.get("vwap_enabled"), True),
             volume_profile_enabled=_bool(payload.get("volume_profile_enabled"), True),
             candle_interval=str(payload.get("candle_interval") or DEFAULT_CANDLE_INTERVAL).strip(),
+            require_live_data_for_paper=_bool(payload.get("require_live_data_for_paper"), True),
+            allow_simulated_fallback=_bool(payload.get("allow_simulated_fallback"), False),
+            show_data_source_warning=_bool(payload.get("show_data_source_warning"), True),
+            status_refresh_uses_cached_broker_state=_bool(payload.get("status_refresh_uses_cached_broker_state"), True),
             higher_timeframe_confirmation=_bool(payload.get("higher_timeframe_confirmation"), False),
             entry_limit_offset=_float(payload.get("entry_limit_offset"), 0.0),
             stoploss_buffer=_float(payload.get("stoploss_buffer"), 0.05),
             target_buffer=_float(payload.get("target_buffer"), 0.05),
-            limit_order_timeout_seconds=_int(payload.get("limit_order_timeout_seconds"), 60),
+            limit_order_timeout_seconds=_int(payload.get("limit_order_timeout_seconds"), 30),
+            paper_fill_model=str(payload.get("paper_fill_model") or "CANDLE_TOUCH_CONSERVATIVE").strip().upper(),
+            recalculate_exit_from_actual_fill=_bool(payload.get("recalculate_exit_from_actual_fill"), True),
             retry_limit_order=_bool(payload.get("retry_limit_order"), False),
             max_retries=_int(payload.get("max_retries"), 0),
             chase_limit_order=_bool(payload.get("chase_limit_order"), False),
@@ -263,6 +278,7 @@ class IntradaySettings:
             trail_activation_r=_float(payload.get("trail_activation_r"), 1.2),
             min_sl_modification_gap=_float(payload.get("min_sl_modification_gap"), 0.05),
             min_seconds_between_sl_modifications=_int(payload.get("min_seconds_between_sl_modifications"), 15),
+            min_seconds_between_target_modifications=_int(payload.get("min_seconds_between_target_modifications"), 15),
             partial_exit_enabled=_bool(payload.get("partial_exit_enabled"), False),
             partial_exit_trigger_r=_float(payload.get("partial_exit_trigger_r"), 1.0),
             partial_exit_qty_pct=_float(payload.get("partial_exit_qty_pct"), 50.0),
@@ -292,6 +308,8 @@ class IntradaySettings:
             options_bias_enabled=_bool(payload.get("options_bias_enabled"), False),
             confirm_real_mode=_bool(payload.get("confirm_real_mode"), False),
             auto_real_orders_confirmed=_bool(payload.get("auto_real_orders_confirmed"), False),
+            emergency_exit_order_type=str(payload.get("emergency_exit_order_type") or "AGGRESSIVE_LIMIT").strip().upper(),
+            emergency_slippage_points=_float(payload.get("emergency_slippage_points"), 0.0),
         )
         settings.validate()
         return settings
@@ -327,6 +345,10 @@ class IntradaySettings:
             raise ValueError("Active management R triggers must be greater than zero.")
         if self.min_liquidity_score < 0 or self.max_allowed_spread_pct < 0:
             raise ValueError("Eligibility thresholds cannot be negative.")
+        if self.paper_fill_model not in {"CANDLE_TOUCH_CONSERVATIVE", "CANDLE_TOUCH_SIMPLE", "LTP_TOUCH"}:
+            raise ValueError("Paper fill model must be CANDLE_TOUCH_CONSERVATIVE, CANDLE_TOUCH_SIMPLE, or LTP_TOUCH.")
+        if self.emergency_exit_order_type not in {"AGGRESSIVE_LIMIT", "MARKET"}:
+            raise ValueError("Emergency exit order type must be AGGRESSIVE_LIMIT or MARKET.")
 
     @property
     def market_orders_enabled(self) -> bool:
@@ -353,6 +375,11 @@ class StockSnapshot:
     candles_available: int = 0
     last_candle_time: str = ""
     data_source: str = ""
+    source_status: str = ""
+    source_error: str = ""
+    fetched_at: str = ""
+    quote_timestamp: str = ""
+    data_mode: str = "candle_polling"
     ema20: float = 0.0
     ema50: float = 0.0
     rsi: float = 50.0

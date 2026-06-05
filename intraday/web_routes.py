@@ -38,7 +38,8 @@ class IntradayWebRoutes:
         if path == "/api/intraday/upload-fii-dii":
             return handler.send_json(self.service.upload_fii_dii(payload))
         if path == "/api/intraday/start":
-            blockers = self._mode_blockers(self._requested_app_mode(payload), require_connection=True)
+            require_connection = not (self._requested_app_mode(payload) == "PAPER" and _bool((payload or {}).get("allow_simulated_fallback")))
+            blockers = self._mode_blockers(self._requested_app_mode(payload), require_connection=require_connection)
             if blockers:
                 raise ValueError(blockers[0])
             return handler.send_json(self.service.start(payload))
@@ -121,3 +122,9 @@ class IntradayWebRoutes:
 
     def _label_for_mode(self, mode: str) -> str:
         return "Real Money" if self._requested_app_mode(mode) == "LIVE" else "Paper Trading"
+
+
+def _bool(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}

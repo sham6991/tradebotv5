@@ -14,6 +14,8 @@ class IntradayEngineServiceTests(unittest.TestCase):
             "minimum_risk_reward": 1.1,
             "ask_permission_before_entry": True,
             "engine_interval_seconds": 1,
+            "allow_simulated_fallback": True,
+            "require_live_data_for_paper": False,
         }
 
     def test_start_runs_continuous_engine_until_stop(self):

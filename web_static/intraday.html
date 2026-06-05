@@ -112,6 +112,7 @@
               <option value="5minute">5 min</option>
             </select>
           </label>
+          <label>Limit Timeout Sec <input id="limit-timeout" type="number" min="1" value="30"></label>
           <label>Min Score <input id="min-score" type="number" min="0" max="100" value="70"></label>
           <label>Min RR <input id="min-rr" type="number" min="0.1" step="0.1" value="1.5"></label>
           <label>Max Loss <input id="max-loss" type="number" min="1" value="2500"></label>
@@ -130,6 +131,19 @@
               <option value="SWING">Swing</option>
               <option value="ATR">ATR</option>
               <option value="FIXED">Fixed R</option>
+            </select>
+          </label>
+          <label>Paper Fill Model
+            <select id="paper-fill-model">
+              <option value="CANDLE_TOUCH_CONSERVATIVE">Candle OHLC simulation</option>
+              <option value="CANDLE_TOUCH_SIMPLE">Candle touch simple</option>
+              <option value="LTP_TOUCH">LTP touch</option>
+            </select>
+          </label>
+          <label>Emergency Exit
+            <select id="emergency-exit-order-type">
+              <option value="AGGRESSIVE_LIMIT">Aggressive LIMIT</option>
+              <option value="MARKET">MARKET with warning</option>
             </select>
           </label>
           <label class="toggle-label">
@@ -152,7 +166,20 @@
             <input id="partial-exit-enabled" type="checkbox">
             Partial Exit
           </label>
+          <label class="toggle-label">
+            <input id="allow-simulated-fallback" type="checkbox">
+            Allow Simulated Fallback
+          </label>
+          <label class="toggle-label">
+            <input id="recalculate-exit-fill" type="checkbox" checked>
+            Recalculate Exit From Fill
+          </label>
+          <label class="toggle-label">
+            <input id="auto-real-orders-confirmed" type="checkbox">
+            Allow Automatic Real Orders
+          </label>
         </div>
+        <p class="setting-note">Paper orders are simulated, but market data should come from Zerodha Paper Data. Simulated fallback is for testing only.</p>
         <div class="symbols-grid" id="symbols-grid"></div>
         <div class="button-row setup-actions">
           <button id="save-setup" type="button">Save Setup</button>
@@ -162,6 +189,7 @@
           <input id="confirm-real" type="checkbox">
           I explicitly confirm real-money intraday mode
         </label>
+        <p class="setting-note">When enabled, Intraday Real can place MIS LIMIT orders only after preflight, risk checks, data checks, and final validation. If unchecked, automatic real orders are blocked.</p>
         <div id="live-paper-workflow" class="paper-workflow-panel active" data-paper-panel="live">
           <div class="button-row setup-actions">
             <button id="start-session" class="primary">Start Live Paper Session</button>
@@ -205,6 +233,14 @@
       </section>
 
       <section id="terminal-step" class="flow-panel">
+        <section id="data-source-card" class="data-source-card">
+          <div class="panel-title compact-title">
+            <h2>Data Source</h2>
+            <span id="data-source-badge">Data Unavailable</span>
+          </div>
+          <div id="data-source-grid" class="best-grid"></div>
+          <div id="data-source-warning" class="data-source-warning"></div>
+        </section>
         <section class="watch-panel">
           <div class="panel-title">
             <h2>Stock Watch Grid</h2>

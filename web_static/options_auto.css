@@ -376,6 +376,58 @@ body {
   border-radius: 6px;
 }
 
+.oa-index-tick-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.oa-index-tick-latest {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.oa-index-tick-latest div {
+  min-height: 58px;
+  padding: 10px;
+  background: var(--oa-surface-soft);
+  border: 1px solid var(--oa-line-soft);
+  border-radius: 6px;
+}
+
+.oa-index-tick-latest span,
+.oa-index-tick-row span {
+  display: block;
+  color: var(--oa-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.oa-index-tick-latest strong,
+.oa-index-tick-row strong {
+  display: block;
+  margin-top: 5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.oa-index-tick-list {
+  display: grid;
+  gap: 6px;
+}
+
+.oa-index-tick-row {
+  display: grid;
+  grid-template-columns: minmax(92px, 0.7fr) minmax(90px, 0.6fr) minmax(100px, 0.7fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  background: #ffffff;
+  border: 1px solid var(--oa-line-soft);
+  border-radius: 6px;
+}
+
 .oa-muted,
 .oa-empty-state {
   color: var(--oa-muted);
@@ -609,6 +661,7 @@ body {
 
   .oa-card-grid-three,
   .oa-card-grid-four,
+  .oa-dashboard-cockpit,
   .oa-dashboard-grid,
   .oa-real-grid,
   .oa-debug-grid,
@@ -625,6 +678,7 @@ body {
   .oa-status-grid,
   .oa-metric-grid,
   .oa-summary-grid,
+  .oa-index-tick-latest,
   .oa-form-grid,
   .oa-action-grid,
   .oa-timeline {
@@ -632,6 +686,7 @@ body {
   }
 
   .oa-check-row,
+  .oa-index-tick-row,
   .oa-plan-row {
     grid-template-columns: 1fr;
   }

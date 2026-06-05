@@ -18,6 +18,7 @@ from options_auto.indicators.technicals import (
 from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
 from options_auto.intelligence.feature_builder import build_index_features
 from options_auto.intelligence.market_cue_engine import MarketCueEngine
+from tests.test_options_auto_auto_spot import index_rows
 
 
 class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
@@ -102,7 +103,7 @@ class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
                 "max_risk_per_trade_pct": 5,
                 "paper_starting_balance": 20000,
             },
-            index_history=pd.DataFrame(),
+            index_history=pd.DataFrame(index_rows()),
             option_candidates=[{
                 "name": "NIFTY",
                 "tradingsymbol": "NIFTY26JUN22500CE",
@@ -159,11 +160,32 @@ class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
         self.assertTrue(result["selected_contract"]["premium_expansion_confirmed"])
         self.assertGreater(result["theta_premium_risk"]["expected_edge"]["expected_edge_after_costs"], 0)
 
+    def test_live_mode_requires_live_index_candles_not_legacy_features(self):
+        result = evaluate_options_auto_decision(
+            mode="PAPER",
+            settings={"mode": "PAPER", "underlying": "NIFTY", "buy_score_threshold": 20},
+            index_history=pd.DataFrame(),
+            option_candidates=[],
+            quotes={},
+            market_cue_payload={
+                "phase": "LUNCH",
+                "spot": 22540,
+                "features": {"trend_strength_score": 90, "close": 22540},
+                "technical_score": 90,
+            },
+            risk_state={},
+            account_state={"available_capital": 20000},
+            timestamp="2026-06-04 12:00:00",
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("Live index candle data is unavailable.", result["blockers"])
+
     def test_weak_far_otm_expiry_option_blocks(self):
         result = evaluate_options_auto_decision(
             mode="PAPER",
             settings={"mode": "PAPER", "underlying": "NIFTY", "buy_score_threshold": 40, "max_capital_per_trade_pct": 100, "max_risk_per_trade_pct": 10, "paper_starting_balance": 20000},
-            index_history=pd.DataFrame(),
+            index_history=pd.DataFrame(index_rows()),
             option_candidates=[{"name": "NIFTY", "tradingsymbol": "NIFTY26JUN23000CE", "instrument_token": "1", "instrument_type": "CE", "strike": 23000, "expiry": "2026-06-04", "lot_size": 50}],
             quotes={"1": {"ltp": 18, "bid": 17, "ask": 18.5, "bid_qty": 100, "ask_qty": 100, "volume": 3000, "oi": 12000, "premium_return_1": -0.5, "premium_return_3": 0.2, "relative_volume": 0.6, "option_atr14": 0.5}},
             market_cue_payload={"phase": "LUNCH", "spot": 22540, "features": {"trend_strength_score": 80, "close": 22540, "vwap": 22490, "ema9": 22520, "ema20": 22480, "ema50": 22400, "rsi14": 64, "relative_volume": 1.8, "atr_pct": 0.25}, "technical_score": 80},
@@ -183,7 +205,7 @@ class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
         result = evaluate_options_auto_decision(
             mode="PAPER",
             settings={"mode": "PAPER", "underlying": "NIFTY", "buy_score_threshold": 20, "max_daily_loss": 1000, "max_capital_per_trade_pct": 100, "max_risk_per_trade_pct": 10, "paper_starting_balance": 20000},
-            index_history=pd.DataFrame(),
+            index_history=pd.DataFrame(index_rows()),
             option_candidates=[{"name": "NIFTY", "tradingsymbol": "NIFTY26JUN22500CE", "instrument_token": "1", "instrument_type": "CE", "strike": 22500, "expiry": "2026-06-25", "lot_size": 50}],
             quotes={"1": {"ltp": 40, "bid": 39.95, "ask": 40.05, "bid_qty": 3000, "ask_qty": 3000, "volume": 100000, "oi": 1000000, "premium_return_1": 2, "premium_return_3": 5, "relative_volume": 2, "option_vwap": 39, "option_atr14": 5}},
             market_cue_payload={"phase": "LUNCH", "spot": 22540, "features": {"trend_strength_score": 80, "close": 22540, "vwap": 22490, "ema9": 22520, "ema20": 22480, "ema50": 22400, "rsi14": 64, "relative_volume": 1.8, "atr_pct": 0.25}, "technical_score": 80},

@@ -30,7 +30,9 @@
         </div>
         <div class="oa-emergency-strip">
           <button type="button" id="oa-top-refresh" class="oa-button">Refresh</button>
+          <button type="button" id="oa-stop-engine-top" class="oa-button">Stop Engine</button>
           <button type="button" id="oa-stop-new-entries-top" class="oa-button oa-button-danger">Stop New Entries</button>
+          <button type="button" id="oa-kill-switch-top" class="oa-button oa-button-danger">Kill Switch</button>
         </div>
       </header>
 
@@ -121,6 +123,13 @@
                 </div>
                 <div id="oa-demo-banner"></div>
                 <div id="oa-data-source-panel" class="oa-summary-grid"></div>
+              </article>
+              <article class="oa-card oa-index-tick-card">
+                <div class="oa-card-head">
+                  <h2>Index Tick Stream</h2>
+                  <span class="oa-status-badge oa-badge-grey" data-index-tick-badge>Waiting</span>
+                </div>
+                <div class="oa-index-tick-panel" data-index-tick-panel></div>
               </article>
               <article class="oa-card">
                 <div class="oa-card-head">
@@ -247,12 +256,20 @@
               <div class="oa-button-row">
                 <button type="button" id="oa-paper-start" class="oa-button oa-button-primary">Start Paper Engine</button>
                 <button type="button" id="oa-paper-stop" class="oa-button">Stop Paper Engine</button>
+                <button type="button" id="oa-paper-kill" class="oa-button oa-button-danger">Kill Switch</button>
                 <button type="button" id="oa-paper-reset" class="oa-button">Reset Paper Balance</button>
               </div>
             </article>
             <article class="oa-card">
               <h2>Paper Account</h2>
               <div id="oa-paper-account" class="oa-summary-grid"></div>
+            </article>
+            <article class="oa-card oa-index-tick-card">
+              <div class="oa-card-head">
+                <h2>Index Tick Stream</h2>
+                <span class="oa-status-badge oa-badge-grey" data-index-tick-badge>Waiting</span>
+              </div>
+              <div class="oa-index-tick-panel" data-index-tick-panel></div>
             </article>
           </div>
 
@@ -304,6 +321,13 @@
               <h2>Real Active Position</h2>
               <div id="oa-real-position" class="oa-plan-body"></div>
             </article>
+            <article class="oa-card oa-index-tick-card">
+              <div class="oa-card-head">
+                <h2>Index Tick Stream</h2>
+                <span class="oa-status-badge oa-badge-grey" data-index-tick-badge>Waiting</span>
+              </div>
+              <div class="oa-index-tick-panel" data-index-tick-panel></div>
+            </article>
           </div>
 
           <div class="oa-card-grid oa-card-grid-three">
@@ -320,7 +344,9 @@
               <h2>Safety Controls</h2>
               <div class="oa-button-row">
                 <button type="button" id="oa-real-stop" class="oa-button">Stop New Entries</button>
+                <button type="button" id="oa-real-stop-engine" class="oa-button">Stop Engine</button>
                 <button type="button" id="oa-real-safe" class="oa-button">Safe Mode</button>
+                <button type="button" id="oa-real-kill" class="oa-button oa-button-danger">Kill Switch</button>
               </div>
             </article>
             <article class="oa-card oa-danger-zone">

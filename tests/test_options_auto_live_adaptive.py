@@ -1,4 +1,5 @@
 import time
+import tempfile
 import unittest
 
 from options_auto.core.task_priority import P0_CRITICAL_PROTECTION, P4_SLOW
@@ -355,6 +356,80 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         lifecycle.update_stoploss(trade_row["trade_id"], adaptive["new_stoploss"])
 
         self.assertGreaterEqual(lifecycle.active_trades[0]["stoploss"], trade_row["entry_price"])
+
+    def test_paper_start_runs_continuous_scanner_and_auto_approval_cycle(self):
+        client = FakeOptionsZerodha(spot=22540, option_price=142.4)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            payload = service_payload("PAPER")
+            payload["settings"].update({"auto_entry_enabled": True, "ask_permission_before_entry": True})
+
+            started = service.start_paper(payload)
+            service._live_scan_stop.set()
+            initial_quote_calls = len(client.quote_calls)
+            with service._lock:
+                cycle = service._run_live_scan_cycle_locked()
+
+            service.stop_live_scan({"mode": "PAPER"})
+
+        self.assertTrue(started["live_scan"]["running"])
+        self.assertGreater(len(client.quote_calls), initial_quote_calls)
+        self.assertEqual(cycle["live_scan_action"]["action"], "APPROVAL_CREATED")
+        self.assertEqual(service.session.status, "PAPER_STOPPED")
+
+    def test_stop_engine_preserves_active_paper_trade(self):
+        client = FakeOptionsZerodha(spot=22540, option_price=142.4)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            service.execute_paper_plan(service_payload("PAPER"))
+            service.process_paper_market({"market": {"ltp": 142.4, "bid": 142.25, "ask": 142.45, "low": 142.4, "high": 143}})
+
+            stopped = service.stop_live_scan({"mode": "PAPER"})
+
+        self.assertFalse(stopped["live_scan"]["running"])
+        self.assertEqual(stopped["session"]["status"], "PAPER_STOPPED")
+        self.assertEqual(len(stopped["session"]["active_trades"]), 1)
+        self.assertEqual(service.paper_broker.orders[0]["status"], "COMPLETE")
+
+    def test_kill_switch_cancels_pending_entry_but_not_active_paper_trade(self):
+        client = FakeOptionsZerodha(spot=22540, option_price=142.4)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            pending_service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            pending_service.execute_paper_plan(service_payload("PAPER"))
+            killed_pending = pending_service.kill_switch({"mode": "PAPER", "reason": "operator test"})
+
+            active_service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            active_service.execute_paper_plan(service_payload("PAPER"))
+            active_service.process_paper_market({"market": {"ltp": 142.4, "bid": 142.25, "ask": 142.45, "low": 142.4, "high": 143}})
+            killed_active = active_service.kill_switch({"mode": "PAPER", "reason": "operator test"})
+
+        self.assertEqual(killed_pending["session"]["status"], "PAPER_KILL_SWITCH_ACTIVE")
+        self.assertEqual(pending_service.paper_broker.orders[0]["status"], "CANCELLED")
+        self.assertEqual(len(killed_pending["session"]["active_trades"]), 0)
+        self.assertEqual(killed_active["session"]["status"], "PAPER_KILL_SWITCH_ACTIVE")
+        self.assertEqual(len(killed_active["session"]["active_trades"]), 1)
+        self.assertEqual(active_service.paper_broker.orders[0]["status"], "COMPLETE")
+
+    def test_real_dry_run_runs_continuous_scanner_without_sending_orders(self):
+        client = FakeOptionsZerodha(spot=22540, option_price=142.4, label="REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = service_payload("REAL")
+            payload["settings"].update({"confirm_real_mode": True, "dry_run_real_only": True})
+
+            started = service.real_dry_run(payload)
+            service._live_scan_stop.set()
+            initial_quote_calls = len(client.quote_calls)
+            with service._lock:
+                cycle = service._run_live_scan_cycle_locked()
+
+            service.stop_live_scan({"mode": "REAL"})
+
+        self.assertTrue(started["live_scan"]["running"])
+        self.assertGreater(len(client.quote_calls), initial_quote_calls)
+        self.assertEqual(cycle["live_scan_action"]["action"], "REAL_SCAN_ONLY")
+        self.assertEqual(cycle["live_scan_action"]["orders_sent"], 0)
+        self.assertEqual(service.session.status, "REAL_STOPPED")
 
 
 if __name__ == "__main__":

@@ -16,6 +16,8 @@ const state = {
   fiiDiiStatus: {},
 };
 
+let refreshTimer = null;
+
 // api helper
 async function api(path, payload) {
   const options = payload === undefined
@@ -141,6 +143,14 @@ function setTabAlert(tab, message = "", kind = "info") {
   const node = $(`#oa-${tab}-alert`);
   if (!node) return;
   node.innerHTML = message ? alertHtml(message, kind) : "";
+}
+
+function setActiveAlert(message = "", kind = "info") {
+  if (state.activeTab === "dashboard") {
+    setHtml("#oa-dashboard-alerts", message ? alertHtml(message, kind) : "");
+  } else {
+    setTabAlert(state.activeTab, message, kind);
+  }
 }
 
 function emptyLike(fallback) {
@@ -334,6 +344,7 @@ function renderTopStatus() {
 function renderAll() {
   renderTopStatus();
   renderDashboard();
+  renderIndexTickStreams();
   renderBacktestResults();
   renderShadow();
   renderRealPreflight();
@@ -446,6 +457,7 @@ function renderDataSourcePanel(result = {}) {
   const source = result.data_source || state.dataSource || "UNKNOWN";
   const demo = source === "DEBUG" || source === "DEMO" || Boolean(result.demo_data);
   const health = result.options_data_health || {};
+  const scan = result.live_scan || state.status.live_scan || {};
   const sourceOk = source === "LIVE" || source === "zerodha_paper_data" || source === "zerodha_real_data";
   setBadge("#oa-data-source-badge", source, demo ? "yellow" : sourceOk ? "green" : "grey");
   setHtml("#oa-demo-banner", demo ? `<div class="oa-data-banner">DEMO/SAMPLE DATA - not live market data.</div>` : "");
@@ -459,14 +471,50 @@ function renderDataSourcePanel(result = {}) {
     metric("Candidate Count", result.candidate_count ?? health.candidate_count ?? "-"),
     metric("Valid Quote Count", result.valid_quote_count ?? health.valid_quote_count ?? "-"),
     metric("Missing Quote Keys", (result.missing_quote_keys || health.missing_quote_keys || []).length),
+    metric("Index Candles", result.live_index_candle_count ?? "-"),
+    metric("Candle Interval", result.live_index_candle_interval || "-"),
     metric("Quote Age", `${text(result.quote_age_seconds ?? $("#oa-quote-age")?.value, "-")} sec`),
     metric("Stale Threshold", `${text((result.settings || state.status.settings || state.defaults.settings || {}).quote_stale_seconds, 3)} sec`),
     metric("FII/DII", (state.fiiDiiStatus.status || result.market_cue?.fii_dii_status?.status || "Not uploaded")),
     metric("News", result.market_cue?.components?.news !== undefined ? score(result.market_cue.components.news) : "No news summary"),
     metric("Trading Allowed", result.allowed ? "YES" : "NO"),
     metric("Governor", result.governor?.state || "-"),
+    metric("Live Scanner", scan.running ? "RUNNING" : "STOPPED"),
+    metric("Last Scan", scan.last_cycle || "-"),
+    metric("Scan Count", scan.cycle_count ?? "-"),
     metric("Next Action", result.next_action || "-"),
   ].join(""));
+}
+
+function renderIndexTickStreams() {
+  const ticks = (state.status.index_ticks || state.lastResult.index_ticks || []).slice(-8);
+  const latest = ticks[ticks.length - 1] || {};
+  const scan = state.status.live_scan || state.lastResult.live_scan || {};
+  const running = Boolean(scan.running);
+  $$("[data-index-tick-badge]").forEach(node => {
+    node.className = `oa-status-badge ${badgeClass(running ? "green" : ticks.length ? "yellow" : "grey")}`;
+    node.textContent = running ? "Live" : ticks.length ? "Last Tick" : "Waiting";
+  });
+  const latestHtml = ticks.length
+    ? `<div class="oa-index-tick-latest">
+        ${metric("Underlying", latest.underlying || "-")}
+        ${metric("Spot", latest.spot ?? "-")}
+        ${metric("Source", latest.spot_source || "-")}
+        ${metric("Observed", latest.observed_at || "-")}
+        ${metric("Exchange Time", latest.exchange_timestamp || "-")}
+        ${metric("Scan", scan.running ? `Running #${scan.cycle_count ?? 0}` : "Stopped")}
+      </div>`
+    : `<p class="oa-empty-state">No index ticks yet.</p>`;
+  const rows = ticks.slice().reverse().map(tick => `<div class="oa-index-tick-row">
+      <div><span>Time</span><strong>${escapeHtml(tick.observed_at || "-")}</strong></div>
+      <div><span>Mode</span><strong>${escapeHtml(tick.mode || "-")}</strong></div>
+      <div><span>Spot</span><strong>${escapeHtml(tick.spot ?? "-")}</strong></div>
+      <div><span>Quote Key</span><strong>${escapeHtml(tick.quote_key || "-")}</strong></div>
+    </div>`).join("");
+  const body = `${latestHtml}${rows ? `<div class="oa-index-tick-list">${rows}</div>` : ""}`;
+  $$("[data-index-tick-panel]").forEach(node => {
+    node.innerHTML = body;
+  });
 }
 
 function readableBlockers(result) {
@@ -667,7 +715,8 @@ function renderShadowReport(report = state.lastShadowReport) {
 // paper rendering/actions
 function initPaperTab() {
   on("#oa-paper-start", "click", runPaperStart);
-  on("#oa-paper-stop", "click", () => setTabAlert("paper", "Paper stop requested locally. No real orders exist in paper mode.", "info"));
+  on("#oa-paper-stop", "click", stopPaperEngine);
+  on("#oa-paper-kill", "click", killSwitch);
   on("#oa-paper-reset", "click", resetPaperBalance);
   on("#oa-paper-request-approval", "click", requestPaperApproval);
   on("#oa-paper-approve", "click", approvePaper);
@@ -681,9 +730,52 @@ async function runPaperStart() {
     const result = await api("/api/options-auto/paper/start", evaluationPayload("PAPER"));
     state.lastResult = result;
     renderAll();
-    setTabAlert("paper", "Paper engine evaluated. No real orders were called.", "success");
+    setTabAlert("paper", result.message || "Paper live scanner started.", "success");
   } catch (error) {
     setTabAlert("paper", error.message, "danger");
+  }
+}
+
+async function stopPaperEngine() {
+  try {
+    const result = await api("/api/options-auto/paper/stop", { source: "UI", mode: "PAPER" });
+    state.status = result;
+    state.lastResult = result.session?.last_decision ? hydrateStatusDecision(result) : result;
+    renderAll();
+    setTabAlert("paper", "Paper live scanner stopped. No real orders exist in paper mode.", "info");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
+}
+
+function actionMode() {
+  const statusMode = state.status.live_scan?.mode || state.status.settings?.mode || state.lastResult.mode || settingsPayload().mode || "PAPER";
+  return String(statusMode || "PAPER").toUpperCase() === "REAL" ? "REAL" : "PAPER";
+}
+
+async function stopEngine() {
+  try {
+    const mode = actionMode();
+    const result = await api("/api/options-auto/stop", { source: "UI", mode });
+    state.status = result;
+    state.lastResult = result.session?.last_decision ? hydrateStatusDecision(result) : result;
+    renderAll();
+    setActiveAlert(`${mode} engine/feed stopped. Existing positions were not exited or modified.`, "info");
+  } catch (error) {
+    setActiveAlert(error.message, "danger");
+  }
+}
+
+async function killSwitch() {
+  try {
+    const mode = actionMode();
+    const result = await api("/api/options-auto/kill-switch", { source: "UI", mode });
+    state.status = result;
+    state.lastResult = result.session?.last_decision ? hydrateStatusDecision(result) : result;
+    renderAll();
+    setActiveAlert(`${mode} kill switch active. Engine/feed stopped and new entries are blocked.`, "danger");
+  } catch (error) {
+    setActiveAlert(error.message, "danger");
   }
 }
 
@@ -813,6 +905,8 @@ function initRealTab() {
   on("#oa-real-reconcile", "click", runRealReconcile);
   on("#oa-real-dry", "click", runRealDryRun);
   on("#oa-real-stop", "click", stopNewEntries);
+  on("#oa-real-stop-engine", "click", stopEngine);
+  on("#oa-real-kill", "click", killSwitch);
   on("#oa-stop-new-entries-top", "click", stopNewEntries);
   on("#oa-real-safe", "click", runSafeMode);
   on("#oa-real-emergency", "click", runEmergencyPlan);
@@ -1220,7 +1314,29 @@ function on(selector, event, handler) {
 async function refresh() {
   const payload = await api("/api/options-auto/status");
   state.status = payload;
+  if (payload.session?.last_decision && Object.keys(payload.session.last_decision).length) {
+    state.lastResult = hydrateStatusDecision(payload);
+  }
   renderAll();
+}
+
+function hydrateStatusDecision(payload) {
+  return {
+    ...(payload.session?.last_decision || {}),
+    settings: payload.settings || {},
+    session: payload.session || {},
+    paper_account: payload.paper_account || {},
+    paper_lifecycle: payload.paper_lifecycle || {},
+    real_safety: payload.real_safety || {},
+    ready_trade_plan_cache: payload.ready_trade_plan_cache || {},
+    adaptive: payload.adaptive || {},
+    performance: payload.performance || {},
+    fii_dii: payload.fii_dii || {},
+    account_status: payload.account_status || {},
+    index_ticks: payload.index_ticks || [],
+    live_index_candles: payload.live_index_candles || {},
+    live_scan: payload.live_scan || {},
+  };
 }
 
 async function loadDefaults() {
@@ -1239,6 +1355,8 @@ async function loadDefaults() {
 
 function initDashboard() {
   on("#oa-top-refresh", "click", refresh);
+  on("#oa-stop-engine-top", "click", stopEngine);
+  on("#oa-kill-switch-top", "click", killSwitch);
   initFiiDiiUpload();
 }
 
@@ -1260,4 +1378,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadDefaults().catch(error => {
     setHtml("#oa-dashboard-alerts", alertHtml(error.message, "danger"));
   });
+  refreshTimer = window.setInterval(() => {
+    if (document.visibilityState === "visible") refresh().catch(() => {});
+  }, 3000);
 });

@@ -201,6 +201,33 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("Stop New Entries is active.", result["blockers"])
 
+    def test_real_stop_syncs_running_option_position_from_zerodha_state(self):
+        target = auto_order("TARGET1", transaction_type="SELL", order_type="LIMIT")
+        stoploss = auto_order("SL1", transaction_type="SELL", order_type="SL")
+        target.update({"exchange": "NFO", "price": 148.95})
+        stoploss.update({"exchange": "NFO", "price": 137.4, "trigger_price": 137.45})
+        position = {
+            "tradingsymbol": "NIFTY26JUN22500CE",
+            "exchange": "NFO",
+            "product": "NRML",
+            "quantity": 50,
+            "average_price": 142.4,
+            "last_price": 145.0,
+            "pnl": 130.0,
+        }
+        client = FakeRealClient(orders=[target, stoploss], positions={"net": [position]})
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+
+        result = service.stop_live_scan({"mode": "REAL"})
+
+        trade = result["session"]["active_trades"][0]
+        self.assertEqual(result["session"]["status"], "REAL_STOPPED")
+        self.assertEqual(trade["tradingsymbol"], "NIFTY26JUN22500CE")
+        self.assertEqual(trade["entry_price"], 142.4)
+        self.assertEqual(trade["target_order_id"], "TARGET1")
+        self.assertEqual(trade["stoploss_order_id"], "SL1")
+        self.assertTrue(trade["position_protected"])
+
     def test_guarded_real_order_sends_buy_limit_only_after_preflight_and_final_validation(self):
         client = FakeRealClient(margin=100000)
         service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)

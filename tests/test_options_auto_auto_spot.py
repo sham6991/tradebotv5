@@ -1,6 +1,6 @@
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime, time as dt_time, timedelta
 
 import pandas as pd
 
@@ -30,24 +30,26 @@ def option_instruments(strikes=(22450, 22500, 22550, 22600), underlying="NIFTY")
     return rows
 
 
-def index_rows(count=20):
+def index_rows(count=80, trade_day=None):
+    start = datetime.combine(trade_day or date.today(), dt_time(9, 15))
     return [
         {
-            "datetime": f"2026-06-04 10:{i:02d}:00",
-            "open": 22520 + i,
-            "high": 22550 + i,
-            "low": 22500 + i,
-            "close": 22540 + i,
-            "volume": 10000 + i,
+            "datetime": (start + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S"),
+            "open": 22400 + i * 2.0,
+            "high": 22425 + i * 2.0,
+            "low": 22395 + i * 2.0,
+            "close": 22410 + i * 2.0,
+            "volume": 10000 + i * 120,
         }
         for i in range(count)
     ]
 
 
-def option_rows(strike: int, option_type: str, count=20):
+def option_rows(strike: int, option_type: str, count=80, trade_day=None):
+    start = datetime.combine(trade_day or date.today(), dt_time(9, 15))
     return [
         {
-            "datetime": f"2026-06-04 10:{i:02d}:00",
+            "datetime": (start + timedelta(minutes=i)).strftime("%Y-%m-%d %H:%M:%S"),
             "open": 100 + i,
             "high": 108 + i,
             "low": 98 + i,
@@ -59,11 +61,12 @@ def option_rows(strike: int, option_type: str, count=20):
 
 
 class FakeOptionsZerodha:
-    def __init__(self, spot=22540.0, returned_option_keys=None, label="PAPER", option_price=104.0):
+    def __init__(self, spot=22540.0, returned_option_keys=None, label="PAPER", option_price=104.0, trade_day=None):
         self.spot = spot
         self.returned_option_keys = set(returned_option_keys or [])
         self.label = label
         self.option_price = option_price
+        self.trade_day = trade_day or date.today()
         self.quote_calls = []
         self.historical_calls = []
         self.options = option_instruments()
@@ -81,7 +84,12 @@ class FakeOptionsZerodha:
         rows = {}
         for key in keys:
             if key == "NSE:NIFTY 50":
-                rows[key] = {"last_price": self.spot, "source": self.label}
+                rows[key] = {
+                    "last_price": self.spot,
+                    "source": self.label,
+                    "timestamp": datetime.combine(self.trade_day, dt_time(10, 35)).isoformat(),
+                    "volume": 25000,
+                }
             elif not self.returned_option_keys or key in self.returned_option_keys:
                 rows[key] = {
                     "last_price": self.option_price,
@@ -106,10 +114,10 @@ class FakeOptionsZerodha:
     def historical_candles(self, instrument_token, from_dt, to_dt, interval="3minute"):
         self.historical_calls.append((instrument_token, interval))
         if int(instrument_token) == 256265:
-            return pd.DataFrame(index_rows())
+            return pd.DataFrame(index_rows(trade_day=self.trade_day))
         for row in self.options:
             if int(row["instrument_token"]) == int(instrument_token):
-                return pd.DataFrame(option_rows(int(row["strike"]), row["instrument_type"]))
+                return pd.DataFrame(option_rows(int(row["strike"]), row["instrument_type"], trade_day=self.trade_day))
         return pd.DataFrame()
 
 
@@ -173,6 +181,8 @@ class OptionsAutoAutoSpotTests(unittest.TestCase):
         self.assertEqual(result["candidate_count"], 6)
         self.assertGreater(result["valid_quote_count"], 0)
         self.assertTrue(any(len(call) == 6 for call in client.quote_calls))
+        self.assertEqual(service.status()["index_ticks"][-1]["spot"], 22540)
+        self.assertEqual(service.status()["index_ticks"][-1]["spot_source"], "zerodha_paper_data")
 
     def test_service_real_fetches_from_real_client_not_paper_client(self):
         paper = FakeOptionsZerodha(spot=11111, label="PAPER")
@@ -190,6 +200,8 @@ class OptionsAutoAutoSpotTests(unittest.TestCase):
         self.assertEqual(result["spot_source"], "zerodha_real_data")
         self.assertEqual(paper.quote_calls, [])
         self.assertTrue(real.quote_calls)
+        self.assertEqual(service.status()["index_ticks"][-1]["mode"], MODE_REAL)
+        self.assertEqual(service.status()["index_ticks"][-1]["spot"], 22540)
 
     def test_missing_spot_quote_blocks_with_exact_data_governor_state(self):
         client = FakeOptionsZerodha(spot=0)

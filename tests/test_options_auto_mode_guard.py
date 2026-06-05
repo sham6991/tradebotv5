@@ -27,8 +27,11 @@ class OptionsAutoModeGuardTests(unittest.TestCase):
 
         self.assertTrue(result["real_execution_enabled"])
         self.assertIn("guarded", result["real_execution_reason"])
-        self.assertEqual(result["session"]["status"], "REAL_DRY_RUN_ONLY")
-        self.assertIn("Real dry-run complete", result["message"])
+        self.assertEqual(result["session"]["status"], "REAL_DRY_RUN_SCANNING")
+        self.assertTrue(result["live_scan"]["running"])
+        self.assertEqual(result["orders_sent"], 0)
+        self.assertIn("scanner started", result["message"])
+        service.stop_live_scan({"mode": "REAL"})
 
 
 if __name__ == "__main__":

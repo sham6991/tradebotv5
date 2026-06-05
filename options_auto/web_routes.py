@@ -36,6 +36,10 @@ class OptionsAutoWebRoutes:
             return handler.send_json(self._with_account_status(self.service.configure(payload, self._profile_for_payload(payload))))
         if path == "/api/options-auto/evaluate":
             return handler.send_json(self._with_account_status(self.service.evaluate(self._with_profile(payload))))
+        if path == "/api/options-auto/stop":
+            return handler.send_json(self._with_account_status(self.service.stop_live_scan(payload)))
+        if path == "/api/options-auto/kill-switch":
+            return handler.send_json(self._with_account_status(self.service.kill_switch(payload)))
         if path == "/api/options-auto/shadow/start":
             return handler.send_json(self._with_account_status(self.service.start_shadow(self._with_profile(payload))))
         if path == "/api/options-auto/shadow/outcome":
@@ -45,6 +49,8 @@ class OptionsAutoWebRoutes:
             if blockers:
                 raise ValueError(blockers[0])
             return handler.send_json(self._with_account_status(self.service.start_paper(self._with_profile(payload))))
+        if path == "/api/options-auto/paper/stop":
+            return handler.send_json(self._with_account_status(self.service.stop_live_scan({**dict(payload or {}), "mode": "PAPER"})))
         if path == "/api/options-auto/paper/execute-plan":
             blockers = self._mode_blockers("PAPER")
             if blockers:
@@ -66,6 +72,8 @@ class OptionsAutoWebRoutes:
             if blockers:
                 raise ValueError(blockers[0])
             return handler.send_json(self._with_account_status(self.service.real_dry_run(self._with_profile(payload))))
+        if path == "/api/options-auto/real/stop":
+            return handler.send_json(self._with_account_status(self.service.stop_live_scan({**dict(payload or {}), "mode": "REAL"})))
         if path == "/api/options-auto/real/preflight":
             blockers = self._mode_blockers("LIVE")
             if blockers:

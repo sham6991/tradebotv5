@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 
 from options_auto.config.options_auto_defaults import normalize_settings
-from options_auto.constants import MODE_BACKTEST, MODE_REAL, REAL_EXECUTION_DISABLED_REASON, SIDE_CE, SIDE_PE, SIDE_WAIT
+from options_auto.constants import MODE_BACKTEST, MODE_PAPER, MODE_REAL, REAL_EXECUTION_DISABLED_REASON, SIDE_CE, SIDE_PE, SIDE_WAIT
 from options_auto.core.mode_guard import ModeGuard, normalize_mode
 from options_auto.execution.execution_safety import DataQualityEngine
 from options_auto.intelligence.adaptive_risk_engine import PositionSizer, RiskEngine
@@ -42,7 +42,8 @@ def evaluate_options_auto_decision(
 
     index_features = build_index_features(_frame(index_history))
     if not index_features.get("close"):
-        index_features = _legacy_features(market_cue_payload)
+        if mode not in {MODE_PAPER, MODE_REAL}:
+            index_features = _legacy_features(market_cue_payload)
 
     cue_payload = {**dict(market_cue_payload or {}), "index_features": index_features, "features": index_features}
     market_cue = MarketCueEngine().evaluate(cue_payload, phase=cue_payload.get("phase") or cue_payload.get("market_phase") or cue_payload.get("cue_phase") or "")
@@ -160,6 +161,8 @@ def evaluate_options_auto_decision(
         market_blockers.append("FII/DII CSV upload is required for pre-market cue.")
     if regime.recommended_side == SIDE_WAIT:
         market_blockers.append(regime.no_trade_reason or "Regime says WAIT.")
+    if mode in {MODE_PAPER, MODE_REAL} and not index_features.get("close"):
+        market_blockers.append("Live index candle data is unavailable.")
     if market_cue.recommended_side == SIDE_WAIT and settings.get("market_cue_alignment_required"):
         market_blockers.append("Market cue says WAIT.")
     if selected_side in {SIDE_CE, SIDE_PE} and market_cue.recommended_side in {SIDE_CE, SIDE_PE} and selected_side != market_cue.recommended_side:

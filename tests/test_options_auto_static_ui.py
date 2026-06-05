@@ -19,6 +19,13 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-fii-dii-file"', html)
         self.assertIn('id="oa-data-source-panel"', html)
         self.assertIn('id="oa-demo-banner"', html)
+        self.assertEqual(html.count('data-index-tick-panel'), 3)
+        self.assertIn("Index Tick Stream", html)
+        self.assertIn('id="oa-stop-engine-top"', html)
+        self.assertIn('id="oa-kill-switch-top"', html)
+        self.assertIn('id="oa-paper-kill"', html)
+        self.assertIn('id="oa-real-stop-engine"', html)
+        self.assertIn('id="oa-real-kill"', html)
         self.assertIn("REAL MONEY MODE - LIVE ZERODHA ORDERS ONLY AFTER PREFLIGHT", html)
         self.assertNotIn("disabled in this build", html.lower())
 
@@ -66,11 +73,30 @@ class OptionsAutoStaticUITests(unittest.TestCase):
             "Candidate Count",
             "Valid Quote Count",
             "Missing Quote Keys",
+            "Live Scanner",
             "Next Action",
+            "Index Candles",
+            "Candle Interval",
             "ZERODHA_REQUIRED",
         ):
             self.assertIn(token, js)
         self.assertRegex(js, re.compile(r"allowDemo\s*\?\s*parseJson", re.MULTILINE))
+
+    def test_index_tick_stream_renders_from_status_buffer(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        self.assertIn("function renderIndexTickStreams", js)
+        self.assertIn("state.status.index_ticks", js)
+        self.assertIn("data-index-tick-badge", js)
+        self.assertIn("live_index_candles", js)
+
+    def test_stop_and_kill_controls_call_live_engine_routes(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        self.assertIn("function stopEngine", js)
+        self.assertIn("function killSwitch", js)
+        self.assertIn("/api/options-auto/stop", js)
+        self.assertIn("/api/options-auto/kill-switch", js)
 
 
 if __name__ == "__main__":

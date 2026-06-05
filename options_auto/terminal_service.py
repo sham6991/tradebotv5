@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from datetime import date, datetime, time as dt_time
 from typing import Any
@@ -21,6 +22,7 @@ from options_auto.core.promotion import PromotionManager
 from options_auto.core.session_state import OptionsAutoSessionState
 from options_auto.core.watchdog import WatchdogService
 from options_auto.data.index_data_provider import OptionsAutoIndexDataProvider
+from options_auto.data.live_index_candles import LiveIndexCandleStore
 from options_auto.data.option_chain_builder import OptionChainBuilder
 from options_auto.data.options_quote_provider import OptionsQuoteProvider
 from options_auto.execution.execution_safety import DataQualityEngine, RealOrderPreflight
@@ -94,6 +96,18 @@ class OptionsAutoTerminalService:
         self.low_latency_engine = LowLatencyDecisionEngine(self.performance_monitor)
         self.live_adaptive = LiveAdaptiveEngine(log_path=os.path.join(self.result_root(), "adaptive_action_log.jsonl"))
         self.latest_fii_dii_snapshot: dict[str, Any] | None = None
+        self.index_ticks: list[dict[str, Any]] = []
+        self.live_index_candles = LiveIndexCandleStore()
+        self._lock = threading.RLock()
+        self._live_scan_stop = threading.Event()
+        self._live_scan_thread: threading.Thread | None = None
+        self._live_scan_mode = ""
+        self._live_scan_payload: dict[str, Any] = {}
+        self._live_scan_interval_seconds = 0.0
+        self._live_scan_started_at = ""
+        self._live_scan_last_cycle = ""
+        self._live_scan_last_error = ""
+        self._live_scan_cycle_count = 0
 
     def defaults(self) -> dict[str, Any]:
         return {
@@ -106,27 +120,42 @@ class OptionsAutoTerminalService:
         }
 
     def status(self) -> dict[str, Any]:
-        return {
-            "settings": self.settings,
-            "session": self.session.to_dict(),
-            "paper_account": self.paper_broker.snapshot(),
-            "paper_lifecycle": self.paper_lifecycle.snapshot(),
-            "real_safety": self.real_controller.snapshot(),
-            "logs": self.logger.tail(100),
-            "result_root": self.result_root(),
-            "shadow_report": self.shadow_engine.report(),
-            "ready_trade_plan_cache": self.ready_plan_cache.snapshot(),
-            "adaptive": self.live_adaptive.snapshot(),
-            "performance": self.performance_monitor.snapshot(),
-            "fii_dii": self.latest_fii_dii_status(),
-        }
+        with self._lock:
+            return {
+                "settings": self.settings,
+                "session": self.session.to_dict(),
+                "paper_account": self.paper_broker.snapshot(),
+                "paper_lifecycle": self.paper_lifecycle.snapshot(),
+                "real_safety": self.real_controller.snapshot(),
+                "logs": self.logger.tail(100),
+                "result_root": self.result_root(),
+                "shadow_report": self.shadow_engine.report(),
+                "ready_trade_plan_cache": self.ready_plan_cache.snapshot(),
+                "adaptive": self.live_adaptive.snapshot(),
+                "performance": self.performance_monitor.snapshot(),
+                "fii_dii": self.latest_fii_dii_status(),
+                "index_ticks": self.index_ticks[-80:],
+                "live_index_candles": self.live_index_candles.snapshot(),
+                "live_scan": self._live_scan_state_locked(),
+            }
 
     def result_root(self) -> str:
         return os.path.join(self.base_result_folder, "options_auto")
 
     def configure(self, payload: dict[str, Any] | None = None, kite_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            self._stop_live_scan_locked(reason="configure")
+            return self._configure_locked(payload, kite_profile=kite_profile, preserve_session=False)
+
+    def _configure_locked(
+        self,
+        payload: dict[str, Any] | None = None,
+        kite_profile: dict[str, Any] | None = None,
+        preserve_session: bool = False,
+    ) -> dict[str, Any]:
         settings = normalize_settings(payload)
         mode = normalize_mode(settings.get("mode"))
+        previous_session = self.session if preserve_session and self.mode_guard.mode == mode else None
         self.settings = settings
         self.mode_guard = ModeGuard(
             mode=mode,
@@ -134,7 +163,11 @@ class OptionsAutoTerminalService:
             real_mode_confirmed=bool(settings.get("confirm_real_mode")),
             real_orders_enabled=bool(settings.get("real_orders_enabled")),
         )
-        self.session = OptionsAutoSessionState(self.mode_guard)
+        if previous_session is not None:
+            self.session = previous_session
+            self.session.mode_guard = self.mode_guard
+        else:
+            self.session = OptionsAutoSessionState(self.mode_guard)
         if mode == MODE_PAPER and not self._paper_lifecycle_active():
             self.paper_broker = PaperBroker(float(settings["paper_starting_balance"]))
             self.paper_lifecycle = PaperLifecycleEngine(self.paper_broker)
@@ -144,16 +177,24 @@ class OptionsAutoTerminalService:
         return self.status()
 
     def evaluate(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            return self._evaluate_locked(payload)
+
+    def _evaluate_locked(self, payload: dict[str, Any] | None = None, preserve_session: bool = False) -> dict[str, Any]:
         payload = dict(payload or {})
         settings_payload = {**self.settings, **dict(payload.get("settings") or {})}
         mode = normalize_mode(payload.get("mode") or settings_payload.get("mode") or self.settings.get("mode"))
         profile = payload.get("kite_profile") or {}
-        self.configure({**settings_payload, "mode": mode}, kite_profile=profile)
+        self._configure_locked({**settings_payload, "mode": mode}, kite_profile=profile, preserve_session=preserve_session)
+        return self._evaluate_current_config_locked(payload, mode)
 
+    def _evaluate_current_config_locked(self, payload: dict[str, Any] | None = None, mode: str | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        mode = normalize_mode(mode or payload.get("mode") or self.settings.get("mode"))
         instruments = list(payload.get("instruments") or [])
         quotes = dict(payload.get("quotes") or {})
         settings = dict(self.settings)
-        index_history = self._frame(payload.get("index_history") or payload.get("index_candles") or payload.get("candles") or [])
+        index_history = pd.DataFrame() if mode in {MODE_PAPER, MODE_REAL} else self._frame(payload.get("index_history") or payload.get("index_candles") or payload.get("candles") or [])
         live_data = self._live_options_market_context(mode, settings, payload, index_history)
         if live_data.get("blocked"):
             decision = self._blocked_data_decision(mode, settings, live_data)
@@ -165,6 +206,8 @@ class OptionsAutoTerminalService:
             payload = {**payload, **dict(live_data.get("payload") or {})}
             instruments = list(live_data.get("instruments") or instruments)
             quotes = dict(live_data.get("quotes") or quotes)
+            if mode in {MODE_PAPER, MODE_REAL}:
+                index_history = self._frame(payload.get("index_history") or payload.get("index_candles") or [])
         account_state = {
             "available_capital": self._available_capital(mode),
             "available_balance": self.paper_broker.available_balance,
@@ -183,6 +226,7 @@ class OptionsAutoTerminalService:
         )
         if live_data:
             decision.update(live_data.get("diagnostics") or {})
+        self._record_index_tick_locked(decision, mode)
         blockers = decision.get("blockers") or []
         if mode in {MODE_PAPER, MODE_REAL} and self.settings.get("ready_plan_cache_enabled"):
             ready_plan = self.ready_plan_cache.refresh_from_decision(decision, self.settings)
@@ -194,6 +238,35 @@ class OptionsAutoTerminalService:
             self.session.record_rejection("; ".join(blockers), {"mode": mode})
         self.logger.log("INFO", "Options Auto evaluation completed", mode=mode, allowed=decision["allowed"], blockers=blockers)
         return {**decision, "session": self.session.to_dict(), "paper_account": self.paper_broker.snapshot()}
+
+    def _record_index_tick_locked(self, decision: dict[str, Any], mode: str) -> None:
+        if mode not in {MODE_PAPER, MODE_REAL}:
+            return
+        spot_value = decision.get("spot_value")
+        if spot_value in ("", None):
+            spot_value = (decision.get("spot") or {}).get("spot") if isinstance(decision.get("spot"), dict) else None
+        try:
+            spot = float(spot_value)
+        except (TypeError, ValueError):
+            return
+        if spot <= 0:
+            return
+        spot_payload = decision.get("spot") if isinstance(decision.get("spot"), dict) else {}
+        tick = {
+            "observed_at": datetime.now().isoformat(timespec="seconds"),
+            "decision_timestamp": decision.get("timestamp") or "",
+            "exchange_timestamp": spot_payload.get("timestamp") or "",
+            "mode": mode,
+            "underlying": spot_payload.get("underlying") or self.settings.get("underlying") or "",
+            "spot": spot,
+            "spot_source": decision.get("spot_source") or spot_payload.get("spot_source") or "",
+            "quote_key": spot_payload.get("quote_key") or "",
+            "age_seconds": spot_payload.get("age_seconds"),
+            "live_scan_cycle": self._live_scan_cycle_count,
+        }
+        self.index_ticks.append(tick)
+        if len(self.index_ticks) > 200:
+            self.index_ticks = self.index_ticks[-200:]
 
     def _trade_plan(self, selected: dict[str, Any], sizing: dict[str, Any], regime: dict[str, Any]) -> dict[str, Any]:
         return build_long_option_trade_plan(selected, sizing, regime, self.settings)
@@ -225,6 +298,23 @@ class OptionsAutoTerminalService:
                 "blockers": list(spot.get("blockers") or []),
                 "warnings": list(spot.get("warnings") or []),
                 "next_action": spot.get("next_action") or "",
+                "diagnostics": base_diagnostics,
+            }
+
+        candle_context = self._live_index_candle_context(client, underlying, mode, settings, spot)
+        base_diagnostics["data_mode"] = "live_index_tick_candles_option_quote_polling"
+        base_diagnostics["live_index_candle_source"] = candle_context.get("source")
+        base_diagnostics["live_index_candle_count"] = candle_context.get("candle_count")
+        base_diagnostics["live_index_candle_interval"] = candle_context.get("interval")
+        base_diagnostics["live_index_latest_candle"] = candle_context.get("latest_candle") or {}
+        base_diagnostics["live_index_candle_backfill"] = candle_context.get("backfill") or {}
+        base_diagnostics["warnings"].extend(candle_context.get("warnings") or [])
+        if not candle_context.get("candles"):
+            return {
+                "blocked": True,
+                "blockers": [f"Live {underlying} index candles are unavailable; retrying Zerodha live quote/history fetch."],
+                "warnings": candle_context.get("warnings") or [],
+                "next_action": "Keep Paper/Real Zerodha connected; Options Auto will retry and backfill the candle gap.",
                 "diagnostics": base_diagnostics,
             }
 
@@ -292,11 +382,38 @@ class OptionsAutoTerminalService:
             }
 
         return {
-            "payload": {"spot": spot.get("spot"), "data_source": source, "quote_age_seconds": spot.get("age_seconds") or 0},
+            "payload": {
+                "spot": spot.get("spot"),
+                "data_source": source,
+                "quote_age_seconds": spot.get("age_seconds") or 0,
+                "index_history": candle_context.get("candles") or [],
+                "index_candles": candle_context.get("candles") or [],
+            },
             "instruments": chain["contracts"],
             "quotes": quote_result.get("quotes") or {},
             "diagnostics": diagnostics,
         }
+
+    def _live_index_candle_context(self, client: Any, underlying: str, mode: str, settings: dict[str, Any], spot: dict[str, Any]) -> dict[str, Any]:
+        token = None
+        warnings: list[str] = []
+        try:
+            config = SYMBOL_CONFIG.get(underlying) or SYMBOL_CONFIG["NIFTY"]
+            token = self._index_token(client, underlying, str(config.get("index_exchange") or "NSE"))
+        except Exception as exc:
+            warnings.append(f"Index token lookup for candle backfill failed; live tick candle still active: {exc}")
+        result = self.live_index_candles.update(
+            client=client,
+            instrument_token=token,
+            underlying=underlying,
+            mode=mode,
+            interval=settings.get("chart_interval") or "3minute",
+            spot=float(spot.get("spot") or 0),
+            timestamp=spot.get("timestamp"),
+            volume=spot.get("volume"),
+        )
+        result["warnings"] = list(dict.fromkeys(warnings + list(result.get("warnings") or [])))
+        return result
 
     def _blocked_data_decision(self, mode: str, settings: dict[str, Any], live_data: dict[str, Any]) -> dict[str, Any]:
         blockers = list(dict.fromkeys(live_data.get("blockers") or ["Options Auto market data is unavailable."]))
@@ -342,13 +459,174 @@ class OptionsAutoTerminalService:
         return result
 
     def start_paper(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = {**dict(payload or {}), "mode": MODE_PAPER}
-        result = self.evaluate(payload)
-        self.mode_guard.assert_paper_allowed()
-        self.session.status = "PAPER_READY"
-        result["session"] = self.session.to_dict()
-        result["message"] = "Paper evaluation completed. Order simulation remains local to Options Auto paper broker."
+        with self._lock:
+            payload = {**dict(payload or {}), "mode": MODE_PAPER}
+            result = self._evaluate_locked(payload)
+            self.mode_guard.assert_paper_allowed()
+            self._sync_paper_lifecycle_to_session_locked()
+            self.session.status = "PAPER_SCANNING"
+            self._start_live_scan_locked(MODE_PAPER, payload, status="PAPER_SCANNING")
+            result["session"] = self.session.to_dict()
+            result["live_scan"] = self._live_scan_state_locked()
+            result["message"] = "Paper live scanner started. It will keep polling Zerodha paper data and re-check entries until stopped."
+            return result
+
+    def _start_live_scan_locked(self, mode: str, payload: dict[str, Any], status: str) -> None:
+        self._stop_live_scan_locked(reason="restart")
+        self._live_scan_stop = threading.Event()
+        self._live_scan_mode = normalize_mode(mode)
+        self._live_scan_payload = self._scan_payload(payload, self._live_scan_mode)
+        self._live_scan_interval_seconds = self._live_scan_interval_locked()
+        self._live_scan_started_at = datetime.now().isoformat(timespec="seconds")
+        self._live_scan_last_cycle = ""
+        self._live_scan_last_error = ""
+        self._live_scan_cycle_count = 0
+        self.session.status = status
+        stop_event = self._live_scan_stop
+        self._live_scan_thread = threading.Thread(target=self._live_scan_loop, args=(stop_event,), daemon=True)
+        self._live_scan_thread.start()
+        self.logger.log("INFO", "Options Auto live scanner started", mode=self._live_scan_mode, interval_seconds=self._live_scan_interval_seconds)
+
+    def _stop_live_scan_locked(self, reason: str = "") -> None:
+        if self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set():
+            self.logger.log("INFO", "Options Auto live scanner stop requested", mode=self._live_scan_mode, reason=reason)
+        self._live_scan_stop.set()
+        self.live_index_candles.stop()
+
+    def _live_scan_loop(self, stop_event: threading.Event) -> None:
+        while not stop_event.wait(max(0.2, float(self._live_scan_interval_seconds or 1.0))):
+            with self._lock:
+                if stop_event is not self._live_scan_stop:
+                    break
+                if stop_event.is_set() or self._live_scan_mode not in {MODE_PAPER, MODE_REAL}:
+                    break
+                try:
+                    if self._live_scan_mode == MODE_REAL:
+                        self._sync_real_option_positions_locked()
+                    self._run_live_scan_cycle_locked()
+                    self._live_scan_cycle_count += 1
+                    self._live_scan_last_cycle = datetime.now().isoformat(timespec="seconds")
+                    self._live_scan_last_error = ""
+                    self._live_scan_interval_seconds = self._live_scan_interval_locked()
+                except Exception as exc:
+                    self._live_scan_last_error = str(exc)
+                    self.logger.log("ERROR", "Options Auto live scanner cycle failed", mode=self._live_scan_mode, error=str(exc))
+
+    def _run_live_scan_cycle_locked(self) -> dict[str, Any]:
+        mode = self._live_scan_mode
+        payload = {
+            **dict(self._live_scan_payload or {}),
+            "mode": mode,
+            "settings": dict(self.settings),
+            "kite_profile": dict(self.mode_guard.kite_profile or {}),
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+        }
+        result = self._evaluate_current_config_locked(payload, mode)
+        live_scan_action: dict[str, Any]
+        if mode == MODE_PAPER:
+            live_scan_action = self._paper_live_scan_action_locked(result, payload)
+            if self.session.status not in {"PAPER_APPROVAL_PENDING", "PAPER_ENTRY_PENDING", "PAPER_TRADE_ACTIVE"}:
+                self.session.status = "PAPER_SCANNING"
+        else:
+            live_scan_action = self._real_live_scan_action_locked(result, payload)
+            if self.session.status != "REAL_ENTRY_ORDER_OPEN":
+                self.session.status = "REAL_DRY_RUN_SCANNING" if live_scan_action.get("dry_run") else "REAL_SCANNING"
+        result["live_scan_action"] = live_scan_action
+        self.session.last_decision = {**dict(self.session.last_decision or {}), "live_scan_action": live_scan_action}
         return result
+
+    def _paper_live_scan_action_locked(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        if not self.settings.get("auto_entry_enabled"):
+            return {"action": "SCAN_ONLY", "reason": "Auto entry is disabled."}
+        if self._paper_lifecycle_active():
+            return {"action": "HOLD", "reason": "Paper approval, pending entry, or active trade already exists."}
+        if not decision.get("allowed"):
+            return {"action": "HOLD", "reason": "Decision blocked by governor.", "blockers": decision.get("blockers") or []}
+        if self.settings.get("ask_permission_before_entry", True):
+            pending = self.paper_lifecycle.create_pending(decision, int(self.settings.get("approval_timeout_seconds") or 30))
+            self.session.status = "PAPER_APPROVAL_PENDING"
+            self.logger.log("INFO", "Options Auto paper live scan approval pending", approval_id=pending.get("approval_id"))
+            return {"action": "APPROVAL_CREATED", "approval_id": pending.get("approval_id")}
+        final_validation = self._execute_paper_decision_locked(decision, payload)
+        return final_validation
+
+    def _execute_paper_decision_locked(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        final_validation = self._final_entry_validation(decision, payload)
+        if self.settings.get("fast_final_validation_enabled") and not final_validation.get("allowed"):
+            blockers = list(dict.fromkeys((decision.get("blockers") or []) + final_validation.get("blockers", [])))
+            self.session.record_rejection("; ".join(blockers), {"mode": MODE_PAPER, "stage": "LIVE_SCAN_FINAL_VALIDATION"})
+            return {"action": "BLOCKED_FINAL_VALIDATION", "final_validation": final_validation, "blockers": blockers}
+        if final_validation.get("entry_limit") and decision.get("trade_plan"):
+            decision["trade_plan"] = {**decision["trade_plan"], "entry_price": final_validation["entry_limit"]}
+        pending = self.paper_lifecycle.create_pending(decision, int(self.settings.get("approval_timeout_seconds") or 30))
+        approved = self.paper_lifecycle.approve(pending["approval_id"])
+        self.session.orders.append(approved["entry_order"])
+        self.session.active_trades = list(self.paper_lifecycle.active_trades)
+        self.session.status = "PAPER_ENTRY_PENDING"
+        self.logger.log("INFO", "Options Auto paper live scan entry pending", order_id=approved["entry_order"]["order_id"])
+        return {
+            "action": "PAPER_ENTRY_PENDING",
+            "approval_id": pending.get("approval_id"),
+            "order_id": approved["entry_order"].get("order_id"),
+            "final_validation": final_validation,
+        }
+
+    def _real_live_scan_action_locked(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        dry_run = bool(self.settings.get("dry_run_real_only") or not self.settings.get("real_orders_enabled"))
+        action = {
+            "action": "REAL_SCAN_ONLY",
+            "dry_run": dry_run,
+            "orders_sent": 0,
+            "reason": "Real live scanner refreshes market data continuously; order sending remains behind guarded Start Real Engine.",
+        }
+        if decision.get("allowed"):
+            action["adaptive_dry_run"] = self._real_adaptive_dry_run(decision, payload)
+            self.session.record_safety_event("Real Options Auto setup found by live scanner", {"dry_run": dry_run, "orders_sent": 0})
+        return action
+
+    def _scan_payload(self, payload: dict[str, Any], mode: str) -> dict[str, Any]:
+        payload = dict(payload or {})
+        allowed_keys = {
+            "expiry",
+            "option_expiry",
+            "market_cue",
+            "fii_dii_status",
+            "features",
+            "index_history",
+            "index_candles",
+            "candles",
+            "risk_state",
+            "market_phase",
+            "cue_phase",
+            "underlying",
+        }
+        return {key: payload[key] for key in allowed_keys if key in payload} | {"mode": mode}
+
+    def _live_scan_interval_locked(self) -> float:
+        profile = str(self.settings.get("strategy_profile") or "BALANCED").strip().lower()
+        if profile == "AGGRESSIVE":
+            key = "adaptive_scan_seconds_aggressive"
+        elif profile == "CONSERVATIVE":
+            key = "adaptive_scan_seconds_conservative"
+        else:
+            key = "adaptive_scan_seconds_balanced"
+        try:
+            value = float(self.settings.get(key) or 2)
+        except (TypeError, ValueError):
+            value = 2.0
+        return max(1.0, min(60.0, value))
+
+    def _live_scan_state_locked(self) -> dict[str, Any]:
+        running = bool(self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set())
+        return {
+            "running": running,
+            "mode": self._live_scan_mode,
+            "interval_seconds": self._live_scan_interval_seconds,
+            "started_at": self._live_scan_started_at,
+            "last_cycle": self._live_scan_last_cycle,
+            "last_error": self._live_scan_last_error,
+            "cycle_count": self._live_scan_cycle_count,
+        }
 
     def execute_paper_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.start_paper(payload)
@@ -433,15 +711,19 @@ class OptionsAutoTerminalService:
         return {**result, "paper_account": self.paper_broker.snapshot(), "session": self.session.to_dict()}
 
     def real_dry_run(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = {**dict(payload or {}), "mode": MODE_REAL}
-        result = self.evaluate(payload)
-        result["dry_run"] = True
-        result["orders_sent"] = 0
-        result["adaptive_dry_run"] = self._real_adaptive_dry_run(result, payload)
-        self.session.status = "REAL_DRY_RUN_ONLY"
-        result["session"] = self.session.to_dict()
-        result["message"] = "Real dry-run complete. Live orders require REAL login, preflight, final validation, execution safety, OCO, and reconciliation."
-        return result
+        with self._lock:
+            payload = {**dict(payload or {}), "mode": MODE_REAL}
+            result = self._evaluate_locked(payload)
+            result["dry_run"] = True
+            result["orders_sent"] = 0
+            result["adaptive_dry_run"] = self._real_adaptive_dry_run(result, payload)
+            result["real_position_sync"] = self._sync_real_option_positions_locked(payload)
+            self.session.status = "REAL_DRY_RUN_SCANNING"
+            self._start_live_scan_locked(MODE_REAL, payload, status="REAL_DRY_RUN_SCANNING")
+            result["session"] = self.session.to_dict()
+            result["live_scan"] = self._live_scan_state_locked()
+            result["message"] = "Real dry-run scanner started. It keeps polling Real Zerodha data and sends zero orders."
+            return result
 
     def real_preflight_check(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -449,7 +731,7 @@ class OptionsAutoTerminalService:
         mode = normalize_mode(payload.get("mode") or settings.get("mode") or MODE_REAL)
         client = self.kite_client_provider("LIVE") if mode == MODE_REAL else None
         settings = self._real_capability_settings(settings, mode, client, payload)
-        self.configure({**settings, "mode": mode}, kite_profile=payload.get("kite_profile") or {})
+        self._configure_locked({**settings, "mode": mode}, kite_profile=payload.get("kite_profile") or {}, preserve_session=bool(self._live_scan_state_locked().get("running")))
         self.real_api_manager.client = client
         broker_orders = self._broker_orders(client, payload)
         positions = self._broker_positions(client, payload)
@@ -505,6 +787,54 @@ class OptionsAutoTerminalService:
         self.logger.log("WARN", "Options Auto real Stop New Entries activated", source=result["source"])
         return {**result, "session": self.session.to_dict()}
 
+    def stop_live_scan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            payload = dict(payload or {})
+            mode = normalize_mode(payload.get("mode") or self._live_scan_mode or self.settings.get("mode"))
+            self._stop_live_scan_locked(reason=payload.get("reason") or "stop requested")
+            if mode == MODE_PAPER:
+                self._sync_paper_lifecycle_to_session_locked()
+            elif mode == MODE_REAL:
+                self._sync_real_option_positions_locked(payload)
+            if mode == MODE_REAL:
+                self.session.status = "REAL_STOPPED"
+            elif mode == MODE_PAPER:
+                self.session.status = "PAPER_STOPPED"
+            else:
+                self.session.status = "IDLE"
+            result = {"stopped": True, "mode": mode, "session": self.session.to_dict(), "live_scan": self._live_scan_state_locked()}
+            self.logger.log("INFO", "Options Auto live scanner stopped", mode=mode)
+            return result
+
+    def kill_switch(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            payload = dict(payload or {})
+            mode = normalize_mode(payload.get("mode") or self._live_scan_mode or self.settings.get("mode"))
+            self._stop_live_scan_locked(reason="kill switch")
+            paper_cancel = {}
+            real_runtime = {}
+            if mode == MODE_PAPER:
+                if self.paper_lifecycle.pending_approval:
+                    self.paper_lifecycle.pending_approval["status"] = "KILL_SWITCH_CANCELLED"
+                    self.paper_lifecycle.pending_approval = None
+                if self.paper_lifecycle.pending_entries:
+                    paper_cancel = self.paper_lifecycle.cancel_pending_entry(reason="Kill switch cancelled pending paper entries.")
+                self._sync_paper_lifecycle_to_session_locked()
+            if mode == MODE_REAL:
+                real_runtime = self.real_controller.enter_safe_mode(payload.get("source") or "UI", payload.get("reason") or "Options Auto kill switch activated.")
+                self._sync_real_option_positions_locked(payload)
+            self.session.status = f"{mode}_KILL_SWITCH_ACTIVE"
+            event = {
+                "mode": mode,
+                "source": payload.get("source") or "UI",
+                "reason": payload.get("reason") or "Operator activated Options Auto kill switch.",
+                "paper_cancel": paper_cancel,
+                "real_runtime": real_runtime,
+            }
+            self.session.record_safety_event("Options Auto kill switch activated", event)
+            self.logger.log("WARN", "Options Auto kill switch activated", mode=mode)
+            return {"killed": True, **event, "session": self.session.to_dict(), "live_scan": self._live_scan_state_locked()}
+
     def real_safe_mode(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         result = self.real_controller.enter_safe_mode(payload.get("source") or "UI", payload.get("reason") or "")
@@ -528,62 +858,75 @@ class OptionsAutoTerminalService:
         return result
 
     def place_real_order(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        payload = {**dict(payload or {}), "mode": MODE_REAL}
-        client = self.kite_client_provider("LIVE")
-        if not client:
-            return self._blocked_real_order(["Real Money Zerodha is not connected."])
-        settings = self._real_capability_settings({**self.settings, **dict(payload.get("settings") or {})}, MODE_REAL, client, payload)
-        payload["settings"] = settings
-        self.configure(settings, kite_profile=payload.get("kite_profile") or {})
-        self.real_api_manager.client = client
+        with self._lock:
+            payload = {**dict(payload or {}), "mode": MODE_REAL}
+            client = self.kite_client_provider("LIVE")
+            if not client:
+                return self._blocked_real_order(["Real Money Zerodha is not connected."])
+            settings = self._real_capability_settings({**self.settings, **dict(payload.get("settings") or {})}, MODE_REAL, client, payload)
+            payload["settings"] = settings
+            self._configure_locked(settings, kite_profile=payload.get("kite_profile") or {}, preserve_session=False)
+            self.real_api_manager.client = client
 
-        preflight = self.real_preflight_check({
-            **payload,
-            "settings": settings,
-            "market_open": payload.get("market_open", True),
-            "instruments_valid": payload.get("instruments_valid", True),
-        })
-        if not preflight.get("allowed"):
-            return self._blocked_real_order(preflight.get("blockers") or ["Real preflight failed."], preflight=preflight)
+            preflight = self.real_preflight_check({
+                **payload,
+                "settings": settings,
+                "market_open": payload.get("market_open", True),
+                "instruments_valid": payload.get("instruments_valid", True),
+            })
+            if not preflight.get("allowed"):
+                blocked = self._blocked_real_order(preflight.get("blockers") or ["Real preflight failed."], preflight=preflight)
+                self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+                return {**blocked, "live_scan": self._live_scan_state_locked()}
 
-        decision = dict(payload.get("decision") or {})
-        if not decision:
-            decision = self.evaluate(payload)
-        if not decision.get("allowed"):
-            return self._blocked_real_order(decision.get("blockers") or ["Decision pipeline blocked real order."], preflight=preflight, decision=decision)
+            decision = dict(payload.get("decision") or {})
+            if not decision:
+                decision = self._evaluate_current_config_locked(payload, MODE_REAL)
+            if not decision.get("allowed"):
+                blocked = self._blocked_real_order(decision.get("blockers") or ["Decision pipeline blocked real order."], preflight=preflight, decision=decision)
+                self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+                return {**blocked, "live_scan": self._live_scan_state_locked()}
 
-        final_validation = self._final_entry_validation(decision, payload)
-        if not final_validation.get("allowed"):
-            return self._blocked_real_order(final_validation.get("blockers") or ["Fast final validation blocked real order."], preflight=preflight, decision=decision, final_validation=final_validation)
+            final_validation = self._final_entry_validation(decision, payload)
+            if not final_validation.get("allowed"):
+                blocked = self._blocked_real_order(final_validation.get("blockers") or ["Fast final validation blocked real order."], preflight=preflight, decision=decision, final_validation=final_validation)
+                self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+                return {**blocked, "live_scan": self._live_scan_state_locked()}
 
-        selected = dict(decision.get("selected_contract") or {})
-        trade_plan = {**dict(decision.get("trade_plan") or {}), "entry_price": final_validation.get("entry_limit") or (decision.get("trade_plan") or {}).get("entry_price")}
-        order_request, order_blockers = self._real_entry_order_request(selected, trade_plan, preflight)
-        if order_blockers:
-            return self._blocked_real_order(order_blockers, preflight=preflight, decision=decision, final_validation=final_validation)
+            selected = dict(decision.get("selected_contract") or {})
+            trade_plan = {**dict(decision.get("trade_plan") or {}), "entry_price": final_validation.get("entry_limit") or (decision.get("trade_plan") or {}).get("entry_price")}
+            order_request, order_blockers = self._real_entry_order_request(selected, trade_plan, preflight)
+            if order_blockers:
+                blocked = self._blocked_real_order(order_blockers, preflight=preflight, decision=decision, final_validation=final_validation)
+                self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+                return {**blocked, "live_scan": self._live_scan_state_locked()}
 
-        adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard)
-        controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
-        if not controller_result.get("real_order_sent"):
-            return self._blocked_real_order(controller_result.get("blockers") or ["Real entry order failed."], preflight=preflight, decision=decision, final_validation=final_validation, execution=controller_result)
+            adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard)
+            controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
+            if not controller_result.get("real_order_sent"):
+                blocked = self._blocked_real_order(controller_result.get("blockers") or ["Real entry order failed."], preflight=preflight, decision=decision, final_validation=final_validation, execution=controller_result)
+                self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+                return {**blocked, "live_scan": self._live_scan_state_locked()}
 
-        entry_order = controller_result["entry_order"]
-        self.session.orders.append(entry_order)
-        self.session.status = "REAL_ENTRY_ORDER_OPEN"
-        self.session.record_safety_event("Real Options Auto entry order sent", {"order_id": entry_order.get("order_id"), "tradingsymbol": entry_order.get("tradingsymbol")})
-        self.logger.log("WARN", "Options Auto real entry order sent", order_id=entry_order.get("order_id"), tradingsymbol=entry_order.get("tradingsymbol"))
-        return {
-            "allowed": True,
-            "real_order_sent": True,
-            "order_stage": "ENTRY_ORDER_OPEN",
-            "entry_order": entry_order,
-            "trade_plan": trade_plan,
-            "preflight": preflight,
-            "final_validation": final_validation,
-            "execution": controller_result,
-            "session": self.session.to_dict(),
-            "message": "Real BUY LIMIT entry sent through guarded Kite adapter.",
-        }
+            entry_order = controller_result["entry_order"]
+            self.session.orders.append(entry_order)
+            self.session.status = "REAL_ENTRY_ORDER_OPEN"
+            self.session.record_safety_event("Real Options Auto entry order sent", {"order_id": entry_order.get("order_id"), "tradingsymbol": entry_order.get("tradingsymbol")})
+            self.logger.log("WARN", "Options Auto real entry order sent", order_id=entry_order.get("order_id"), tradingsymbol=entry_order.get("tradingsymbol"))
+            self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+            return {
+                "allowed": True,
+                "real_order_sent": True,
+                "order_stage": "ENTRY_ORDER_OPEN",
+                "entry_order": entry_order,
+                "trade_plan": trade_plan,
+                "preflight": preflight,
+                "final_validation": final_validation,
+                "execution": controller_result,
+                "session": self.session.to_dict(),
+                "live_scan": self._live_scan_state_locked(),
+                "message": "Real BUY LIMIT entry sent through guarded Kite adapter. Real scanner remains active for fresh data and monitoring.",
+            }
 
     def upload_fii_dii_csv(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -1037,6 +1380,105 @@ class OptionsAutoTerminalService:
                     self.logger.log("WARN", "Real margin lookup failed during Options Auto evaluation", error=str(exc))
                     return 0.0
         return float(self.settings.get("paper_starting_balance") or 0)
+
+    def _sync_paper_lifecycle_to_session_locked(self) -> dict[str, Any]:
+        self.session.active_trades = list(self.paper_lifecycle.active_trades)
+        self.session.orders = list(self.paper_broker.orders[-100:])
+        if self.paper_lifecycle.active_trades:
+            state = "PAPER_TRADE_ACTIVE"
+        elif self.paper_lifecycle.pending_entries:
+            state = "PAPER_ENTRY_PENDING"
+        elif self.paper_lifecycle.pending_approval:
+            state = "PAPER_APPROVAL_PENDING"
+        else:
+            state = self.session.status
+        return {
+            "state": state,
+            "active_trades": len(self.paper_lifecycle.active_trades),
+            "pending_entries": len(self.paper_lifecycle.pending_entries),
+            "pending_approval": bool(self.paper_lifecycle.pending_approval),
+        }
+
+    def _sync_real_option_positions_locked(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        client = self.kite_client_provider("LIVE")
+        if not client:
+            return {"synced": False, "reason": "Real Zerodha client is not connected.", "active_trades": 0}
+        broker_orders = self._broker_orders(client, payload)
+        positions = self._normalise_positions(self._broker_positions(client, payload))
+        option_positions = [position for position in positions if self._is_open_option_position(position)]
+        option_orders = [order for order in broker_orders if self._is_option_order(order)]
+        active = [self._trade_from_real_position(position, option_orders) for position in option_positions]
+        active = [trade for trade in active if trade]
+        self.session.active_trades = active
+        self.session.orders = option_orders[-100:]
+        if active:
+            if self.session.status not in {"REAL_SCANNING", "REAL_DRY_RUN_SCANNING", "REAL_ENTRY_ORDER_OPEN"}:
+                self.session.status = "REAL_POSITION_ACTIVE"
+        return {
+            "synced": True,
+            "active_trades": len(active),
+            "option_orders": len(option_orders),
+            "source": "zerodha_real_positions",
+        }
+
+    def _normalise_positions(self, positions: list[dict[str, Any]] | dict[str, Any] | None) -> list[dict[str, Any]]:
+        if isinstance(positions, dict):
+            rows: list[dict[str, Any]] = []
+            for key in ("net", "day", "positions"):
+                value = positions.get(key)
+                if isinstance(value, list):
+                    rows.extend([dict(item) for item in value if isinstance(item, dict)])
+            return rows
+        return [dict(item) for item in list(positions or []) if isinstance(item, dict)]
+
+    def _is_open_option_position(self, position: dict[str, Any]) -> bool:
+        quantity = _number(position.get("quantity"), position.get("net_quantity"))
+        if quantity <= 0:
+            return False
+        exchange = str(position.get("exchange") or position.get("segment") or "").upper()
+        symbol = str(position.get("tradingsymbol") or position.get("symbol") or "").upper()
+        return exchange in {"NFO", "BFO", "NFO-OPT", "BFO-OPT"} and self._looks_like_option_symbol(symbol)
+
+    def _is_option_order(self, order: dict[str, Any]) -> bool:
+        exchange = str(order.get("exchange") or order.get("segment") or "").upper()
+        symbol = str(order.get("tradingsymbol") or order.get("symbol") or "").upper()
+        return exchange in {"NFO", "BFO", "NFO-OPT", "BFO-OPT"} and self._looks_like_option_symbol(symbol)
+
+    def _trade_from_real_position(self, position: dict[str, Any], orders: list[dict[str, Any]]) -> dict[str, Any]:
+        symbol = str(position.get("tradingsymbol") or position.get("symbol") or "").upper()
+        symbol_orders = [order for order in orders if str(order.get("tradingsymbol") or order.get("symbol") or "").upper() == symbol]
+        sell_orders = [order for order in symbol_orders if str(order.get("transaction_type") or "").upper() == "SELL" and str(order.get("status") or "OPEN").upper() not in {"COMPLETE", "CANCELLED", "REJECTED"}]
+        target = next((order for order in sell_orders if str(order.get("order_type") or "").upper() == "LIMIT"), {})
+        stoploss = next((order for order in sell_orders if str(order.get("order_type") or "").upper() in {"SL", "SL-M", "SL-LIMIT", "STOPLOSS", "STOPLOSS_LIMIT"}), {})
+        quantity = abs(int(_number(position.get("quantity"), position.get("net_quantity"))))
+        entry = _number(position.get("average_price"), position.get("buy_price") or 0)
+        ltp = _number(position.get("last_price"), position.get("close_price") or entry)
+        return {
+            "trade_id": f"OA-REAL-{symbol}",
+            "mode": MODE_REAL,
+            "status": "POSITION_ACTIVE",
+            "tradingsymbol": symbol,
+            "exchange": position.get("exchange") or "NFO",
+            "product": position.get("product") or "NRML",
+            "side": "CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else "",
+            "quantity": quantity,
+            "entry_price": entry,
+            "last_ltp": ltp,
+            "unrealized_pnl": _number(position.get("pnl")),
+            "target": _number(target.get("price")),
+            "stoploss": _number(stoploss.get("trigger_price"), stoploss.get("price")),
+            "target_order_id": target.get("order_id") or target.get("id") or "",
+            "stoploss_order_id": stoploss.get("order_id") or stoploss.get("id") or "",
+            "oco_active": bool(target and stoploss),
+            "position_protected": bool(target and stoploss),
+            "source": "zerodha_real_positions",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _looks_like_option_symbol(self, symbol: str) -> bool:
+        symbol = str(symbol or "").upper()
+        return symbol.endswith("CE") or symbol.endswith("PE")
 
     def _paper_lifecycle_active(self) -> bool:
         return bool(

@@ -239,23 +239,23 @@ function settingsPayload(modeOverride = "") {
 function evaluationPayload(modeOverride = "", options = {}) {
   const settings = settingsPayload(modeOverride);
   const allowDemo = Boolean(options.allowDemo || state.activeTab === "debug");
-  const marketCue = parseJson("#oa-market-cue-json", sampleMarketCue(), allowDemo);
-  const instruments = parseJson("#oa-instruments-json", sampleInstruments(), allowDemo);
-  const quotes = parseJson("#oa-quotes-json", sampleQuotes(), allowDemo);
+  const marketCue = allowDemo ? parseJson("#oa-market-cue-json", sampleMarketCue(), true) : {};
+  const instruments = allowDemo ? parseJson("#oa-instruments-json", sampleInstruments(), true) : [];
+  const quotes = allowDemo ? parseJson("#oa-quotes-json", sampleQuotes(), true) : {};
   const demoData = allowDemo && (marketCue.demo_data || Object.values(quotes || {}).some(item => item?.demo_data));
-  const dataSource = demoData ? "DEBUG" : instruments.length && Object.keys(quotes || {}).length ? "LIVE" : "UNKNOWN";
+  const dataSource = demoData ? "DEBUG" : allowDemo && instruments.length && Object.keys(quotes || {}).length ? "DEBUG" : "ZERODHA_REQUIRED";
   state.dataSource = dataSource;
   return {
     mode: settings.mode,
     settings,
-    spot: numberValue($("#oa-spot")?.value, 22500),
+    spot: allowDemo ? numberValue($("#oa-spot")?.value, 22500) : undefined,
     quote_age_seconds: numberValue($("#oa-quote-age")?.value, 0),
     market_cue: marketCue,
     instruments,
     quotes,
     data_source: dataSource,
     demo_data: demoData,
-    features: { ema_alignment_score: 18, vwap_score: 14, rsi_slope_score: 10, volume_score: 8, depth_score: 5 },
+    features: allowDemo ? { ema_alignment_score: 18, vwap_score: 14, rsi_slope_score: 10, volume_score: 8, depth_score: 5 } : {},
     time_of_day_score: 70,
   };
 }
@@ -264,11 +264,14 @@ function backtestPayload() {
   const underlying = $("#oa-backtest-symbol")?.value || "NIFTY";
   const interval = $("#oa-backtest-interval")?.value || "3minute";
   const tradeDate = $("#oa-backtest-date")?.value || todayLocalIso();
+  const backtestSpot = $("#oa-backtest-spot")?.value || "";
+  const span = numberValue($("#oa-backtest-span")?.value, 4);
   return {
     data_source: "zerodha_historical",
     underlying,
     interval,
     trade_date: tradeDate,
+    backtest_spot: backtestSpot,
     settings: {
       ...settingsPayload("BACKTEST"),
       underlying,
@@ -277,6 +280,7 @@ function backtestPayload() {
       strategy_profile: $("#oa-backtest-profile")?.value || "BALANCED",
       max_trades_per_day: numberValue($("#oa-backtest-max-trades")?.value, 3),
       buy_score_threshold: numberValue($("#oa-backtest-score")?.value, 70),
+      atm_scan_strike_span: span,
     },
   };
 }
@@ -441,15 +445,27 @@ function renderFiiDiiStatus(status = {}) {
 function renderDataSourcePanel(result = {}) {
   const source = result.data_source || state.dataSource || "UNKNOWN";
   const demo = source === "DEBUG" || source === "DEMO" || Boolean(result.demo_data);
-  setBadge("#oa-data-source-badge", source, demo ? "yellow" : source === "LIVE" ? "green" : "grey");
+  const health = result.options_data_health || {};
+  const sourceOk = source === "LIVE" || source === "zerodha_paper_data" || source === "zerodha_real_data";
+  setBadge("#oa-data-source-badge", source, demo ? "yellow" : sourceOk ? "green" : "grey");
   setHtml("#oa-demo-banner", demo ? `<div class="oa-data-banner">DEMO/SAMPLE DATA - not live market data.</div>` : "");
   setHtml("#oa-data-source-panel", [
     metric("Source", source),
+    metric("Spot Source", result.spot_source || health.spot_source || "-"),
+    metric("Live Spot", result.spot_value || health.spot || "-"),
+    metric("ATM Strike", result.atm_strike || health.atm_strike || "-"),
+    metric("Strike Step", result.strike_step || health.strike_step || "-"),
+    metric("Candidate Span", result.candidate_span ?? health.candidate_span ?? "-"),
+    metric("Candidate Count", result.candidate_count ?? health.candidate_count ?? "-"),
+    metric("Valid Quote Count", result.valid_quote_count ?? health.valid_quote_count ?? "-"),
+    metric("Missing Quote Keys", (result.missing_quote_keys || health.missing_quote_keys || []).length),
     metric("Quote Age", `${text(result.quote_age_seconds ?? $("#oa-quote-age")?.value, "-")} sec`),
     metric("Stale Threshold", `${text((result.settings || state.status.settings || state.defaults.settings || {}).quote_stale_seconds, 3)} sec`),
     metric("FII/DII", (state.fiiDiiStatus.status || result.market_cue?.fii_dii_status?.status || "Not uploaded")),
     metric("News", result.market_cue?.components?.news !== undefined ? score(result.market_cue.components.news) : "No news summary"),
     metric("Trading Allowed", result.allowed ? "YES" : "NO"),
+    metric("Governor", result.governor?.state || "-"),
+    metric("Next Action", result.next_action || "-"),
   ].join(""));
 }
 
@@ -544,6 +560,15 @@ async function runBacktest() {
 function renderBacktestResults(result = state.lastBacktest) {
   const metrics = result.metrics || result.summary || {};
   const trades = result.trades || [];
+  const meta = result.source_metadata || {};
+  const decisions = result.decisions || [];
+  const blockerCounts = decisions.reduce((counts, row) => {
+    (row.blockers || (row.reason ? [row.reason] : [])).forEach(blocker => {
+      counts[blocker] = (counts[blocker] || 0) + 1;
+    });
+    return counts;
+  }, {});
+  const topBlockers = Object.entries(blockerCounts).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([label, count]) => `${label} (${count})`).join("; ");
   const grossPnl = metrics.gross_pnl ?? trades.reduce((sum, trade) => sum + numberValue(trade.gross_pnl, 0), 0);
   const charges = metrics.charges ?? trades.reduce((sum, trade) => sum + numberValue(trade.charges, 0), 0);
   const netPnl = metrics.net_pnl ?? metrics.total_pnl ?? trades.reduce((sum, trade) => sum + numberValue(trade.net_pnl, 0), 0);
@@ -551,6 +576,13 @@ function renderBacktestResults(result = state.lastBacktest) {
     metric("Data Source", result.data_source_label || result.data_source || "-"),
     metric("Rows", result.rows || 0),
     metric("Option Series", result.option_frames || 0),
+    metric("Spot Source", meta.spot_source || "-"),
+    metric("Backtest Spot", meta.spot || "-"),
+    metric("ATM Strike", meta.atm_strike || "-"),
+    metric("Contracts Requested", meta.contracts_requested || 0),
+    metric("Contracts Found", meta.contracts_found || 0),
+    metric("Proxy Quote", meta.historical_proxy_quote_warning ? "YES" : "NO"),
+    metric("Zero-Trade Reason", trades.length ? "-" : (topBlockers || "No entries satisfied the configured gates.")),
     metric("Net P&L", money(netPnl)),
     metric("Gross P&L", money(grossPnl)),
     metric("Charges", money(charges)),
@@ -1057,6 +1089,7 @@ function applySettings(settings) {
     ["#oa-backtest-interval", settings.chart_interval],
     ["#oa-backtest-profile", settings.strategy_profile],
     ["#oa-backtest-score", settings.buy_score_threshold],
+    ["#oa-backtest-span", settings.atm_scan_strike_span],
   ];
   pairs.forEach(([selector, content]) => {
     const node = $(selector);

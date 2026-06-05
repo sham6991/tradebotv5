@@ -3,6 +3,7 @@ import unittest
 from options_auto.intelligence.exit_manager import ExitManager
 from options_auto.intelligence.position_manager import PositionManager
 from options_auto.terminal_service import OptionsAutoTerminalService
+from tests.test_options_auto_auto_spot import FakeOptionsZerodha
 
 
 def sample_payload():
@@ -14,6 +15,8 @@ def sample_payload():
             "mode": "PAPER",
             "underlying": "NIFTY",
             "buy_score_threshold": 35,
+            "atm_scan_strike_span": 0,
+            "premium_expansion_required": False,
             "max_capital_per_trade_pct": 100,
             "max_risk_per_trade_pct": 10,
             "paper_starting_balance": 20000,
@@ -107,7 +110,7 @@ class OptionsAutoExitManagerTests(unittest.TestCase):
         self.assertIn("Averaging down", result["blockers"][0])
 
     def test_paper_market_process_applies_theta_exit_without_real_orders(self):
-        service = OptionsAutoTerminalService("results")
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
         service.execute_paper_plan(sample_payload())
         service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
 
@@ -118,7 +121,7 @@ class OptionsAutoExitManagerTests(unittest.TestCase):
         self.assertEqual(result["paper_account"]["orders"][-1]["transaction_type"], "SELL")
 
     def test_paper_market_process_can_move_sl_to_breakeven(self):
-        service = OptionsAutoTerminalService("results")
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
         service.execute_paper_plan(sample_payload())
         service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
 

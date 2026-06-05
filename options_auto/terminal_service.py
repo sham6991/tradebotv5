@@ -20,6 +20,9 @@ from options_auto.core.performance_monitor import PerformanceMonitor
 from options_auto.core.promotion import PromotionManager
 from options_auto.core.session_state import OptionsAutoSessionState
 from options_auto.core.watchdog import WatchdogService
+from options_auto.data.index_data_provider import OptionsAutoIndexDataProvider
+from options_auto.data.option_chain_builder import OptionChainBuilder
+from options_auto.data.options_quote_provider import OptionsQuoteProvider
 from options_auto.execution.execution_safety import DataQualityEngine, RealOrderPreflight
 from options_auto.execution.kite_api_manager import KiteApiManager, RateLimiter
 from options_auto.execution.kite_order_adapter import KiteOrderAdapter
@@ -150,6 +153,18 @@ class OptionsAutoTerminalService:
         instruments = list(payload.get("instruments") or [])
         quotes = dict(payload.get("quotes") or {})
         settings = dict(self.settings)
+        index_history = self._frame(payload.get("index_history") or payload.get("index_candles") or payload.get("candles") or [])
+        live_data = self._live_options_market_context(mode, settings, payload, index_history)
+        if live_data.get("blocked"):
+            decision = self._blocked_data_decision(mode, settings, live_data)
+            self.session.record_decision(decision)
+            self.session.record_rejection("; ".join(decision["blockers"]), {"mode": mode, "stage": "DATA"})
+            self.logger.log("WARN", "Options Auto data blocked evaluation", mode=mode, blockers=decision["blockers"])
+            return {**decision, "session": self.session.to_dict(), "paper_account": self.paper_broker.snapshot()}
+        if live_data:
+            payload = {**payload, **dict(live_data.get("payload") or {})}
+            instruments = list(live_data.get("instruments") or instruments)
+            quotes = dict(live_data.get("quotes") or quotes)
         account_state = {
             "available_capital": self._available_capital(mode),
             "available_balance": self.paper_broker.available_balance,
@@ -158,7 +173,7 @@ class OptionsAutoTerminalService:
         decision = evaluate_options_auto_decision(
             mode=mode,
             settings=settings,
-            index_history=self._frame(payload.get("index_history") or payload.get("index_candles") or payload.get("candles") or []),
+            index_history=index_history,
             option_candidates=instruments,
             quotes=quotes,
             market_cue_payload=market_cue_payload,
@@ -166,6 +181,8 @@ class OptionsAutoTerminalService:
             account_state=account_state,
             timestamp=payload.get("timestamp") or payload.get("datetime"),
         )
+        if live_data:
+            decision.update(live_data.get("diagnostics") or {})
         blockers = decision.get("blockers") or []
         if mode in {MODE_PAPER, MODE_REAL} and self.settings.get("ready_plan_cache_enabled"):
             ready_plan = self.ready_plan_cache.refresh_from_decision(decision, self.settings)
@@ -180,6 +197,141 @@ class OptionsAutoTerminalService:
 
     def _trade_plan(self, selected: dict[str, Any], sizing: dict[str, Any], regime: dict[str, Any]) -> dict[str, Any]:
         return build_long_option_trade_plan(selected, sizing, regime, self.settings)
+
+    def _live_options_market_context(self, mode: str, settings: dict[str, Any], payload: dict[str, Any], index_history: pd.DataFrame) -> dict[str, Any]:
+        if mode not in {MODE_PAPER, MODE_REAL}:
+            return {}
+        client_mode = "LIVE" if mode == MODE_REAL else "PAPER"
+        client = self.kite_client_provider(client_mode) or self.kite_client_provider(mode)
+        underlying = str(settings.get("underlying") or payload.get("underlying") or "NIFTY").upper()
+        spot_provider = OptionsAutoIndexDataProvider(lambda requested_mode: client if str(requested_mode).upper() in {client_mode, mode} else None)
+        spot = spot_provider.get_spot(underlying, mode, payload=payload, index_candles=index_history)
+        source = "zerodha_real_data" if mode == MODE_REAL else "zerodha_paper_data"
+        base_diagnostics = {
+            "data_source": source,
+            "market_data": source,
+            "order_execution": "real_zerodha_orders" if mode == MODE_REAL else "paper_simulation",
+            "data_mode": "index_option_quote_polling",
+            "spot": spot,
+            "spot_source": spot.get("spot_source"),
+            "spot_value": spot.get("spot"),
+            "missing_quote_keys": [],
+            "warnings": list(spot.get("warnings") or []),
+            "next_action": spot.get("next_action") or "",
+        }
+        if spot.get("blockers"):
+            return {
+                "blocked": True,
+                "blockers": list(spot.get("blockers") or []),
+                "warnings": list(spot.get("warnings") or []),
+                "next_action": spot.get("next_action") or "",
+                "diagnostics": base_diagnostics,
+            }
+
+        config = SYMBOL_CONFIG.get(underlying) or SYMBOL_CONFIG["NIFTY"]
+        option_exchange = str(config.get("option_exchange") or ("BFO" if underlying == "SENSEX" else "NFO")).upper()
+        instruments = self._client_instruments(client, option_exchange)
+        chain = OptionChainBuilder().build(
+            instruments,
+            underlying,
+            float(spot.get("spot") or 0),
+            span=_int_setting(settings.get("atm_scan_strike_span"), 4),
+            strike_step=config.get("strike_step"),
+            expiry=payload.get("expiry") or payload.get("option_expiry"),
+        )
+        diagnostics = {
+            **base_diagnostics,
+            "atm_strike": chain.get("atm"),
+            "strike_step": chain.get("strike_step"),
+            "candidate_span": chain.get("span"),
+            "candidate_count": chain.get("contracts_requested"),
+            "contracts_found": chain.get("contracts_found"),
+            "contracts_requested": chain.get("contracts_requested"),
+            "missing_contracts": chain.get("missing_contracts") or [],
+            "options_data_health": {
+                "underlying": underlying,
+                "spot_source": spot.get("spot_source"),
+                "spot": spot.get("spot"),
+                "atm_strike": chain.get("atm"),
+                "strike_step": chain.get("strike_step"),
+                "candidate_span": chain.get("span"),
+                "candidate_count": chain.get("contracts_requested"),
+                "contracts_found": chain.get("contracts_found"),
+            },
+        }
+        if not chain.get("contracts"):
+            return {
+                "blocked": True,
+                "blockers": [f"No {underlying} option contracts found around ATM {chain.get('atm')} on {option_exchange}."],
+                "warnings": [],
+                "next_action": "Refresh Paper Data Zerodha instruments or select a valid expiry.",
+                "diagnostics": diagnostics,
+            }
+
+        quote_result = OptionsQuoteProvider(client, source=source).quote_candidates(chain["contracts"])
+        valid_quote_count = int(quote_result.get("valid_quote_count") or 0)
+        diagnostics.update({
+            "quotes": quote_result.get("quotes") or {},
+            "missing_quote_keys": quote_result.get("missing_quote_keys") or [],
+            "quote_warnings": quote_result.get("warnings") or [],
+            "valid_quote_count": valid_quote_count,
+            "requested_quote_keys": quote_result.get("requested_quote_keys") or [],
+            "options_data_health": {
+                **diagnostics["options_data_health"],
+                "valid_quote_count": valid_quote_count,
+                "missing_quote_keys": quote_result.get("missing_quote_keys") or [],
+            },
+        })
+        if valid_quote_count <= 0:
+            return {
+                "blocked": True,
+                "blockers": [f"No valid {underlying} option quotes returned from {'Real Zerodha' if mode == MODE_REAL else 'Paper Data Zerodha'}."],
+                "warnings": quote_result.get("warnings") or [],
+                "next_action": "Check option quote permissions, instrument expiry, and Zerodha quote availability.",
+                "diagnostics": diagnostics,
+            }
+
+        return {
+            "payload": {"spot": spot.get("spot"), "data_source": source, "quote_age_seconds": spot.get("age_seconds") or 0},
+            "instruments": chain["contracts"],
+            "quotes": quote_result.get("quotes") or {},
+            "diagnostics": diagnostics,
+        }
+
+    def _blocked_data_decision(self, mode: str, settings: dict[str, Any], live_data: dict[str, Any]) -> dict[str, Any]:
+        blockers = list(dict.fromkeys(live_data.get("blockers") or ["Options Auto market data is unavailable."]))
+        warnings = list(dict.fromkeys(live_data.get("warnings") or []))
+        diagnostics = dict(live_data.get("diagnostics") or {})
+        next_action = live_data.get("next_action") or diagnostics.get("next_action") or ""
+        return {
+            "mode": mode,
+            "timestamp": pd.Timestamp.now().isoformat(),
+            "market_cue": {},
+            "regime": {"recommended_side": SIDE_WAIT, "regime": "blocked_by_data", "no_trade_reason": blockers[0]},
+            "selected_side": SIDE_WAIT,
+            "selected_contract": {},
+            "selection": {"side": SIDE_WAIT, "selected": None, "score": 0.0, "candidates": [], "blockers": blockers},
+            "trade_score": {"score": 0.0, "breakdown": {}, "weights": {}},
+            "data_quality": {"allowed": False, "state": "BLOCKED_BY_DATA", "blockers": blockers, "warnings": warnings},
+            "theta_premium_risk": {"allowed": False, "blockers": blockers, "warnings": warnings},
+            "options_risk": {"allowed": False, "blockers": blockers, "warnings": warnings},
+            "risk": {"allowed": True, "blockers": [], "warnings": []},
+            "discipline": {"allowed": True, "blockers": [], "warnings": []},
+            "entry_timing": {"allowed": False, "state": "BLOCKED_BY_DATA", "blockers": blockers, "warnings": warnings},
+            "execution": {"allowed": mode != MODE_REAL, "blockers": [], "warnings": []},
+            "governor": {"allowed": False, "state": "BLOCKED_BY_DATA", "blockers": blockers, "warnings": warnings, "mode": mode},
+            "position_size": {"quantity": 0, "lots": 0, "reason": blockers[0]},
+            "trade_plan": {},
+            "allowed": False,
+            "blockers": blockers,
+            "warnings": warnings,
+            "explanation": blockers[0],
+            "next_action": next_action,
+            "decision_snapshot": {"allowed": False, "blockers": blockers, "governor_state": "BLOCKED_BY_DATA"},
+            "real_execution_enabled": mode == MODE_REAL,
+            "real_execution_reason": "Real execution blocked until Options Auto market data is available." if mode == MODE_REAL else REAL_EXECUTION_DISABLED_REASON,
+            **diagnostics,
+        }
 
     def start_shadow(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = {**dict(payload or {}), "mode": MODE_SHADOW}
@@ -532,16 +684,26 @@ class OptionsAutoTerminalService:
         interval = str(payload.get("interval") or settings.get("chart_interval") or "3minute")
         index_token = self._index_token(client, underlying, str(config.get("index_exchange") or "NSE"))
         index_frame = self._historical_frame(client, index_token, from_dt, to_dt, interval, f"{underlying} index")
-        spot = _first_close(index_frame)
-        if spot <= 0:
-            raise ValueError(f"Could not infer ATM strike from {underlying} historical candles.")
-        strike = _round_to_step(_number(payload.get("strike"), spot), float(config.get("strike_step") or 50))
+        spot_result = OptionsAutoIndexDataProvider().get_spot(underlying, MODE_BACKTEST, payload=payload, index_candles=index_frame)
+        if spot_result.get("blockers"):
+            raise ValueError((spot_result.get("blockers") or [f"Could not infer ATM strike from {underlying} historical candles."])[0])
         option_exchange = str(config.get("option_exchange") or "NFO").upper()
         expiry = payload.get("expiry") or payload.get("option_expiry")
-        contracts = [
-            self._find_option_contract(client, underlying, option_exchange, "CE", strike, expiry, trade_day),
-            self._find_option_contract(client, underlying, option_exchange, "PE", strike, expiry, trade_day),
-        ]
+        chain = OptionChainBuilder().build(
+            self._client_instruments(client, option_exchange),
+            underlying,
+            float(spot_result.get("spot") or 0),
+            span=_int_setting(settings.get("atm_scan_strike_span"), 4),
+            strike_step=config.get("strike_step"),
+            expiry=expiry,
+        )
+        contracts = list(chain.get("contracts") or [])
+        if not contracts:
+            raise ValueError(
+                f"Expired option instrument metadata unavailable for selected date."
+                if trade_day < date.today()
+                else f"No {underlying} option contracts found around ATM {chain.get('atm')} on {option_exchange}."
+            )
         option_frames = []
         for contract in contracts:
             frame = self._historical_frame(
@@ -562,8 +724,15 @@ class OptionsAutoTerminalService:
             "to": to_dt.isoformat(sep=" "),
             "interval": interval,
             "index_token": index_token,
-            "atm_strike": strike,
+            "spot": spot_result.get("spot"),
+            "spot_source": spot_result.get("spot_source"),
+            "atm_strike": chain.get("atm"),
+            "strike_step": chain.get("strike_step"),
+            "candidate_span": chain.get("span"),
+            "contracts_requested": chain.get("contracts_requested"),
+            "contracts_found": chain.get("contracts_found"),
             "contracts": [_contract_summary(contract) for contract in contracts],
+            "historical_proxy_quote_warning": "Backtest uses OHLC-derived historical quote proxies for option bid/ask/depth.",
         }
         return index_frame, option_frames, metadata
 
@@ -1115,6 +1284,15 @@ def _number(value: Any, default: Any = 0.0) -> float:
             return float(default)
         except (TypeError, ValueError):
             return 0.0
+
+
+def _int_setting(value: Any, default: int) -> int:
+    if value in ("", None):
+        return int(default)
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return int(default)
 
 
 def _parse_trade_day(value: Any) -> date:

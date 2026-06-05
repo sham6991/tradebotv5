@@ -318,6 +318,7 @@ class OptionsAutoBacktestEngine:
         losing_trades = len([trade for trade in trades if trade.get("net_pnl", 0) < 0])
         total_pnl = sum(float(trade.get("net_pnl") or 0) for trade in trades)
         total_trades = len(trades)
+        blocker_counts = _blocker_counts(decisions)
         return {
             "mode": MODE_BACKTEST,
             "settings": settings,
@@ -325,6 +326,9 @@ class OptionsAutoBacktestEngine:
             "option_frames": len(option_frames),
             "decisions": decisions,
             "trades": trades,
+            "decision_rows_checked": len(decisions),
+            "blocker_counts": blocker_counts,
+            "zero_trade_reason": "" if trades else _zero_trade_reason(decisions, blocker_counts),
             "metrics": {
                 "total_trades": total_trades,
                 "winning_trades": winning_trades,
@@ -415,6 +419,28 @@ def _safe_float(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _blocker_counts(decisions: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in decisions or []:
+        blockers = list(row.get("blockers") or [])
+        if not blockers and row.get("reason"):
+            blockers = [str(row.get("reason"))]
+        for blocker in blockers:
+            text = str(blocker or "").strip()
+            if text:
+                counts[text] = counts.get(text, 0) + 1
+    return dict(sorted(counts.items(), key=lambda item: item[1], reverse=True))
+
+
+def _zero_trade_reason(decisions: list[dict[str, Any]], blocker_counts: dict[str, int]) -> str:
+    if not decisions:
+        return "No decision rows were available. Check index candles and option candle inputs."
+    if blocker_counts:
+        blocker, count = next(iter(blocker_counts.items()))
+        return f"No entries passed all gates. Top blocker: {blocker} ({count} rows)."
+    return "No entries were triggered before the end of the backtest."
 
 
 def _phase_from_timestamp(timestamp: Any) -> str:

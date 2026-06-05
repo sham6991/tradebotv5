@@ -3,6 +3,7 @@ import unittest
 from options_auto.constants import REAL_EXECUTION_DISABLED_REASON
 from options_auto.core.mode_guard import ModeGuard
 from options_auto.terminal_service import OptionsAutoTerminalService
+from tests.test_options_auto_auto_spot import FakeOptionsZerodha
 
 
 class OptionsAutoModeGuardTests(unittest.TestCase):
@@ -21,8 +22,8 @@ class OptionsAutoModeGuardTests(unittest.TestCase):
         self.assertEqual(guard.audit_log[-1].reason, REAL_EXECUTION_DISABLED_REASON)
 
     def test_service_real_dry_run_does_not_enable_real_orders(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: object())
-        result = service.real_dry_run({"settings": {"confirm_real_mode": True, "static_ip_confirmed": True}, "spot": 22500})
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540))
+        result = service.real_dry_run({"settings": {"confirm_real_mode": True, "static_ip_confirmed": True, "premium_expansion_required": False}, "spot": 22500})
 
         self.assertTrue(result["real_execution_enabled"])
         self.assertIn("guarded", result["real_execution_reason"])

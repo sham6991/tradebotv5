@@ -40,15 +40,37 @@ class OptionsAutoStaticUITests(unittest.TestCase):
 
     def test_backtest_payload_uses_historical_data_request(self):
         js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
         match = re.search(r"function backtestPayload\(\) \{(?P<body>.*?)\n\}", js, re.DOTALL)
 
         self.assertIsNotNone(match)
         body = match.group("body")
+        self.assertIn('id="oa-backtest-spot"', html)
+        self.assertIn('id="oa-backtest-span"', html)
         self.assertIn('data_source: "zerodha_historical"', body)
         self.assertIn("trade_date: tradeDate", body)
+        self.assertIn("backtest_spot: backtestSpot", body)
+        self.assertIn("atm_scan_strike_span: span", body)
         self.assertIn("underlying", body)
         self.assertIn("interval", body)
         self.assertNotIn("sampleReplayCandles()", body)
+
+    def test_live_options_data_health_fields_are_visible(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        for token in (
+            "Spot Source",
+            "Live Spot",
+            "ATM Strike",
+            "Candidate Span",
+            "Candidate Count",
+            "Valid Quote Count",
+            "Missing Quote Keys",
+            "Next Action",
+            "ZERODHA_REQUIRED",
+        ):
+            self.assertIn(token, js)
+        self.assertRegex(js, re.compile(r"allowDemo\s*\?\s*parseJson", re.MULTILINE))
 
 
 if __name__ == "__main__":

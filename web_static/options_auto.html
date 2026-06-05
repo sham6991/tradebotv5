@@ -159,6 +159,7 @@
                   </select>
                 </label>
                 <label>Date <input id="oa-backtest-date" type="date"></label>
+                <label>Backtest Spot Price <input id="oa-backtest-spot" type="number" min="0" step="0.05" placeholder="Infer from first candle"></label>
                 <label>Interval
                   <select id="oa-backtest-interval">
                     <option value="1minute">1m</option>
@@ -183,6 +184,7 @@
                 <div class="oa-form-grid">
                   <label>Max Trades <input id="oa-backtest-max-trades" type="number" min="1" step="1" value="3"></label>
                   <label>Buy Score Threshold <input id="oa-backtest-score" type="number" min="0" max="100" value="70"></label>
+                  <label>Candidate Strike Span <input id="oa-backtest-span" type="number" min="0" max="10" step="1" value="4"></label>
                 </div>
               </details>
               <div id="oa-backtest-alert" class="oa-tab-alert"></div>

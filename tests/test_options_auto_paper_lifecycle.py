@@ -3,6 +3,7 @@ import unittest
 from options_auto.execution.paper_broker import PaperBroker
 from options_auto.execution.paper_lifecycle import PaperLifecycleEngine
 from options_auto.terminal_service import OptionsAutoTerminalService
+from tests.test_options_auto_auto_spot import FakeOptionsZerodha
 
 
 def allowed_decision():
@@ -31,6 +32,8 @@ def sample_payload():
             "mode": "PAPER",
             "underlying": "NIFTY",
             "buy_score_threshold": 35,
+            "atm_scan_strike_span": 0,
+            "premium_expansion_required": False,
             "max_capital_per_trade_pct": 100,
             "max_risk_per_trade_pct": 10,
             "paper_starting_balance": 20000,
@@ -103,7 +106,7 @@ class OptionsAutoPaperLifecycleTests(unittest.TestCase):
         self.assertGreater(lifecycle.broker.available_balance, 20000)
 
     def test_service_paper_approval_approve_and_process_flow(self):
-        service = OptionsAutoTerminalService("results")
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
         pending = service.request_paper_approval(sample_payload())
 
         approved = service.approve_paper({"approval_id": pending["approval"]["approval_id"]})

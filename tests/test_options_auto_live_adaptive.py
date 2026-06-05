@@ -8,6 +8,7 @@ from options_auto.intelligence.live_adaptive_engine import LiveAdaptiveEngine
 from options_auto.intelligence.low_latency_decision_engine import LowLatencyDecisionEngine
 from options_auto.intelligence.ready_trade_plan_cache import ReadyTradePlanCache
 from options_auto.terminal_service import OptionsAutoTerminalService
+from tests.test_options_auto_auto_spot import FakeOptionsZerodha
 
 
 def settings(**overrides):
@@ -142,6 +143,8 @@ def service_payload(mode="PAPER"):
             "mode": mode,
             "underlying": "NIFTY",
             "buy_score_threshold": 35,
+            "atm_scan_strike_span": 0,
+            "premium_expansion_required": False,
             "max_capital_per_trade_pct": 60,
             "max_risk_per_trade_pct": 5,
             "paper_starting_balance": 20000,
@@ -321,7 +324,7 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         self.assertLess(P0_CRITICAL_PROTECTION, P4_SLOW)
 
     def test_real_dry_run_sends_zero_orders_and_reports_guarded_readiness(self):
-        service = OptionsAutoTerminalService("results")
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540, option_price=142.4))
         result = service.real_dry_run(service_payload("REAL"))
 
         self.assertTrue(result["dry_run"])
@@ -332,7 +335,7 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         self.assertIn("guarded", result["real_execution_reason"])
 
     def test_paper_mode_executes_dynamic_cancel_in_simulation_only(self):
-        service = OptionsAutoTerminalService("results")
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540, option_price=142.4))
         result = service.execute_paper_plan(service_payload("PAPER"))
         self.assertEqual(result["paper_order"]["status"], "OPEN")
 

@@ -14,6 +14,7 @@ from options_auto.intelligence.master_governor import MasterGovernor
 from options_auto.intelligence.options_greeks_risk_engine import OptionsGreeksRiskEngine
 from options_auto.telegram_safety import TelegramSafety
 from options_auto.terminal_service import OptionsAutoTerminalService
+from tests.test_options_auto_auto_spot import FakeOptionsZerodha
 
 
 def sample_payload():
@@ -25,6 +26,8 @@ def sample_payload():
             "mode": "PAPER",
             "underlying": "NIFTY",
             "buy_score_threshold": 35,
+            "atm_scan_strike_span": 0,
+            "premium_expansion_required": False,
             "max_capital_per_trade_pct": 100,
             "max_risk_per_trade_pct": 10,
             "paper_starting_balance": 20000,
@@ -57,7 +60,7 @@ class OptionsAutoPhaseEngineTests(unittest.TestCase):
         self.assertEqual(result["state"], "BLOCKED_BY_RISK")
 
     def test_paper_execute_plan_simulates_local_order_only(self):
-        service = OptionsAutoTerminalService("results")
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
 
         result = service.execute_paper_plan(sample_payload())
 

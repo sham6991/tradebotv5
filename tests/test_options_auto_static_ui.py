@@ -38,6 +38,18 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("/api/options-auto/market-cue/fii-dii-upload", js)
         self.assertRegex(js, re.compile(r"panel\.hidden\s*=", re.MULTILINE))
 
+    def test_backtest_payload_uses_historical_data_request(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        match = re.search(r"function backtestPayload\(\) \{(?P<body>.*?)\n\}", js, re.DOTALL)
+
+        self.assertIsNotNone(match)
+        body = match.group("body")
+        self.assertIn('data_source: "zerodha_historical"', body)
+        self.assertIn("trade_date: tradeDate", body)
+        self.assertIn("underlying", body)
+        self.assertIn("interval", body)
+        self.assertNotIn("sampleReplayCandles()", body)
+
 
 if __name__ == "__main__":
     unittest.main()

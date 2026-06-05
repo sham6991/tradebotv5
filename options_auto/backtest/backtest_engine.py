@@ -182,6 +182,10 @@ class OptionsAutoBacktestEngine:
                 continue
             tradingsymbol = str(row.get("tradingsymbol") or f"BACKTEST{frame_index}{option_type}")
             token = str(row.get("instrument_token") or f"BT-{frame_index}")
+            tick_size = _safe_float(row.get("tick_size"), 0.05) or 0.05
+            close = _safe_float(row.get("close"))
+            lot_size = int(_safe_float(row.get("lot_size"), 50) or 50)
+            quote_proxy = _historical_quote_proxy(row, close, tick_size, lot_size)
             candidate = {
                 "name": row.get("name") or row.get("underlying") or "NIFTY",
                 "tradingsymbol": tradingsymbol,
@@ -191,23 +195,23 @@ class OptionsAutoBacktestEngine:
                 "exchange": row.get("exchange") or "NFO",
                 "expiry": row.get("expiry"),
                 "strike": row.get("strike") or 0,
-                "lot_size": row.get("lot_size") or 50,
-                "tick_size": row.get("tick_size") or 0.05,
+                "lot_size": lot_size,
+                "tick_size": tick_size,
                 "_frame_index": frame_index,
             }
             quote = {
-                "ltp": row.get("close"),
-                "last_price": row.get("close"),
+                "ltp": close,
+                "last_price": close,
                 "open": row.get("open"),
-                "close": row.get("close"),
+                "close": close,
                 "high": row.get("high"),
                 "low": row.get("low"),
-                "bid": row.get("bid"),
-                "ask": row.get("ask"),
-                "bid_qty": row.get("bid_qty"),
-                "ask_qty": row.get("ask_qty"),
-                "volume": row.get("volume"),
-                "oi": row.get("oi"),
+                "bid": quote_proxy["bid"],
+                "ask": quote_proxy["ask"],
+                "bid_qty": quote_proxy["bid_qty"],
+                "ask_qty": quote_proxy["ask_qty"],
+                "volume": quote_proxy["volume"],
+                "oi": quote_proxy["oi"],
                 "premium_return_1": row.get("premium_return_1"),
                 "premium_return_3": row.get("premium_return_3"),
                 "relative_volume": row.get("relative_volume"),
@@ -215,6 +219,7 @@ class OptionsAutoBacktestEngine:
                 "upper_wick_pct": row.get("upper_wick_pct"),
                 "option_atr14": row.get("atr14"),
                 "atr14": row.get("atr14"),
+                "historical_quote_proxy": quote_proxy["synthetic"],
                 "candle": row.to_dict(),
             }
             candidates.append(candidate)
@@ -372,6 +377,44 @@ def _option_type(row: pd.Series) -> str:
     if symbol.endswith("PE"):
         return SIDE_PE
     return ""
+
+
+def _historical_quote_proxy(row: pd.Series, close: float, tick_size: float, lot_size: int) -> dict[str, Any]:
+    volume = _safe_float(row.get("volume"))
+    bid = _safe_float(row.get("bid"))
+    ask = _safe_float(row.get("ask"))
+    synthetic = False
+    if close > 0 and (bid <= 0 or ask <= 0 or ask < bid):
+        bid = max(tick_size, close - tick_size)
+        ask = close + tick_size
+        synthetic = True
+    bid_qty = _safe_float(row.get("bid_qty"))
+    ask_qty = _safe_float(row.get("ask_qty"))
+    if bid_qty <= 0 or ask_qty <= 0:
+        depth = max(float(lot_size * 20), min(max(volume / 5.0, 500.0), 10000.0))
+        bid_qty = bid_qty if bid_qty > 0 else depth
+        ask_qty = ask_qty if ask_qty > 0 else depth
+        synthetic = True
+    oi = _safe_float(row.get("oi"))
+    if oi <= 0 and volume > 0:
+        oi = max(volume * 10.0, 500000.0)
+        synthetic = True
+    return {
+        "bid": round(bid, 2),
+        "ask": round(ask, 2),
+        "bid_qty": int(bid_qty),
+        "ask_qty": int(ask_qty),
+        "volume": volume,
+        "oi": oi,
+        "synthetic": synthetic,
+    }
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
 
 
 def _phase_from_timestamp(timestamp: Any) -> str:

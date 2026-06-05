@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import date, datetime, time as dt_time
 from typing import Any
 
 import pandas as pd
@@ -11,6 +12,7 @@ from options_auto.backtest.backtest_engine import OptionsAutoBacktestEngine
 from options_auto.backtest.market_replay import MarketReplayEngine
 from options_auto.backtest.backtest_report_writer import BacktestReportWriter
 from options_auto.config.options_auto_defaults import default_settings, normalize_settings
+from options_auto.config.symbol_config import SYMBOL_CONFIG
 from options_auto.constants import MODE_BACKTEST, MODE_PAPER, MODE_REAL, MODE_SHADOW, REAL_EXECUTION_DISABLED_REASON, SIDE_WAIT
 from options_auto.core.logger import OptionsAutoLogger
 from options_auto.core.mode_guard import ModeGuard, normalize_mode
@@ -493,7 +495,13 @@ class OptionsAutoTerminalService:
         self.configure({**dict(payload.get("settings") or {}), "mode": MODE_BACKTEST})
         candles = self._frame(payload.get("index_candles") or payload.get("candles") or [])
         options = [self._frame(frame) for frame in payload.get("option_candles") or []]
+        source_metadata: dict[str, Any] = {"data_source": "provided_candles"}
+        if self._should_fetch_backtest_history(payload, candles, options):
+            candles, options, source_metadata = self._load_backtest_history(payload, self.settings)
         result = self.backtest_engine.run(candles, options, self.settings)
+        result["data_source"] = source_metadata.get("data_source")
+        result["data_source_label"] = source_metadata.get("data_source_label")
+        result["source_metadata"] = source_metadata
         self.session.status = "BACKTEST_COMPLETE"
         self.session.record_decision({
             "mode": MODE_BACKTEST,
@@ -505,6 +513,133 @@ class OptionsAutoTerminalService:
         result["report"] = report
         self.logger.log("INFO", "Options Auto backtest completed", rows=result["rows"])
         return {**result, "session": self.session.to_dict()}
+
+    def _should_fetch_backtest_history(self, payload: dict[str, Any], candles: pd.DataFrame, options: list[pd.DataFrame]) -> bool:
+        source = str(payload.get("data_source") or payload.get("source") or "").strip().lower()
+        if source in {"zerodha", "zerodha_historical", "paper_zerodha"}:
+            return True
+        return bool(payload.get("trade_date") or payload.get("backtest_date") or payload.get("date")) and (candles.empty or not options)
+
+    def _load_backtest_history(self, payload: dict[str, Any], settings: dict[str, Any]) -> tuple[pd.DataFrame, list[pd.DataFrame], dict[str, Any]]:
+        client = self.kite_client_provider(MODE_PAPER) or self.kite_client_provider("PAPER")
+        if not client:
+            raise ValueError("Connect Paper Data Zerodha in the main app before running Options Auto historical backtest.")
+        underlying = str(payload.get("underlying") or settings.get("underlying") or "NIFTY").upper()
+        config = SYMBOL_CONFIG.get(underlying) or SYMBOL_CONFIG["NIFTY"]
+        trade_day = _parse_trade_day(payload.get("trade_date") or payload.get("backtest_date") or payload.get("date"))
+        from_dt = datetime.combine(trade_day, dt_time(9, 15))
+        to_dt = datetime.combine(trade_day, dt_time(15, 30))
+        interval = str(payload.get("interval") or settings.get("chart_interval") or "3minute")
+        index_token = self._index_token(client, underlying, str(config.get("index_exchange") or "NSE"))
+        index_frame = self._historical_frame(client, index_token, from_dt, to_dt, interval, f"{underlying} index")
+        spot = _first_close(index_frame)
+        if spot <= 0:
+            raise ValueError(f"Could not infer ATM strike from {underlying} historical candles.")
+        strike = _round_to_step(_number(payload.get("strike"), spot), float(config.get("strike_step") or 50))
+        option_exchange = str(config.get("option_exchange") or "NFO").upper()
+        expiry = payload.get("expiry") or payload.get("option_expiry")
+        contracts = [
+            self._find_option_contract(client, underlying, option_exchange, "CE", strike, expiry, trade_day),
+            self._find_option_contract(client, underlying, option_exchange, "PE", strike, expiry, trade_day),
+        ]
+        option_frames = []
+        for contract in contracts:
+            frame = self._historical_frame(
+                client,
+                contract.get("instrument_token"),
+                from_dt,
+                to_dt,
+                interval,
+                str(contract.get("tradingsymbol") or contract.get("instrument_token") or "option"),
+            )
+            option_frames.append(_decorate_option_frame(frame, contract, underlying, option_exchange))
+        metadata = {
+            "data_source": "zerodha_historical",
+            "data_source_label": "Zerodha Historical (Paper Data)",
+            "underlying": underlying,
+            "trade_date": trade_day.isoformat(),
+            "from": from_dt.isoformat(sep=" "),
+            "to": to_dt.isoformat(sep=" "),
+            "interval": interval,
+            "index_token": index_token,
+            "atm_strike": strike,
+            "contracts": [_contract_summary(contract) for contract in contracts],
+        }
+        return index_frame, option_frames, metadata
+
+    def _index_token(self, client: Any, underlying: str, exchange: str) -> Any:
+        if underlying == "NIFTY" and hasattr(client, "get_nifty50_token"):
+            return client.get_nifty50_token()
+        wanted = {
+            "NIFTY": {"NIFTY 50", "NIFTY"},
+            "SENSEX": {"SENSEX"},
+        }.get(underlying, {underlying})
+        for instrument in self._client_instruments(client, exchange):
+            symbol = str(instrument.get("tradingsymbol") or "").upper()
+            name = str(instrument.get("name") or "").upper()
+            if symbol in wanted or name in wanted:
+                token = instrument.get("instrument_token")
+                if token not in ("", None):
+                    return token
+        raise ValueError(f"Could not find {underlying} index instrument token on {exchange}.")
+
+    def _find_option_contract(self, client: Any, underlying: str, exchange: str, option_type: str, strike: float, expiry: Any, trade_day: date) -> dict[str, Any]:
+        wanted_expiry = _expiry_text(expiry)
+        matches = []
+        for instrument in self._client_instruments(client, exchange):
+            if str(instrument.get("instrument_type") or "").upper() != option_type:
+                continue
+            if float(instrument.get("strike") or 0) != float(strike):
+                continue
+            instrument_name = str(instrument.get("name") or instrument.get("underlying") or "").upper()
+            tradingsymbol = str(instrument.get("tradingsymbol") or "").upper()
+            if instrument_name not in {"", underlying} and not tradingsymbol.startswith(underlying):
+                continue
+            expiry_text = _expiry_text(instrument.get("expiry"))
+            if wanted_expiry and expiry_text != wanted_expiry:
+                continue
+            if expiry_text and expiry_text < trade_day.isoformat():
+                continue
+            matches.append(dict(instrument))
+        if not matches and hasattr(client, "find_option_contract"):
+            try:
+                return dict(client.find_option_contract(option_type=option_type, strike=strike, expiry=expiry, name=underlying))
+            except Exception:
+                pass
+        if not matches:
+            raise ValueError(f"No {underlying} {option_type} contract found for ATM strike {strike} on {exchange}.")
+        matches.sort(key=lambda item: (_expiry_text(item.get("expiry")) or "9999-12-31", str(item.get("tradingsymbol") or "")))
+        return matches[0]
+
+    def _client_instruments(self, client: Any, exchange: str) -> list[dict[str, Any]]:
+        if not client:
+            return []
+        if hasattr(client, "instruments"):
+            return list(client.instruments(exchange) or [])
+        kite = getattr(client, "kite", None)
+        if kite and hasattr(kite, "instruments"):
+            return list(kite.instruments(exchange) or [])
+        return []
+
+    def _historical_frame(self, client: Any, token: Any, from_dt: datetime, to_dt: datetime, interval: str, label: str) -> pd.DataFrame:
+        if token in ("", None):
+            raise ValueError(f"Missing instrument token for {label}.")
+        if hasattr(client, "historical_candles"):
+            frame = client.historical_candles(token, from_dt, to_dt, interval=interval)
+        elif hasattr(client, "historical_data"):
+            frame = client.historical_data(int(token), from_dt, to_dt, interval)
+        else:
+            kite = getattr(client, "kite", None)
+            if not kite or not hasattr(kite, "historical_data"):
+                raise ValueError("Connected Paper Data Zerodha client does not expose historical candles.")
+            frame = kite.historical_data(instrument_token=int(token), from_date=from_dt, to_date=to_dt, interval=interval)
+        if isinstance(frame, pd.DataFrame):
+            result = self._frame(frame.to_dict("records"))
+        else:
+            result = self._frame(frame or [])
+        if result.empty:
+            raise ValueError(f"Zerodha returned no historical candles for {label}.")
+        return result
 
     def readiness(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -980,3 +1115,61 @@ def _number(value: Any, default: Any = 0.0) -> float:
             return float(default)
         except (TypeError, ValueError):
             return 0.0
+
+
+def _parse_trade_day(value: Any) -> date:
+    text = str(value or "").strip()
+    if not text:
+        return date.today()
+    return pd.to_datetime(text, errors="raise").date()
+
+
+def _round_to_step(value: float, step: float) -> float:
+    step = float(step or 1)
+    return round(float(value) / step) * step
+
+
+def _first_close(frame: pd.DataFrame) -> float:
+    if frame is None or frame.empty or "close" not in frame.columns:
+        return 0.0
+    for value in frame["close"]:
+        close = _number(value)
+        if close > 0:
+            return close
+    return 0.0
+
+
+def _expiry_text(value: Any) -> str:
+    if value in ("", None):
+        return ""
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d")
+    return str(value)[:10]
+
+
+def _decorate_option_frame(frame: pd.DataFrame, contract: dict[str, Any], underlying: str, exchange: str) -> pd.DataFrame:
+    result = frame.copy()
+    option_type = str(contract.get("instrument_type") or contract.get("option_type") or "").upper()
+    result["name"] = str(contract.get("name") or underlying).upper()
+    result["underlying"] = underlying
+    result["tradingsymbol"] = contract.get("tradingsymbol") or ""
+    result["instrument_token"] = contract.get("instrument_token") or contract.get("token") or ""
+    result["instrument_type"] = option_type
+    result["option_type"] = option_type
+    result["exchange"] = contract.get("exchange") or exchange
+    result["expiry"] = _expiry_text(contract.get("expiry"))
+    result["strike"] = _number(contract.get("strike"))
+    result["lot_size"] = int(_number(contract.get("lot_size"), 50) or 50)
+    result["tick_size"] = _number(contract.get("tick_size"), 0.05) or 0.05
+    return result
+
+
+def _contract_summary(contract: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "tradingsymbol": contract.get("tradingsymbol"),
+        "instrument_token": contract.get("instrument_token") or contract.get("token"),
+        "instrument_type": contract.get("instrument_type"),
+        "strike": contract.get("strike"),
+        "expiry": _expiry_text(contract.get("expiry")),
+        "exchange": contract.get("exchange"),
+    }

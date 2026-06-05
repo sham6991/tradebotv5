@@ -12,7 +12,8 @@ const state = {
   pendingApprovalId: "",
   activeLog: "raw",
   activeTab: "dashboard",
-  dataSource: "SAMPLE",
+  dataSource: "UNKNOWN",
+  fiiDiiStatus: {},
 };
 
 // api helper
@@ -25,6 +26,13 @@ async function api(path, payload) {
         body: JSON.stringify(payload),
       };
   const response = await fetch(path, options);
+  const data = await response.json();
+  if (!response.ok || data.error) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+async function apiForm(path, form) {
+  const response = await fetch(path, { method: "POST", body: form });
   const data = await response.json();
   if (!response.ok || data.error) throw new Error(data.error || response.statusText);
   return data;
@@ -129,12 +137,16 @@ function setTabAlert(tab, message = "", kind = "info") {
   node.innerHTML = message ? alertHtml(message, kind) : "";
 }
 
-function parseJson(id, fallback) {
+function emptyLike(fallback) {
+  return Array.isArray(fallback) ? [] : {};
+}
+
+function parseJson(id, fallback, allowSample = false) {
   const node = $(id);
   const raw = node ? node.value.trim() : "";
   if (!raw) {
-    state.dataSource = "SAMPLE";
-    return fallback;
+    state.dataSource = allowSample ? "DEMO" : "UNKNOWN";
+    return allowSample ? fallback : emptyLike(fallback);
   }
   state.dataSource = "DEBUG";
   return JSON.parse(raw);
@@ -211,21 +223,32 @@ function settingsPayload(modeOverride = "") {
     slippage_buffer_points: numberValue($("#oa-slippage-buffer")?.value, 0.1),
     ask_permission_before_entry: Boolean($("#oa-ask")?.checked || $("#oa-ask-settings")?.checked),
     auto_entry_enabled: Boolean($("#oa-auto")?.checked || $("#oa-auto-settings")?.checked),
+    require_fii_dii_upload: Boolean($("#oa-require-fii-dii")?.checked),
+    allow_demo_data: state.activeTab === "debug",
     confirm_real_mode: Boolean($("#oa-confirm-real")?.checked),
     static_ip_confirmed: Boolean($("#oa-static-ip")?.checked),
   };
 }
 
-function evaluationPayload(modeOverride = "") {
+function evaluationPayload(modeOverride = "", options = {}) {
   const settings = settingsPayload(modeOverride);
+  const allowDemo = Boolean(options.allowDemo || state.activeTab === "debug");
+  const marketCue = parseJson("#oa-market-cue-json", sampleMarketCue(), allowDemo);
+  const instruments = parseJson("#oa-instruments-json", sampleInstruments(), allowDemo);
+  const quotes = parseJson("#oa-quotes-json", sampleQuotes(), allowDemo);
+  const demoData = allowDemo && (marketCue.demo_data || Object.values(quotes || {}).some(item => item?.demo_data));
+  const dataSource = demoData ? "DEBUG" : instruments.length && Object.keys(quotes || {}).length ? "LIVE" : "UNKNOWN";
+  state.dataSource = dataSource;
   return {
     mode: settings.mode,
     settings,
     spot: numberValue($("#oa-spot")?.value, 22500),
     quote_age_seconds: numberValue($("#oa-quote-age")?.value, 0),
-    market_cue: parseJson("#oa-market-cue-json", sampleMarketCue()),
-    instruments: parseJson("#oa-instruments-json", sampleInstruments()),
-    quotes: parseJson("#oa-quotes-json", sampleQuotes()),
+    market_cue: marketCue,
+    instruments,
+    quotes,
+    data_source: dataSource,
+    demo_data: demoData,
     features: { ema_alignment_score: 18, vwap_score: 14, rsi_slope_score: 10, volume_score: 8, depth_score: 5 },
     time_of_day_score: 70,
   };
@@ -254,7 +277,7 @@ function initTabs() {
       state.activeTab = tab;
       $$("[data-oa-tab]").forEach(item => item.classList.toggle("oa-tab-active", item === button));
       $$(".oa-tab-panel").forEach(panel => {
-        panel.hidden = panel.id !== `oa-tab-${tab}`;
+      panel.hidden = panel.id !== `oa-tab-${tab}`;
       });
       renderAll();
     });
@@ -273,7 +296,9 @@ function renderTopStatus() {
   const protectedOk = !activeTrades.length || activeTrades.every(trade => trade.position_protected);
   const ocoOk = !activeTrades.length || activeTrades.every(trade => trade.oco_active);
   const dataAllowed = result.data_quality?.allowed;
-  const dataLabel = dataAllowed ? "Fresh" : state.dataSource === "SAMPLE" ? "Sample" : "Waiting";
+  const resultDemo = Boolean(result.demo_data || result.data_quality?.blockers?.some(item => String(item).includes("demo/sample")));
+  const dataSource = result.data_source || state.dataSource || "UNKNOWN";
+  const dataLabel = resultDemo ? "Demo" : dataAllowed ? "Fresh" : dataSource === "LIVE" ? "Stale" : "Waiting";
   const governor = result.governor || {};
   const governorLabel = governor.allowed === true ? "Allow" : governor.state ? "Blocked" : "Waiting";
   const engine = result.session?.status || state.status.session?.status || "Idle";
@@ -282,7 +307,7 @@ function renderTopStatus() {
   setBadge("#oa-mode", mode, isReal ? "red" : mode === "PAPER" ? "green" : "blue");
   setBadge("#oa-real-money", isReal ? "YES" : "NO", isReal ? "red" : "green");
   setBadge("#oa-kite", connected ? "Connected" : "Disconnected", connected ? "green" : "red");
-  setBadge("#oa-data", dataLabel, dataAllowed ? "green" : state.dataSource === "SAMPLE" ? "blue" : "yellow");
+  setBadge("#oa-data", dataLabel, dataAllowed ? "green" : resultDemo ? "yellow" : "yellow");
   setBadge("#oa-governor", governorLabel, governor.allowed === true ? "green" : governor.state ? "yellow" : "grey");
   setBadge("#oa-engine", engine, /RUNNING|ACTIVE|READY/.test(String(engine)) ? "green" : /LOCK|ERROR|MANUAL/.test(String(engine)) ? "red" : "grey");
   setBadge("#oa-position", activeTrades.length ? (protectedOk ? "Protected" : "Unprotected") : "No Position", activeTrades.length ? (protectedOk ? "green" : "red") : "grey");
@@ -330,6 +355,7 @@ function renderDashboard() {
   setText("#oa-cue-confidence", cue.confidence !== undefined ? score(cue.confidence) : "-");
   setText("#oa-cue-updated", cue.last_updated || cue.timestamp || "-");
   setText("#oa-cue-reason", cue.reason || cue.reason_summary || "No market cue evaluated yet.");
+  renderFiiDiiStatus(cue.fii_dii_status || result.fii_dii_status || state.fiiDiiStatus || state.status.fii_dii || {});
 
   setBadge("#oa-regime-side", regime.recommended_side || "WAIT", regime.recommended_side === "WAIT" ? "yellow" : "blue");
   setText("#oa-regime", regime.regime || "-");
@@ -380,8 +406,39 @@ function renderDashboard() {
 
   renderList("#oa-blockers-list", readableBlockers(result), "No blockers. Waiting for a valid setup.");
   renderActiveTradeCard(activeTradesFrom(result));
+  renderDataSourcePanel(result);
   renderRecentEvents(result);
   renderDashboardAlerts(result);
+}
+
+function renderFiiDiiStatus(status = {}) {
+  const label = status.status || "NEUTRAL_MISSING_UPLOAD";
+  const kind = label === "UPLOADED" || label === "OK" ? "green" : label === "IGNORED" ? "grey" : label === "FAILED" || label === "REQUIRED_MISSING_UPLOAD" ? "red" : "yellow";
+  setBadge("#oa-fii-dii-badge", label, kind);
+  setHtml("#oa-fii-dii-status", [
+    metric("File", status.file_name || "Not uploaded"),
+    metric("Uploaded", status.uploaded_at || "-"),
+    metric("FII Net", status.fii_net === null || status.fii_net === undefined ? "-" : money(status.fii_net)),
+    metric("DII Net", status.dii_net === null || status.dii_net === undefined ? "-" : money(status.dii_net)),
+    metric("Score", status.score !== undefined ? score(status.score) : score(status.fii_dii_score || 0)),
+    metric("Phase Use", status.used_for_phase || "PREMARKET"),
+  ].join(""));
+  setText("#oa-fii-dii-note", status.warning || (status.warnings || [])[0] || "FII/DII status ready.");
+}
+
+function renderDataSourcePanel(result = {}) {
+  const source = result.data_source || state.dataSource || "UNKNOWN";
+  const demo = source === "DEBUG" || source === "DEMO" || Boolean(result.demo_data);
+  setBadge("#oa-data-source-badge", source, demo ? "yellow" : source === "LIVE" ? "green" : "grey");
+  setHtml("#oa-demo-banner", demo ? `<div class="oa-data-banner">DEMO/SAMPLE DATA - not live market data.</div>` : "");
+  setHtml("#oa-data-source-panel", [
+    metric("Source", source),
+    metric("Quote Age", `${text(result.quote_age_seconds ?? $("#oa-quote-age")?.value, "-")} sec`),
+    metric("Stale Threshold", `${text((result.settings || state.status.settings || state.defaults.settings || {}).quote_stale_seconds, 3)} sec`),
+    metric("FII/DII", (state.fiiDiiStatus.status || result.market_cue?.fii_dii_status?.status || "Not uploaded")),
+    metric("News", result.market_cue?.components?.news !== undefined ? score(result.market_cue.components.news) : "No news summary"),
+    metric("Trading Allowed", result.allowed ? "YES" : "NO"),
+  ].join(""));
 }
 
 function readableBlockers(result) {
@@ -441,9 +498,10 @@ function renderDashboardAlerts(result) {
   const mode = result.mode || state.status.settings?.mode || state.defaults.settings?.mode || "PAPER";
   const trades = activeTradesFrom(result);
   const connected = mode === "REAL" ? result.account_status?.real?.connected : result.account_status?.paper?.connected;
-  if (mode === "REAL") alerts.push(alertHtml("REAL MONEY MODE is selected. Real order placement is still disabled in this build.", "danger"));
+  if (mode === "REAL") alerts.push(alertHtml("REAL MONEY MODE is selected. Orders require real login, preflight, final validation, and OCO safety.", "danger"));
   if (connected === false) alerts.push(alertHtml("Kite is disconnected for the selected mode.", "warning"));
-  if (state.dataSource === "SAMPLE") alerts.push(alertHtml("Dashboard is using sample/demo payload until live evaluation data is provided.", "info"));
+  if (state.dataSource === "DEBUG" || state.dataSource === "DEMO") alerts.push(alertHtml("DEMO/SAMPLE DATA - not live market data.", "warning"));
+  if (state.dataSource === "UNKNOWN") alerts.push(alertHtml("Live quote data unavailable. Trading is blocked until live data is connected.", "warning"));
   if (trades.some(trade => !trade.position_protected)) alerts.push(alertHtml("Position unprotected. Manual attention required.", "danger"));
   if (trades.some(trade => !trade.oco_active)) alerts.push(alertHtml("OCO inactive while a position exists.", "danger"));
   if (result.watchdog?.mode === "CRITICAL" || result.watchdog?.mode === "LOCKED") alerts.push(alertHtml(`Watchdog ${result.watchdog.mode}. New entries blocked.`, "danger"));
@@ -701,6 +759,7 @@ function renderPaperTrades() {
 // real rendering/actions
 function initRealTab() {
   on("#oa-real-preflight", "click", runRealPreflight);
+  on("#oa-real-place", "click", placeRealOrder);
   on("#oa-real-reconcile", "click", runRealReconcile);
   on("#oa-real-dry", "click", runRealDryRun);
   on("#oa-real-stop", "click", stopNewEntries);
@@ -715,7 +774,18 @@ async function runRealPreflight() {
     state.lastResult = result;
     renderRealPreflight(result);
     renderAll();
-    setTabAlert("real", result.allowed ? "Real preflight passed, but real order placement is still disabled." : "Real preflight blocked. Review checklist.", result.allowed ? "success" : "warning");
+    setTabAlert("real", result.allowed ? "Real preflight passed. Real orders remain guarded by final validation and execution safety." : "Real preflight blocked. Review checklist.", result.allowed ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function placeRealOrder() {
+  try {
+    const result = await api("/api/options-auto/real/place-order", { ...evaluationPayload("REAL"), market_open: true, instruments_valid: true });
+    state.lastResult = result;
+    renderAll();
+    setTabAlert("real", result.real_order_sent ? `Real entry order sent: ${text(result.entry_order?.order_id, "-")}` : result.message || "Real order blocked.", result.real_order_sent ? "success" : "warning");
   } catch (error) {
     setTabAlert("real", error.message, "danger");
   }
@@ -778,6 +848,22 @@ async function runEmergencyPlan() {
 }
 
 function renderRealPreflight(result = state.lastResult) {
+  const account = result.account_status || state.status.account_status || {};
+  const realConnected = Boolean(account.real?.connected);
+  const paperConnected = Boolean(account.paper?.connected);
+  if (paperConnected && !realConnected) {
+    setText("#oa-real-mode-title", "Real Trading locked because Paper mode is active.");
+    setText("#oa-real-mode-copy", "Disconnect Paper mode and connect Real Money Zerodha in the main app to run real preflight.");
+  } else if (!realConnected) {
+    setText("#oa-real-mode-title", "Connect Real Money Zerodha in the main app to enable Options Auto real trading.");
+    setText("#oa-real-mode-copy", "No real orders are reachable until LIVE Zerodha is connected.");
+  } else if (result.allowed) {
+    setText("#oa-real-mode-title", "Real trading ready after preflight.");
+    setText("#oa-real-mode-copy", "Orders will be placed only after final validation, execution safety, OCO, and reconciliation checks.");
+  } else {
+    setText("#oa-real-mode-title", "Real money connected. Run preflight before starting real engine.");
+    setText("#oa-real-mode-copy", "Real orders are guarded. Review blockers before placing any order.");
+  }
   const evidence = result.evidence || {};
   const checks = evidence.checks || {};
   const reconciliation = result.reconciliation || evidence.reconciliation || {};
@@ -878,6 +964,28 @@ function initSettingsTab() {
   on("#oa-settings-reset", "click", loadDefaults);
 }
 
+function initFiiDiiUpload() {
+  const form = $("#oa-fii-dii-form");
+  if (!form) return;
+  form.addEventListener("submit", async event => {
+    event.preventDefault();
+    try {
+      const fileInput = $("#oa-fii-dii-file");
+      const formData = new FormData(form);
+      if (!fileInput?.files?.length) {
+        setTabAlert("dashboard", "Choose the latest NSE FII/DII CSV first.", "warning");
+        return;
+      }
+      const result = await apiForm("/api/options-auto/market-cue/fii-dii-upload", formData);
+      state.fiiDiiStatus = result;
+      renderFiiDiiStatus(result);
+      setTabAlert("dashboard", "FII/DII CSV uploaded for pre-market cue.", "success");
+    } catch (error) {
+      setTabAlert("dashboard", error.message, "danger");
+    }
+  });
+}
+
 async function saveSettings() {
   try {
     syncSettingsToggles();
@@ -941,6 +1049,7 @@ function applySettings(settings) {
     ["#oa-auto-settings", settings.auto_entry_enabled],
     ["#oa-ask", settings.ask_permission_before_entry],
     ["#oa-ask-settings", settings.ask_permission_before_entry],
+    ["#oa-require-fii-dii", settings.require_fii_dii_upload],
     ["#oa-trailing", settings.trailing_stop_enabled],
     ["#oa-breakeven", settings.break_even_sl_enabled],
     ["#oa-partial", settings.partial_exit_enabled],
@@ -1078,6 +1187,7 @@ async function loadDefaults() {
 
 function initDashboard() {
   on("#oa-top-refresh", "click", refresh);
+  initFiiDiiUpload();
 }
 
 function initReports() {

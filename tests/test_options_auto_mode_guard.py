@@ -22,13 +22,13 @@ class OptionsAutoModeGuardTests(unittest.TestCase):
 
     def test_service_real_dry_run_does_not_enable_real_orders(self):
         service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: object())
-        result = service.real_dry_run({"settings": {"confirm_real_mode": True}, "spot": 22500})
+        result = service.real_dry_run({"settings": {"confirm_real_mode": True, "static_ip_confirmed": True}, "spot": 22500})
 
-        self.assertFalse(result["real_execution_enabled"])
-        self.assertIn("disabled", result["real_execution_reason"])
+        self.assertTrue(result["real_execution_enabled"])
+        self.assertIn("guarded", result["real_execution_reason"])
         self.assertEqual(result["session"]["status"], "REAL_DRY_RUN_ONLY")
+        self.assertIn("Real dry-run complete", result["message"])
 
 
 if __name__ == "__main__":
     unittest.main()
-

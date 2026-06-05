@@ -49,8 +49,9 @@
         <section id="oa-tab-dashboard" class="oa-tab-panel">
           <div id="oa-dashboard-alerts" class="oa-alert-stack"></div>
 
-          <div class="oa-card-grid oa-card-grid-three">
-            <article class="oa-card">
+          <div class="oa-card-grid oa-dashboard-cockpit">
+            <div class="oa-card-grid">
+              <article class="oa-card">
               <div class="oa-card-head">
                 <h2>Market Cue</h2>
                 <span id="oa-dashboard-cue-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
@@ -62,9 +63,23 @@
                 <div><span>Last Updated</span><strong id="oa-cue-updated">-</strong></div>
               </div>
               <p id="oa-cue-reason" class="oa-muted">No market cue evaluated yet.</p>
-            </article>
+              </article>
 
-            <article class="oa-card">
+              <article class="oa-card">
+                <div class="oa-card-head">
+                  <h2>FII/DII Premarket</h2>
+                  <span id="oa-fii-dii-badge" class="oa-status-badge oa-badge-grey">Neutral</span>
+                </div>
+                <form id="oa-fii-dii-form" class="oa-compact-form">
+                  <input id="oa-fii-dii-file" name="csv_file" type="file" accept=".csv">
+                  <input type="hidden" name="phase" value="PREMARKET">
+                  <button type="submit" class="oa-button">Upload FII/DII CSV</button>
+                </form>
+                <div id="oa-fii-dii-status" class="oa-summary-grid"></div>
+                <p id="oa-fii-dii-note" class="oa-muted">No FII/DII uploaded. Premarket cue treats it as neutral.</p>
+              </article>
+
+              <article class="oa-card">
               <div class="oa-card-head">
                 <h2>Regime</h2>
                 <span id="oa-regime-side" class="oa-status-badge oa-badge-grey">WAIT</span>
@@ -75,24 +90,9 @@
                 <div><span>Aggressiveness</span><strong id="oa-regime-aggression">-</strong></div>
                 <div><span>No-Trade Reason</span><strong id="oa-regime-block">-</strong></div>
               </div>
-            </article>
+              </article>
+            </div>
 
-            <article class="oa-card">
-              <div class="oa-card-head">
-                <h2>Session Health</h2>
-                <span id="oa-health-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
-              </div>
-              <div class="oa-metric-grid">
-                <div><span>Session</span><strong id="oa-session-health">-</strong></div>
-                <div><span>Bot</span><strong id="oa-bot-health">-</strong></div>
-                <div><span>Readiness</span><strong id="oa-readiness-score">-</strong></div>
-                <div><span>New Entries</span><strong id="oa-new-entries" class="oa-status-badge oa-badge-grey">-</strong></div>
-              </div>
-              <p id="oa-cooldown" class="oa-muted">Cooldown: -</p>
-            </article>
-          </div>
-
-          <div class="oa-card-grid oa-dashboard-grid">
             <article class="oa-card oa-trade-plan-card">
               <div class="oa-card-head">
                 <h2>Trade Plan</h2>
@@ -105,14 +105,37 @@
               </div>
             </article>
 
-            <article class="oa-card oa-active-trade-card">
-              <div class="oa-card-head">
-                <h2>Active Trade</h2>
-                <span id="oa-active-trade-badge" class="oa-status-badge oa-badge-grey">No Position</span>
-              </div>
-              <div id="oa-active-trade-body"></div>
-              <ol id="oa-trade-timeline" class="oa-timeline"></ol>
-            </article>
+            <div class="oa-card-grid">
+              <article class="oa-card oa-active-trade-card">
+                <div class="oa-card-head">
+                  <h2>Active Trade</h2>
+                  <span id="oa-active-trade-badge" class="oa-status-badge oa-badge-grey">No Position</span>
+                </div>
+                <div id="oa-active-trade-body"></div>
+                <ol id="oa-trade-timeline" class="oa-timeline"></ol>
+              </article>
+              <article class="oa-card">
+                <div class="oa-card-head">
+                  <h2>Data Source</h2>
+                  <span id="oa-data-source-badge" class="oa-status-badge oa-badge-yellow">Unknown</span>
+                </div>
+                <div id="oa-demo-banner"></div>
+                <div id="oa-data-source-panel" class="oa-summary-grid"></div>
+              </article>
+              <article class="oa-card">
+                <div class="oa-card-head">
+                  <h2>Session Health</h2>
+                  <span id="oa-health-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
+                </div>
+                <div class="oa-metric-grid">
+                  <div><span>Session</span><strong id="oa-session-health">-</strong></div>
+                  <div><span>Bot</span><strong id="oa-bot-health">-</strong></div>
+                  <div><span>Readiness</span><strong id="oa-readiness-score">-</strong></div>
+                  <div><span>New Entries</span><strong id="oa-new-entries" class="oa-status-badge oa-badge-grey">-</strong></div>
+                </div>
+                <p id="oa-cooldown" class="oa-muted">Cooldown: -</p>
+              </article>
+            </div>
           </div>
 
           <article class="oa-card">
@@ -153,7 +176,7 @@
                     <option>AGGRESSIVE</option>
                   </select>
                 </label>
-                <label>FII/DII CSV <input id="oa-backtest-fii" type="file" accept=".csv"></label>
+                <label>Optional backtest FII/DII CSV <input id="oa-backtest-fii" type="file" accept=".csv"></label>
               </div>
               <details class="oa-collapsible">
                 <summary>Advanced backtest settings</summary>
@@ -263,10 +286,10 @@
         </section>
 
         <section id="oa-tab-real" class="oa-tab-panel" hidden>
-          <div class="oa-mode-banner oa-danger-banner">REAL MONEY MODE - REAL ORDERS CAN CAUSE FINANCIAL LOSS</div>
+          <div class="oa-mode-banner oa-danger-banner">REAL MONEY MODE - LIVE ZERODHA ORDERS ONLY AFTER PREFLIGHT</div>
           <div class="oa-card oa-danger-zone">
-            <strong>Real order placement is disabled in this build.</strong>
-            <p>This tab is for preflight, reconciliation, safety review, and dry-run planning only.</p>
+            <strong id="oa-real-mode-title">Connect Real Money Zerodha in the main app to enable guarded Options Auto real trading.</strong>
+            <p id="oa-real-mode-copy">Real orders are guarded by real login, preflight, final validation, execution safety, OCO, and reconciliation.</p>
           </div>
           <div id="oa-real-alert" class="oa-tab-alert"></div>
 
@@ -286,6 +309,7 @@
               <h2>Preflight</h2>
               <div class="oa-button-row">
                 <button type="button" id="oa-real-preflight" class="oa-button oa-button-primary">Run Real Preflight</button>
+                <button type="button" id="oa-real-place" class="oa-button oa-button-danger">Start Real Engine</button>
                 <button type="button" id="oa-real-reconcile" class="oa-button">Run Reconciliation</button>
                 <button type="button" id="oa-real-dry" class="oa-button">Real Dry Run</button>
               </div>
@@ -398,6 +422,7 @@
               <div class="oa-toggle-row">
                 <label><input id="oa-auto-settings" type="checkbox"> Auto entry</label>
                 <label><input id="oa-ask-settings" type="checkbox"> Ask approval</label>
+                <label><input id="oa-require-fii-dii" type="checkbox"> Require FII/DII upload for pre-market?</label>
               </div>
             </details>
 
@@ -473,7 +498,7 @@
                 <label><input id="oa-confirm-real" type="checkbox"> Real mode explicitly confirmed</label>
                 <label><input id="oa-static-ip" type="checkbox"> Static IP/order readiness confirmed</label>
               </div>
-              <p class="oa-danger-text">Dangerous real-mode settings are safety review flags only. Real order placement remains disabled.</p>
+              <p class="oa-danger-text">Real order controls are guarded by LIVE login, preflight, final validation, OCO, and reconciliation.</p>
             </details>
           </article>
         </section>

@@ -110,6 +110,7 @@ class StrikeSelector:
             "lot_size": lot_size,
             "tick_size": float(instrument.get("tick_size") or quote.get("tick_size") or 0.05),
             "ltp": ltp,
+            "demo_data": bool(quote.get("demo_data") or instrument.get("demo_data")),
             "bid": bid,
             "ask": ask,
             "bid_qty": bid_qty,

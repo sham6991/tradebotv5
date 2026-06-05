@@ -9,6 +9,7 @@ from options_auto.core.clock import iso_now
 from options_auto.core.mode_guard import ModeGuard
 from options_auto.execution.kite_api_manager import KiteApiManager
 from options_auto.execution.reconciliation import ReconciliationEngine
+from options_auto.intelligence.entry_timing_engine import round_to_tick
 
 
 @dataclass
@@ -147,14 +148,78 @@ class RealExecutionController:
         }
 
         dry_run_ready = not blockers
-        if not settings.get("real_orders_enabled"):
-            blockers.append(REAL_EXECUTION_DISABLED_REASON)
+        if settings.get("dry_run_real_only") and not settings.get("real_orders_enabled"):
+            blockers.append("Real dry-run override is active; live order sending is blocked.")
         result = self._result("REAL_PREFLIGHT_OK" if not blockers else "BLOCKED_BY_EXECUTION", blockers, warnings, evidence)
         result["dry_run_ready"] = dry_run_ready
         result["real_orders_enabled"] = bool(settings.get("real_orders_enabled"))
         result["active_trade_count"] = len(list(active_trades or []))
         self.state.last_preflight = result
         return result
+
+    def place_entry_buy_limit(self, mode_guard: ModeGuard, adapter: Any, order_request: dict[str, Any], preflight: dict[str, Any]) -> dict[str, Any]:
+        blockers = []
+        if self.state.stop_new_entries:
+            blockers.append("Stop New Entries is active.")
+        if self.state.safe_mode:
+            blockers.append("Safe Mode is active; new real entries are blocked.")
+        if not preflight.get("allowed"):
+            blockers.extend(preflight.get("blockers") or ["Real preflight did not pass."])
+        if str(order_request.get("order_type") or "").upper() != "LIMIT":
+            blockers.append("Only BUY LIMIT entries are allowed for Options Auto real orders.")
+        if str(order_request.get("transaction_type") or "").upper() != "BUY":
+            blockers.append("Real entry order must be BUY.")
+        if blockers:
+            return {"allowed": False, "real_order_sent": False, "order_stage": "BLOCKED", "blockers": list(dict.fromkeys(blockers))}
+        mode_guard.assert_real_order_allowed()
+        response = adapter.place_entry_buy_limit(
+            tradingsymbol=order_request["tradingsymbol"],
+            quantity=int(order_request["quantity"]),
+            price=float(order_request["price"]),
+            exchange=order_request.get("exchange") or "NFO",
+            product=order_request.get("product") or "NRML",
+            tag=order_request.get("tag") or "OPTIONS_AUTO",
+        )
+        order_id = response.get("value") or response.get("order_id")
+        order = {**order_request, "order_id": order_id, "status": "OPEN", "source": "OPTIONS_AUTO_REAL", "placed_at": iso_now()}
+        return {
+            "allowed": bool(response.get("ok")),
+            "real_order_sent": bool(response.get("ok")),
+            "order_stage": "ENTRY_ORDER_OPEN" if response.get("ok") else "ENTRY_ORDER_FAILED",
+            "entry_order": order,
+            "api_response": response,
+            "blockers": [] if response.get("ok") else [response.get("error") or "Kite entry order failed."],
+        }
+
+    def protection_orders_from_fill(self, trade_plan: dict[str, Any], fill: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+        actual_entry = _number(fill.get("average_price"), trade_plan.get("entry_price"))
+        quantity = int(_number(fill.get("filled_quantity"), trade_plan.get("quantity")))
+        option_atr14 = _number(trade_plan.get("option_atr14"), trade_plan.get("atr14"))
+        tick = _number(trade_plan.get("tick_size"), 0.05)
+        stop_distance = max(
+            option_atr14 * _number(settings.get("atr_stoploss_multiplier"), 1.0),
+            actual_entry * _number(settings.get("min_stoploss_pct"), 3.0) / 100.0,
+            _number(settings.get("minimum_stoploss_points"), 2.0),
+        )
+        target_distance = stop_distance * _number(settings.get("risk_reward_multiplier"), 1.3)
+        stoploss = round_to_tick(actual_entry - stop_distance, tick)
+        target = round_to_tick(actual_entry + target_distance, tick)
+        trigger = stoploss
+        stop_limit = round_to_tick(max(tick, stoploss - tick), tick)
+        base = {
+            "tradingsymbol": trade_plan.get("tradingsymbol"),
+            "exchange": trade_plan.get("exchange") or "NFO",
+            "product": trade_plan.get("product") or "NRML",
+            "quantity": quantity,
+            "tag": "OPTIONS_AUTO",
+        }
+        return {
+            "actual_entry": actual_entry,
+            "target": target,
+            "stoploss": stoploss,
+            "target_order": {**base, "transaction_type": "SELL", "order_type": "LIMIT", "price": target},
+            "stoploss_order": {**base, "transaction_type": "SELL", "order_type": "SL", "trigger_price": trigger, "price": stop_limit},
+        }
 
     def reconcile(
         self,
@@ -288,3 +353,13 @@ def results_folder_writable(path: str) -> bool:
         return os.path.isdir(path) and os.access(path, os.W_OK)
     except OSError:
         return False
+
+
+def _number(value: Any, default: Any = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        try:
+            return float(default)
+        except (TypeError, ValueError):
+            return 0.0

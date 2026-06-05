@@ -20,13 +20,15 @@ from options_auto.core.session_state import OptionsAutoSessionState
 from options_auto.core.watchdog import WatchdogService
 from options_auto.execution.execution_safety import DataQualityEngine, RealOrderPreflight
 from options_auto.execution.kite_api_manager import KiteApiManager, RateLimiter
+from options_auto.execution.kite_order_adapter import KiteOrderAdapter
 from options_auto.execution.paper_broker import PaperBroker
 from options_auto.execution.paper_lifecycle import PaperLifecycleEngine
 from options_auto.execution.reconciliation import ReconciliationEngine
 from options_auto.execution.real_execution_controller import RealExecutionController, results_folder_writable
+from options_auto.data.fii_dii_loader import fii_dii_status_from_upload, parse_fii_dii_csv_text
 from options_auto.intelligence.adaptive_risk_engine import PositionSizer, RiskEngine
 from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
-from options_auto.intelligence.entry_timing_engine import EntryTimingEngine
+from options_auto.intelligence.entry_timing_engine import EntryTimingEngine, round_to_tick
 from options_auto.intelligence.exit_manager import ExitManager, build_long_option_trade_plan
 from options_auto.intelligence.live_adaptive_engine import LiveAdaptiveEngine
 from options_auto.intelligence.low_latency_decision_engine import LowLatencyDecisionEngine
@@ -86,6 +88,7 @@ class OptionsAutoTerminalService:
         self.ready_plan_cache = ReadyTradePlanCache()
         self.low_latency_engine = LowLatencyDecisionEngine(self.performance_monitor)
         self.live_adaptive = LiveAdaptiveEngine(log_path=os.path.join(self.result_root(), "adaptive_action_log.jsonl"))
+        self.latest_fii_dii_snapshot: dict[str, Any] | None = None
 
     def defaults(self) -> dict[str, Any]:
         return {
@@ -93,7 +96,7 @@ class OptionsAutoTerminalService:
             "feature": "Options Auto",
             "real_execution": {
                 "enabled": False,
-                "reason": REAL_EXECUTION_DISABLED_REASON,
+                "reason": "Connect Real Money Zerodha and pass guarded preflight before live Options Auto orders.",
             },
         }
 
@@ -110,6 +113,7 @@ class OptionsAutoTerminalService:
             "ready_trade_plan_cache": self.ready_plan_cache.snapshot(),
             "adaptive": self.live_adaptive.snapshot(),
             "performance": self.performance_monitor.snapshot(),
+            "fii_dii": self.latest_fii_dii_status(),
         }
 
     def result_root(self) -> str:
@@ -148,13 +152,14 @@ class OptionsAutoTerminalService:
             "available_capital": self._available_capital(mode),
             "available_balance": self.paper_broker.available_balance,
         }
+        market_cue_payload = self._market_cue_payload(payload)
         decision = evaluate_options_auto_decision(
             mode=mode,
             settings=settings,
             index_history=self._frame(payload.get("index_history") or payload.get("index_candles") or payload.get("candles") or []),
             option_candidates=instruments,
             quotes=quotes,
-            market_cue_payload={**payload, **dict(payload.get("market_cue") or {})},
+            market_cue_payload=market_cue_payload,
             risk_state=payload.get("risk_state") or {},
             account_state=account_state,
             timestamp=payload.get("timestamp") or payload.get("datetime"),
@@ -281,15 +286,16 @@ class OptionsAutoTerminalService:
         result["adaptive_dry_run"] = self._real_adaptive_dry_run(result, payload)
         self.session.status = "REAL_DRY_RUN_ONLY"
         result["session"] = self.session.to_dict()
-        result["message"] = REAL_EXECUTION_DISABLED_REASON
+        result["message"] = "Real dry-run complete. Live orders require REAL login, preflight, final validation, execution safety, OCO, and reconciliation."
         return result
 
     def real_preflight_check(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         settings = {**self.settings, **dict(payload.get("settings") or {})}
         mode = normalize_mode(payload.get("mode") or settings.get("mode") or MODE_REAL)
-        self.configure({**settings, "mode": mode}, kite_profile=payload.get("kite_profile") or {})
         client = self.kite_client_provider("LIVE") if mode == MODE_REAL else None
+        settings = self._real_capability_settings(settings, mode, client, payload)
+        self.configure({**settings, "mode": mode}, kite_profile=payload.get("kite_profile") or {})
         self.real_api_manager.client = client
         broker_orders = self._broker_orders(client, payload)
         positions = self._broker_positions(client, payload)
@@ -367,9 +373,120 @@ class OptionsAutoTerminalService:
         self.logger.log("WARN", "Options Auto real emergency plan generated", actions=len(result["actions"]))
         return result
 
-    def place_real_order(self, _payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        self.mode_guard.assert_real_order_allowed()
-        raise PermissionError(REAL_EXECUTION_DISABLED_REASON)
+    def place_real_order(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = {**dict(payload or {}), "mode": MODE_REAL}
+        client = self.kite_client_provider("LIVE")
+        if not client:
+            return self._blocked_real_order(["Real Money Zerodha is not connected."])
+        settings = self._real_capability_settings({**self.settings, **dict(payload.get("settings") or {})}, MODE_REAL, client, payload)
+        payload["settings"] = settings
+        self.configure(settings, kite_profile=payload.get("kite_profile") or {})
+        self.real_api_manager.client = client
+
+        preflight = self.real_preflight_check({
+            **payload,
+            "settings": settings,
+            "market_open": payload.get("market_open", True),
+            "instruments_valid": payload.get("instruments_valid", True),
+        })
+        if not preflight.get("allowed"):
+            return self._blocked_real_order(preflight.get("blockers") or ["Real preflight failed."], preflight=preflight)
+
+        decision = dict(payload.get("decision") or {})
+        if not decision:
+            decision = self.evaluate(payload)
+        if not decision.get("allowed"):
+            return self._blocked_real_order(decision.get("blockers") or ["Decision pipeline blocked real order."], preflight=preflight, decision=decision)
+
+        final_validation = self._final_entry_validation(decision, payload)
+        if not final_validation.get("allowed"):
+            return self._blocked_real_order(final_validation.get("blockers") or ["Fast final validation blocked real order."], preflight=preflight, decision=decision, final_validation=final_validation)
+
+        selected = dict(decision.get("selected_contract") or {})
+        trade_plan = {**dict(decision.get("trade_plan") or {}), "entry_price": final_validation.get("entry_limit") or (decision.get("trade_plan") or {}).get("entry_price")}
+        order_request, order_blockers = self._real_entry_order_request(selected, trade_plan, preflight)
+        if order_blockers:
+            return self._blocked_real_order(order_blockers, preflight=preflight, decision=decision, final_validation=final_validation)
+
+        adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard)
+        controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
+        if not controller_result.get("real_order_sent"):
+            return self._blocked_real_order(controller_result.get("blockers") or ["Real entry order failed."], preflight=preflight, decision=decision, final_validation=final_validation, execution=controller_result)
+
+        entry_order = controller_result["entry_order"]
+        self.session.orders.append(entry_order)
+        self.session.status = "REAL_ENTRY_ORDER_OPEN"
+        self.session.record_safety_event("Real Options Auto entry order sent", {"order_id": entry_order.get("order_id"), "tradingsymbol": entry_order.get("tradingsymbol")})
+        self.logger.log("WARN", "Options Auto real entry order sent", order_id=entry_order.get("order_id"), tradingsymbol=entry_order.get("tradingsymbol"))
+        return {
+            "allowed": True,
+            "real_order_sent": True,
+            "order_stage": "ENTRY_ORDER_OPEN",
+            "entry_order": entry_order,
+            "trade_plan": trade_plan,
+            "preflight": preflight,
+            "final_validation": final_validation,
+            "execution": controller_result,
+            "session": self.session.to_dict(),
+            "message": "Real BUY LIMIT entry sent through guarded Kite adapter.",
+        }
+
+    def upload_fii_dii_csv(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        file_name = payload.get("file_name") or payload.get("name") or "fii_dii.csv"
+        csv_text = payload.get("csv_text") or payload.get("text") or ""
+        file_path = payload.get("csv_file") or payload.get("file") or payload.get("path")
+        if file_path and not csv_text:
+            file_name = payload.get("file_name") or os.path.basename(str(file_path))
+            try:
+                with open(file_path, "r", encoding="utf-8-sig") as handle:
+                    csv_text = handle.read()
+            except OSError as exc:
+                parsed = {"status": "FAILED", "file_name": file_name, "warnings": [f"Could not read CSV: {exc}"], "fii_net": None, "dii_net": None}
+                snapshot = fii_dii_status_from_upload(parsed, payload.get("phase") or "PREMARKET")
+                self.latest_fii_dii_snapshot = snapshot
+                return snapshot
+        parsed = parse_fii_dii_csv_text(csv_text, file_name=file_name)
+        snapshot = fii_dii_status_from_upload(parsed, payload.get("phase") or "PREMARKET")
+        self.latest_fii_dii_snapshot = snapshot
+        self.logger.log("INFO", "Options Auto FII/DII CSV uploaded", status=snapshot.get("status"), file_name=file_name)
+        return snapshot
+
+    def latest_fii_dii_status(self, phase: str = "PREMARKET") -> dict[str, Any]:
+        phase = str(phase or "PREMARKET").upper()
+        if phase != "PREMARKET":
+            return {
+                "status": "IGNORED",
+                "file_name": (self.latest_fii_dii_snapshot or {}).get("file_name", ""),
+                "uploaded_at": (self.latest_fii_dii_snapshot or {}).get("uploaded_at", ""),
+                "fii_net": None,
+                "dii_net": None,
+                "score": 0.0,
+                "fii_dii_score": 0.0,
+                "warning": "FII/DII ignored outside pre-market.",
+                "used_for_phase": phase,
+            }
+        if self.latest_fii_dii_snapshot:
+            return dict(self.latest_fii_dii_snapshot)
+        warning = "FII/DII CSV not uploaded; treated as neutral for pre-market cue."
+        return {
+            "status": "NEUTRAL_MISSING_UPLOAD",
+            "file_name": "",
+            "uploaded_at": "",
+            "fii_net": None,
+            "dii_net": None,
+            "score": 0.0,
+            "fii_dii_score": 0.0,
+            "warning": warning,
+            "warnings": [warning],
+            "used_for_phase": "PREMARKET",
+        }
+
+    def premarket_market_cue(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        phase = str(payload.get("phase") or "PREMARKET").upper()
+        cue = self.market_cue_engine.evaluate(self._market_cue_payload({**payload, "phase": phase}), phase=phase).to_dict()
+        return {"market_cue": cue, "fii_dii_status": cue.get("fii_dii_status"), "settings": self.settings}
 
     def backtest(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -508,6 +625,101 @@ class OptionsAutoTerminalService:
         if isinstance(rows, list):
             return pd.DataFrame(rows)
         return pd.DataFrame()
+
+    def _real_capability_settings(self, settings: dict[str, Any], mode: str, client: Any | None, payload: dict[str, Any]) -> dict[str, Any]:
+        settings = normalize_settings({**dict(settings or {}), "mode": mode})
+        if mode != MODE_REAL:
+            return settings
+        if client:
+            settings["confirm_real_mode"] = True
+            explicit_dry_run = "dry_run_real_only" in payload or "dry_run_real_only" in dict(payload.get("settings") or {})
+            if not explicit_dry_run:
+                settings["dry_run_real_only"] = False
+            settings["real_orders_enabled"] = not bool(settings.get("dry_run_real_only"))
+        return settings
+
+    def _real_entry_order_request(self, selected: dict[str, Any], trade_plan: dict[str, Any], preflight: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        blockers = []
+        symbol = trade_plan.get("tradingsymbol") or selected.get("tradingsymbol")
+        exchange = trade_plan.get("exchange") or selected.get("exchange") or ("BFO" if "SENSEX" in str(symbol or "").upper() else "NFO")
+        token = selected.get("instrument_token") or selected.get("token") or trade_plan.get("instrument_token")
+        lot_size = int(_number(trade_plan.get("lot_size"), selected.get("lot_size")))
+        quantity = int(_number(trade_plan.get("quantity"), selected.get("quantity")))
+        tick = _number(trade_plan.get("tick_size"), selected.get("tick_size") or 0.05)
+        entry = round_to_tick(_number(trade_plan.get("entry_price")), tick)
+        product = str(trade_plan.get("product") or self.settings.get("order_product") or "NRML").upper()
+        margin = _number((preflight.get("evidence") or {}).get("checks", {}).get("available_margin"))
+        if not symbol:
+            blockers.append("Selected contract tradingsymbol is missing.")
+        if not token:
+            blockers.append("Selected contract instrument token is missing.")
+        if exchange not in {"NFO", "BFO"}:
+            blockers.append("Selected contract exchange must be NFO or BFO.")
+        if lot_size <= 0:
+            blockers.append("Selected contract lot size is invalid.")
+        if quantity <= 0:
+            blockers.append("Real order quantity is invalid.")
+        if lot_size > 0 and quantity % lot_size != 0:
+            blockers.append("Real order quantity must be a multiple of lot size.")
+        if tick <= 0:
+            blockers.append("Selected contract tick size is invalid.")
+        if entry <= 0:
+            blockers.append("Real order entry price is invalid.")
+        if product not in {"NRML", "MIS"}:
+            blockers.append("Real order product must be NRML or MIS.")
+        if margin and entry > 0 and quantity > 0 and margin < entry * quantity:
+            blockers.append("Available margin is insufficient for the entry order value.")
+        order_request = {
+            "tradingsymbol": symbol,
+            "exchange": exchange,
+            "instrument_token": token,
+            "transaction_type": "BUY",
+            "order_type": "LIMIT",
+            "quantity": quantity,
+            "price": entry,
+            "product": product,
+            "validity": "DAY",
+            "variety": "regular",
+            "tag": "OPTIONS_AUTO",
+        }
+        return order_request, list(dict.fromkeys(blockers))
+
+    def _blocked_real_order(
+        self,
+        blockers: list[str],
+        preflight: dict[str, Any] | None = None,
+        decision: dict[str, Any] | None = None,
+        final_validation: dict[str, Any] | None = None,
+        execution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        blockers = list(dict.fromkeys(blockers or ["Real order blocked by safety checks."]))
+        self.session.record_safety_event("Real Options Auto order blocked", {"blockers": blockers})
+        return {
+            "allowed": False,
+            "real_order_sent": False,
+            "order_stage": "BLOCKED",
+            "blockers": blockers,
+            "message": "Real order blocked because " + "; ".join(blockers[:4]),
+            "preflight": preflight or {},
+            "decision": decision or {},
+            "final_validation": final_validation or {},
+            "execution": execution or {},
+            "session": self.session.to_dict(),
+        }
+
+    def _market_cue_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload or {})
+        cue_payload = {**payload, **dict(payload.get("market_cue") or {})}
+        phase = str(cue_payload.get("phase") or cue_payload.get("market_phase") or cue_payload.get("cue_phase") or "LUNCH").upper()
+        cue_payload["require_fii_dii_upload"] = bool(self.settings.get("require_fii_dii_upload"))
+        if phase == "PREMARKET":
+            if self.latest_fii_dii_snapshot:
+                cue_payload["fii_dii_status"] = dict(self.latest_fii_dii_snapshot)
+            elif payload.get("fii_dii_status"):
+                cue_payload["fii_dii_status"] = dict(payload.get("fii_dii_status") or {})
+        elif self.latest_fii_dii_snapshot:
+            cue_payload["fii_dii_status"] = self.latest_fii_dii_status(phase)
+        return cue_payload
 
     def _available_capital(self, mode: str) -> float:
         if mode == MODE_PAPER:
@@ -758,3 +970,13 @@ class OptionsAutoTerminalService:
             if adaptive_visible:
                 updates.append(adaptive_update)
         return updates
+
+
+def _number(value: Any, default: Any = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        try:
+            return float(default)
+        except (TypeError, ValueError):
+            return 0.0

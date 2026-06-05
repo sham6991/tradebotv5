@@ -85,8 +85,15 @@ class OptionsAutoWebRoutes:
             return handler.send_json(self._with_account_status(self.service.real_stop_new_entries(payload)))
         if path == "/api/options-auto/real/safe-mode":
             return handler.send_json(self._with_account_status(self.service.real_safe_mode(payload)))
+        if path == "/api/options-auto/market-cue/fii-dii-upload":
+            return handler.send_json(self._with_account_status(self.service.upload_fii_dii_csv(payload)))
+        if path == "/api/options-auto/market-cue/premarket":
+            return handler.send_json(self._with_account_status(self.service.premarket_market_cue(payload)))
         if path == "/api/options-auto/real/place-order":
-            raise PermissionError("Options Auto real order placement is disabled until the real execution phase is completed.")
+            blockers = self._mode_blockers("LIVE", require_connection=True)
+            if blockers:
+                raise PermissionError(blockers[0])
+            return handler.send_json(self._with_account_status(self.service.place_real_order(self._with_profile(payload))))
         if path == "/api/options-auto/backtest/run":
             return handler.send_json(self._with_account_status(self.service.backtest(payload)))
         if path == "/api/options-auto/readiness":
@@ -146,6 +153,17 @@ class OptionsAutoWebRoutes:
 
     def _mode_blockers(self, requested_mode: str, require_connection: bool = False) -> list[str]:
         requested_mode = "LIVE" if str(requested_mode).upper() in {"REAL", "LIVE"} else "PAPER"
+        paper_connected = bool(self.app_state.connection_status("PAPER").get("connected"))
+        live_connected = bool(self.app_state.connection_status("LIVE").get("connected"))
+        if paper_connected and live_connected:
+            return ["Paper and Real Money connections are both active; disconnect one before Options Auto trading."]
+        if requested_mode == "LIVE":
+            if paper_connected and not live_connected:
+                return ["Real Trading locked because Paper mode is active."]
+            if require_connection and not live_connected:
+                return ["Connect Real Money Zerodha in the main app before Options Auto real trading."]
+        if requested_mode == "PAPER" and live_connected:
+            return ["Paper trading is simulation-only while Real Money mode is active; real order APIs stay locked to REAL mode."]
         blockers = []
         if hasattr(self.app_state, "blocking_connection_modes"):
             blockers = list(self.app_state.blocking_connection_modes(requested_mode) or [])

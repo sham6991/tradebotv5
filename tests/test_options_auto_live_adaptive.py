@@ -1,7 +1,6 @@
 import time
 import unittest
 
-from options_auto.constants import REAL_EXECUTION_DISABLED_REASON
 from options_auto.core.task_priority import P0_CRITICAL_PROTECTION, P4_SLOW
 from options_auto.execution.paper_broker import PaperBroker
 from options_auto.execution.paper_lifecycle import PaperLifecycleEngine
@@ -321,14 +320,16 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         self.assertTrue(engine.fast_lane_contains_slow_task(["news_fetch"]))
         self.assertLess(P0_CRITICAL_PROTECTION, P4_SLOW)
 
-    def test_real_dry_run_sends_zero_orders_and_real_place_disabled(self):
+    def test_real_dry_run_sends_zero_orders_and_reports_guarded_readiness(self):
         service = OptionsAutoTerminalService("results")
         result = service.real_dry_run(service_payload("REAL"))
 
         self.assertTrue(result["dry_run"])
         self.assertEqual(result["orders_sent"], 0)
         self.assertEqual(result["adaptive_dry_run"]["orders_sent"], 0)
-        self.assertIn(REAL_EXECUTION_DISABLED_REASON, result["blockers"])
+        self.assertEqual(result["blockers"], [])
+        self.assertTrue(result["real_execution_enabled"])
+        self.assertIn("guarded", result["real_execution_reason"])
 
     def test_paper_mode_executes_dynamic_cancel_in_simulation_only(self):
         service = OptionsAutoTerminalService("results")

@@ -5,6 +5,7 @@ from typing import Any
 
 from options_auto.constants import SIDE_CE, SIDE_PE, SIDE_WAIT
 from options_auto.core.clock import iso_now
+from options_auto.data.fii_dii_loader import score_fii_dii
 
 
 @dataclass
@@ -15,6 +16,7 @@ class MarketCue:
     recommended_side: str
     phase: str = "LUNCH"
     components: dict[str, float] = field(default_factory=dict)
+    fii_dii_status: dict[str, Any] = field(default_factory=dict)
     reason: str = ""
     last_updated: str = field(default_factory=iso_now)
     next_refresh: str = ""
@@ -27,6 +29,7 @@ class MarketCue:
             "confidence": self.confidence,
             "recommended_side": self.recommended_side,
             "components": self.components,
+            "fii_dii_status": self.fii_dii_status,
             "reason": self.reason,
             "last_updated": self.last_updated,
             "next_refresh": self.next_refresh,
@@ -40,7 +43,8 @@ class MarketCueEngine:
         features = dict(payload.get("index_features") or payload.get("features") or {})
 
         if phase == "PREMARKET":
-            components = self._premarket_components(payload)
+            fii_dii_status = _fii_dii_status(payload, phase)
+            components = self._premarket_components(payload, fii_dii_status)
             weights = {
                 "fii_dii": 0.30,
                 "global_cue": 0.20,
@@ -51,6 +55,7 @@ class MarketCueEngine:
             }
         elif phase == "AFTERNOON":
             components = self._afternoon_components(payload, features)
+            fii_dii_status = _fii_dii_status(payload, phase)
             weights = {
                 "intraday_trend": 0.30,
                 "trend_continuation": 0.20,
@@ -63,6 +68,7 @@ class MarketCueEngine:
         else:
             phase = "LUNCH"
             components = self._lunch_components(payload, features)
+            fii_dii_status = _fii_dii_status(payload, phase)
             weights = {
                 "intraday_trend": 0.35,
                 "vwap": 0.20,
@@ -86,6 +92,10 @@ class MarketCueEngine:
 
         confidence = min(100.0, 45.0 + abs(score) * 0.55)
         confidence = max(0.0, confidence - conflict)
+        reason = f"{cue.replace('_', ' ').title()} from {phase.lower()} score {score:.1f}."
+        status_reason = fii_dii_status.get("reason") or fii_dii_status.get("warning") or ""
+        if status_reason:
+            reason = f"{reason} {status_reason}"
         return MarketCue(
             phase=phase,
             cue=cue,
@@ -93,12 +103,13 @@ class MarketCueEngine:
             confidence=round(confidence, 2),
             recommended_side=side,
             components={key: round(float(value), 2) for key, value in components.items()},
-            reason=f"{cue.replace('_', ' ').title()} from {phase.lower()} score {score:.1f}.",
+            fii_dii_status=fii_dii_status,
+            reason=reason,
         )
 
-    def _premarket_components(self, payload: dict[str, Any]) -> dict[str, float]:
+    def _premarket_components(self, payload: dict[str, Any], fii_dii_status: dict[str, Any]) -> dict[str, float]:
         return {
-            "fii_dii": _fii_dii_component(payload),
+            "fii_dii": _clamp(fii_dii_status.get("score")),
             "global_cue": _component(payload, "global_cue_score", "global_score"),
             "previous_day_trend": _component(payload, "previous_day_trend_score", "previous_trend_score"),
             "news": _news_component(payload),
@@ -163,7 +174,7 @@ def _fii_dii_component(payload: dict[str, Any]) -> float:
     combined = fii_net + dii_net
     turnover = _number(payload.get("total_turnover"))
     if turnover > 0:
-        return _clamp(combined / turnover * 100)
+        return _clamp(combined / turnover * 100 * 10)
     if combined >= 3000:
         return 100.0
     if combined >= 1500:
@@ -177,6 +188,67 @@ def _fii_dii_component(payload: dict[str, Any]) -> float:
     if combined > -3000:
         return -60.0
     return -100.0
+
+
+def _fii_dii_status(payload: dict[str, Any], phase: str) -> dict[str, Any]:
+    phase = _normalize_phase(phase)
+    if phase != "PREMARKET":
+        return {
+            "status": "IGNORED",
+            "file_name": (payload.get("fii_dii_status") or {}).get("file_name", ""),
+            "uploaded_at": (payload.get("fii_dii_status") or {}).get("uploaded_at", ""),
+            "fii_net": None,
+            "dii_net": None,
+            "score": 0.0,
+            "fii_dii_score": 0.0,
+            "warning": "FII/DII ignored outside pre-market.",
+            "reason": "FII/DII ignored outside pre-market.",
+        }
+    uploaded = dict(payload.get("fii_dii_status") or payload.get("fii_dii_snapshot") or {})
+    if uploaded:
+        score = score_fii_dii(uploaded.get("fii_net"), uploaded.get("dii_net"), uploaded.get("total_turnover"))
+        status = str(uploaded.get("status") or "UPLOADED").upper()
+        if status == "OK":
+            status = "UPLOADED"
+        warning = "; ".join(uploaded.get("warnings") or [])
+        return {
+            **uploaded,
+            "status": status,
+            "combined_net": score["combined_net"],
+            "fii_dii_pct": score["fii_dii_pct"],
+            "score": score["fii_dii_score"],
+            "fii_dii_score": score["fii_dii_score"],
+            "warning": warning,
+            "reason": warning or "FII/DII CSV uploaded and used for pre-market cue.",
+        }
+    if any(key in payload for key in ("fii_net", "dii_net", "fii_buy_value", "fii_sell_value", "dii_buy_value", "dii_sell_value", "fii_dii_score")):
+        fii_net = payload.get("fii_net", _number(payload.get("fii_buy_value")) - _number(payload.get("fii_sell_value")))
+        dii_net = payload.get("dii_net", _number(payload.get("dii_buy_value")) - _number(payload.get("dii_sell_value")))
+        score = score_fii_dii(fii_net, dii_net, payload.get("total_turnover"))
+        return {
+            "status": "UPLOADED",
+            "file_name": payload.get("file_name", "manual_payload"),
+            "uploaded_at": payload.get("uploaded_at", ""),
+            "fii_net": fii_net,
+            "dii_net": dii_net,
+            "score": _clamp(payload.get("fii_dii_score", score["fii_dii_score"])),
+            "fii_dii_score": _clamp(payload.get("fii_dii_score", score["fii_dii_score"])),
+            "warning": "",
+            "reason": "FII/DII values provided in payload.",
+        }
+    warning = "FII/DII CSV not uploaded; treated as neutral for pre-market cue."
+    status = "REQUIRED_MISSING_UPLOAD" if payload.get("require_fii_dii_upload") else "NEUTRAL_MISSING_UPLOAD"
+    return {
+        "status": status,
+        "file_name": "",
+        "uploaded_at": "",
+        "fii_net": None,
+        "dii_net": None,
+        "score": 0.0,
+        "fii_dii_score": 0.0,
+        "warning": warning,
+        "reason": warning,
+    }
 
 
 def _news_component(payload: dict[str, Any]) -> float:

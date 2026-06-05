@@ -1,6 +1,6 @@
+import time
 import unittest
 
-from options_auto.constants import REAL_EXECUTION_DISABLED_REASON
 from options_auto.core.mode_guard import ModeGuard
 from options_auto.execution.real_execution_controller import RealExecutionController
 from options_auto.execution.reconciliation import ReconciliationEngine
@@ -14,6 +14,8 @@ class FakeRealClient:
         self._margin = margin
         self.orders_called = 0
         self.positions_called = 0
+        self.limit_orders = []
+        self.stoploss_orders = []
 
     def profile(self):
         return {"user_id": "REAL1"}
@@ -28,6 +30,28 @@ class FakeRealClient:
     def positions(self):
         self.positions_called += 1
         return self._positions
+
+    def place_limit_order(self, **kwargs):
+        self.limit_orders.append(dict(kwargs))
+        return f"REAL-{len(self.limit_orders)}"
+
+    def place_stoploss_limit_order(self, **kwargs):
+        self.stoploss_orders.append(dict(kwargs))
+        return f"SL-{len(self.stoploss_orders)}"
+
+
+class FakeFinalValidationEngine:
+    def __init__(self):
+        self.calls = []
+
+    def validate_final_entry(self, plan, latest_quote, settings, state):
+        self.calls.append({
+            "plan": dict(plan or {}),
+            "latest_quote": dict(latest_quote or {}),
+            "settings": dict(settings or {}),
+            "state": dict(state or {}),
+        })
+        return {"allowed": True, "blockers": [], "warnings": [], "entry_limit": 142.45, "reason": "ok"}
 
 
 def auto_order(order_id, tradingsymbol="NIFTY26JUN22500CE", transaction_type="BUY", status="OPEN", order_type="LIMIT", quantity=50):
@@ -80,7 +104,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertTrue(allowed["allowed"])
         self.assertTrue(allowed["dry_run_ready"])
 
-    def test_real_preflight_reports_orders_disabled_as_final_guard(self):
+    def test_real_preflight_defaults_to_guarded_live_when_real_client_exists(self):
         client = FakeRealClient()
         service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
 
@@ -94,9 +118,27 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
             "instruments_valid": True,
         })
 
+        self.assertTrue(result["allowed"])
+        self.assertTrue(result["dry_run_ready"])
+        self.assertTrue(result["real_orders_enabled"])
+
+    def test_real_preflight_respects_explicit_dry_run_override(self):
+        client = FakeRealClient()
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+
+        result = service.real_preflight_check({
+            "mode": "REAL",
+            "settings": {"mode": "REAL", "confirm_real_mode": True, "static_ip_confirmed": True, "dry_run_real_only": True},
+            "kite_profile": {"user_id": "REAL1"},
+            "broker_orders": [],
+            "positions": [],
+            "market_open": True,
+            "instruments_valid": True,
+        })
+
         self.assertFalse(result["allowed"])
         self.assertTrue(result["dry_run_ready"])
-        self.assertIn(REAL_EXECUTION_DISABLED_REASON, result["blockers"])
+        self.assertIn("dry-run override", "; ".join(result["blockers"]))
 
     def test_duplicate_and_manual_orders_block_reconciliation(self):
         engine = ReconciliationEngine()
@@ -158,6 +200,100 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
 
         self.assertFalse(result["allowed"])
         self.assertIn("Stop New Entries is active.", result["blockers"])
+
+    def test_guarded_real_order_sends_buy_limit_only_after_preflight_and_final_validation(self):
+        client = FakeRealClient(margin=100000)
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service.low_latency_engine = FakeFinalValidationEngine()
+        now_epoch = time.time()
+        decision = {
+            "allowed": True,
+            "blockers": [],
+            "selected_contract": {
+                "tradingsymbol": "NIFTY26JUN22500CE",
+                "instrument_token": "123",
+                "instrument_type": "CE",
+                "option_type": "CE",
+                "exchange": "NFO",
+                "lot_size": 50,
+                "tick_size": 0.05,
+                "ltp": 142.4,
+                "bid": 142.35,
+                "ask": 142.45,
+            },
+            "trade_plan": {
+                "tradingsymbol": "NIFTY26JUN22500CE",
+                "instrument_token": "123",
+                "exchange": "NFO",
+                "side": "CE",
+                "entry_price": 142.45,
+                "quantity": 50,
+                "lot_size": 50,
+                "tick_size": 0.05,
+                "product": "NRML",
+            },
+            "ready_trade_plan": {
+                "status": "READY",
+                "last_refreshed_epoch": now_epoch,
+                "side": "CE",
+                "entry_plan": {"entry_limit": 142.45, "signal_price": 142.4},
+                "premium_context": {"premium_return_1": 1.0, "option_atr14": 5},
+                "market_context": {
+                    "market_cue": {"recommended_side": "CE"},
+                    "regime": {"recommended_side": "CE"},
+                },
+            },
+            "data_quality": {"allowed": True},
+            "governor": {"allowed": True},
+            "market_cue": {"recommended_side": "CE"},
+            "regime": {"recommended_side": "CE"},
+        }
+
+        result = service.place_real_order({
+            "mode": "REAL",
+            "decision": decision,
+            "settings": {"mode": "REAL", "static_ip_confirmed": True},
+            "kite_profile": {"user_id": "REAL1"},
+            "quotes": {"123": {"ltp": 142.4, "bid": 142.35, "ask": 142.45, "option_atr14": 5, "premium_return_1": 1.0, "age_seconds": 0}},
+            "broker_orders": [],
+            "positions": [],
+            "market_open": True,
+            "instruments_valid": True,
+        })
+
+        self.assertTrue(result["real_order_sent"])
+        self.assertEqual(result["order_stage"], "ENTRY_ORDER_OPEN")
+        self.assertEqual(len(client.limit_orders), 1)
+        order = client.limit_orders[0]
+        self.assertEqual(order["transaction_type"], "BUY")
+        self.assertEqual(order["tradingsymbol"], "NIFTY26JUN22500CE")
+        self.assertEqual(order["quantity"], 50)
+        self.assertEqual(order["price"], 142.45)
+        self.assertEqual(order["exchange"], "NFO")
+        self.assertEqual(order["product"], "NRML")
+        self.assertEqual(order["variety"], "regular")
+        self.assertEqual(order["validity"], "DAY")
+        self.assertEqual(order["tag"], "OPTIONS_AUTO")
+        self.assertEqual(client.stoploss_orders, [])
+        self.assertEqual(len(service.low_latency_engine.calls), 1)
+
+    def test_protection_orders_from_fill_uses_actual_fill_and_sell_sl_limit(self):
+        controller = RealExecutionController()
+
+        result = controller.protection_orders_from_fill(
+            {"tradingsymbol": "NIFTY26JUN22500CE", "exchange": "NFO", "product": "NRML", "quantity": 50, "option_atr14": 4, "tick_size": 0.05},
+            {"average_price": 140.0, "filled_quantity": 50},
+            {"atr_stoploss_multiplier": 1.0, "min_stoploss_pct": 3.0, "minimum_stoploss_points": 2.0, "risk_reward_multiplier": 1.3},
+        )
+
+        self.assertEqual(result["actual_entry"], 140.0)
+        self.assertEqual(result["stoploss"], 135.8)
+        self.assertEqual(result["target"], 145.45)
+        self.assertEqual(result["target_order"]["transaction_type"], "SELL")
+        self.assertEqual(result["target_order"]["order_type"], "LIMIT")
+        self.assertEqual(result["stoploss_order"]["transaction_type"], "SELL")
+        self.assertEqual(result["stoploss_order"]["order_type"], "SL")
+        self.assertEqual(result["stoploss_order"]["trigger_price"], 135.8)
 
 
 if __name__ == "__main__":

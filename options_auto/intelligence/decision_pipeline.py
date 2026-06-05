@@ -83,6 +83,7 @@ def evaluate_options_auto_decision(
             {
                 "ltp": selected.get("ltp"),
                 "spread_pct": selected.get("spread_pct"),
+                "demo_data": selected.get("demo_data"),
                 "age_seconds": cue_payload.get("quote_age_seconds", selected.get("age_seconds", 0)),
             },
             settings,
@@ -155,6 +156,8 @@ def evaluate_options_auto_decision(
     execution = _execution_state(mode)
 
     market_blockers = []
+    if (market_cue.to_dict().get("fii_dii_status") or {}).get("status") == "REQUIRED_MISSING_UPLOAD":
+        market_blockers.append("FII/DII CSV upload is required for pre-market cue.")
     if regime.recommended_side == SIDE_WAIT:
         market_blockers.append(regime.no_trade_reason or "Regime says WAIT.")
     if market_cue.recommended_side == SIDE_WAIT and settings.get("market_cue_alignment_required"):
@@ -196,6 +199,7 @@ def evaluate_options_auto_decision(
         trade_plan,
     )
     explanation = _explanation(allowed, selected_side, selected, trade_score, blockers)
+    real_mode = mode == MODE_REAL
     return {
         "mode": mode,
         "timestamp": timestamp_text,
@@ -220,8 +224,12 @@ def evaluate_options_auto_decision(
         "warnings": warnings,
         "explanation": explanation,
         "decision_snapshot": decision_snapshot,
-        "real_execution_enabled": False,
-        "real_execution_reason": REAL_EXECUTION_DISABLED_REASON,
+        "real_execution_enabled": real_mode,
+        "real_execution_reason": (
+            "Real execution is guarded by live login, preflight, final validation, OCO, and reconciliation."
+            if real_mode
+            else REAL_EXECUTION_DISABLED_REASON
+        ),
     }
 
 
@@ -341,10 +349,10 @@ def _explanation(allowed: bool, side: str, selected: dict[str, Any], score: dict
 def _execution_state(mode: str) -> dict[str, Any]:
     if mode == MODE_REAL:
         return {
-            "allowed": False,
-            "state": "REAL_DRY_RUN_ONLY",
-            "blockers": [REAL_EXECUTION_DISABLED_REASON],
-            "warnings": ["Real order placement remains disabled."],
+            "allowed": True,
+            "state": "REAL_GUARDED_EXECUTION",
+            "blockers": [],
+            "warnings": ["Real orders require LIVE login, preflight, final validation, execution safety, OCO, and reconciliation."],
         }
     return {"allowed": True, "state": "SIMULATION_MODE", "blockers": [], "warnings": []}
 

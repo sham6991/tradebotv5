@@ -32,6 +32,10 @@ class DataQualityEngine:
             blockers.append("Quote is missing.")
         if float(quote.get("ltp") or quote.get("last_price") or 0) <= 0:
             blockers.append("Quote LTP is unavailable.")
+        mode = str(settings.get("mode") or "").upper()
+        allow_demo = bool(settings.get("allow_demo_data") or mode in {"BACKTEST", "SHADOW", "DEBUG"})
+        if quote.get("demo_data") and not allow_demo:
+            blockers.append("Live quote data unavailable; demo/sample data cannot be used for paper or real trading.")
         spread_pct = float(quote.get("spread_pct") or 0)
         if spread_pct and spread_pct > float(settings.get("max_spread_pct") or 0.6):
             blockers.append("Quote spread is too wide.")
@@ -61,4 +65,3 @@ class RealOrderPreflight:
         if not settings.get("real_orders_enabled"):
             blockers.append(REAL_EXECUTION_DISABLED_REASON)
         return SafetyDecision(not blockers, "REAL_PREFLIGHT_OK" if not blockers else "BLOCKED_BY_EXECUTION", blockers, warnings)
-

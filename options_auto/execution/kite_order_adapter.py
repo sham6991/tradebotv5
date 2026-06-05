@@ -18,10 +18,10 @@ class KiteOrderAdapter:
         self.api = api
         self.mode_guard = mode_guard
 
-    def place_entry_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "MIS", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
+    def place_entry_buy_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
         self.mode_guard.assert_real_order_allowed()
         return self.api.call(
-            "place_entry_limit",
+            "place_entry_buy_limit",
             lambda: self.api.client.place_limit_order(
                 tradingsymbol=tradingsymbol,
                 transaction_type="BUY",
@@ -29,15 +29,20 @@ class KiteOrderAdapter:
                 price=float(price),
                 exchange=exchange,
                 product=product,
+                variety="regular",
+                validity="DAY",
                 tag=tag,
             ),
             priority="ENTRY",
         )
 
-    def place_target_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "MIS", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
+    def place_entry_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
+        return self.place_entry_buy_limit(tradingsymbol, quantity, price, exchange, product, tag)
+
+    def place_target_sell_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
         self.mode_guard.assert_real_order_allowed()
         return self.api.call(
-            "place_target_limit",
+            "place_target_sell_limit",
             lambda: self.api.client.place_limit_order(
                 tradingsymbol=tradingsymbol,
                 transaction_type="SELL",
@@ -45,15 +50,20 @@ class KiteOrderAdapter:
                 price=float(price),
                 exchange=exchange,
                 product=product,
+                variety="regular",
+                validity="DAY",
                 tag=tag,
             ),
             priority="PROTECTION",
         )
 
-    def place_stoploss_limit(self, tradingsymbol: str, quantity: int, trigger_price: float, price: float, exchange: str, product: str = "MIS", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
+    def place_target_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
+        return self.place_target_sell_limit(tradingsymbol, quantity, price, exchange, product, tag)
+
+    def place_stoploss_sell_sl_limit(self, tradingsymbol: str, quantity: int, trigger_price: float, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
         self.mode_guard.assert_real_order_allowed()
         return self.api.call(
-            "place_stoploss_limit",
+            "place_stoploss_sell_sl_limit",
             lambda: self.api.client.place_stoploss_limit_order(
                 tradingsymbol=tradingsymbol,
                 transaction_type="SELL",
@@ -62,10 +72,15 @@ class KiteOrderAdapter:
                 price=float(price),
                 exchange=exchange,
                 product=product,
+                variety="regular",
+                validity="DAY",
                 tag=tag,
             ),
             priority="PROTECTION",
         )
+
+    def place_stoploss_limit(self, tradingsymbol: str, quantity: int, trigger_price: float, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
+        return self.place_stoploss_sell_sl_limit(tradingsymbol, quantity, trigger_price, price, exchange, product, tag)
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         self.mode_guard.assert_real_order_allowed()

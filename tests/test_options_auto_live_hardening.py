@@ -47,6 +47,8 @@ class StreamingOptionsZerodha:
         self.historical_calls = []
         self.limit_orders = []
         self.stoploss_orders = []
+        self.orders_calls = 0
+        self.positions_calls = 0
         self._orders = []
         self._positions = []
         self.margin = 250000.0
@@ -120,9 +122,11 @@ class StreamingOptionsZerodha:
         return self.margin
 
     def orders(self):
+        self.orders_calls += 1
         return list(self._orders)
 
     def positions(self):
+        self.positions_calls += 1
         return {"net": list(self._positions)}
 
     def place_limit_order(self, **kwargs):
@@ -229,27 +233,28 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
 
             warm_quote_calls = len(client.quote_calls)
             client.set_tick(spot=22552, ce_price=142.35)
+            start = time.perf_counter()
             with service._lock:
                 warm = service._run_live_scan_cycle_locked()
+            timings["paper_fill_ms"] = (time.perf_counter() - start) * 1000
             warm_cycle_calls = client.quote_calls[warm_quote_calls:]
             self.assertLessEqual(len(warm_cycle_calls), 2)
             self.assertLessEqual(sum(len(call) for call in warm_cycle_calls), 3)
             self.assertIn("NFO:" + signal["trade_plan"]["tradingsymbol"], warm["requested_quote_keys"])
-
-            entry_price = float(signal["trade_plan"]["entry_price"])
-            start = time.perf_counter()
-            filled = service.process_paper_market({"market": {"ltp": entry_price, "low": entry_price, "high": entry_price + 0.2, "bid": entry_price - 0.05, "ask": entry_price + 0.05}})
-            timings["paper_fill_ms"] = (time.perf_counter() - start) * 1000
-            self.assertEqual(filled["updates"][0]["action"], "ENTRY_FILLED")
+            self.assertEqual(warm["live_scan_action"]["action"], "PAPER_MARKET_PROCESSED")
+            self.assertTrue(any(update.get("action") == "ENTRY_FILLED" for update in warm["live_scan_action"]["paper_market_update"]["updates"]))
             self.assertEqual(service.locked_contract_manager.state, "TRADE_ACTIVE")
 
             trade = service.paper_lifecycle.active_trades[0]
             old_lock_id = service.locked_contract_manager.lock["lock_id"]
             target_print = float(trade["target"]) + 50.0
+            client.set_tick(spot=22560, ce_price=target_print)
             start = time.perf_counter()
-            exited = service.process_paper_market({"market": {"ltp": target_print, "high": target_print, "low": target_print, "bid": target_print - 0.05, "ask": target_print + 0.05}})
+            with service._lock:
+                exited = service._run_live_scan_cycle_locked()
             timings["paper_exit_ms"] = (time.perf_counter() - start) * 1000
-            self.assertEqual(exited["updates"][0]["action"], "TARGET_FILLED")
+            self.assertEqual(exited["live_scan_action"]["action"], "PAPER_MARKET_PROCESSED")
+            self.assertTrue(any(update.get("action") == "TARGET_FILLED" for update in exited["live_scan_action"]["paper_market_update"]["updates"]))
             self.assertEqual(service.locked_contract_manager.state, "TRADE_EXITED")
 
             client.set_tick(spot=22620, ce_price=138.25)
@@ -271,6 +276,38 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
         self.assertLess(timings["paper_exit_ms"], 300)
         self.assertLess(timings["next_scan_ms"], 1500)
         print("OPTIONS_AUTO_PAPER_HARD_TIMING", json.dumps({key: round(value, 2) for key, value in timings.items()}, sort_keys=True))
+
+    def test_paper_live_scan_processes_pending_and_active_trade_from_locked_quote(self):
+        client = StreamingOptionsZerodha("PAPER")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            payload = live_payload(MODE_PAPER)
+            started = service.start_paper(payload)
+            service._live_scan_stop.set()
+            self.assertTrue(started["allowed"], started.get("blockers"))
+
+            client.set_tick(spot=22548, ce_price=142.40)
+            with service._lock:
+                signal = service._run_live_scan_cycle_locked()
+            self.assertEqual(signal["live_scan_action"]["action"], "PAPER_ENTRY_PENDING")
+            self.assertEqual(len(service.paper_lifecycle.pending_entries), 1)
+
+            entry_price = float(signal["trade_plan"]["entry_price"])
+            client.set_tick(spot=22550, ce_price=entry_price)
+            with service._lock:
+                filled = service._run_live_scan_cycle_locked()
+            self.assertEqual(filled["live_scan_action"]["action"], "PAPER_MARKET_PROCESSED")
+            self.assertEqual(len(service.paper_lifecycle.pending_entries), 0)
+            self.assertEqual(len(service.paper_lifecycle.active_trades), 1)
+
+            target = float(service.paper_lifecycle.active_trades[0]["target"]) + 1.0
+            client.set_tick(spot=22555, ce_price=target)
+            with service._lock:
+                closed = service._run_live_scan_cycle_locked()
+            self.assertEqual(closed["live_scan_action"]["action"], "PAPER_MARKET_PROCESSED")
+            self.assertTrue(closed["live_scan_action"]["paper_market_update"]["closed"])
+            self.assertEqual(len(service.paper_lifecycle.active_trades), 0)
+            self.assertTrue(service.paper_lifecycle.closed_trades)
 
     def test_live_tick_candle_builder_stays_fast_under_stream_load(self):
         store = LiveIndexCandleStore(max_candles=120)
@@ -335,6 +372,24 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
 
         self.assertLess(timings["real_order_ms"], 2500)
         print("OPTIONS_AUTO_REAL_HARD_TIMING", json.dumps({key: round(value, 2) for key, value in timings.items()}, sort_keys=True))
+
+    def test_real_live_broker_snapshot_is_reused_for_sync_and_lifecycle(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            service.place_real_order(payload)
+            service._live_scan_stop.set()
+            client.orders_calls = 0
+            client.positions_calls = 0
+
+            with service._lock:
+                broker_payload = service._real_live_broker_payload_locked({key: value for key, value in payload.items() if key not in {"broker_orders", "positions"}})
+                service._sync_real_option_positions_locked(broker_payload)
+                service.real_lifecycle_poll(broker_payload)
+
+        self.assertEqual(client.orders_calls, 1)
+        self.assertEqual(client.positions_calls, 1)
 
     def test_kite_api_manager_blocks_bursts_before_zerodha_limit_errors(self):
         api = KiteApiManager(limiter=RateLimiter(max_calls=3, per_seconds=1.0))

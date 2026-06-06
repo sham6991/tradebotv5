@@ -45,8 +45,8 @@ class OptionsLiveFeed:
         self.health.mark_tick(role, tick.get("timestamp") or tick.get("exchange_timestamp"))
         return result
 
-    def snapshot(self) -> dict[str, Any]:
-        health = self.health.evaluate()
+    def snapshot(self, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        health = self.health.evaluate(settings)
         return {
             "data_mode": health["data_mode"],
             "websocket_connected": self.websocket_connected,

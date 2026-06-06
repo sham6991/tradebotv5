@@ -150,7 +150,7 @@ class OptionsAutoTerminalService:
                 "live_index_candles": self.live_index_candles.snapshot(),
                 "contract_lock": self.locked_contract_manager.snapshot(),
                 "live_scan": self._live_scan_state_locked(),
-                "options_live_feed": self.options_live_feed.snapshot(),
+                "options_live_feed": self.options_live_feed.snapshot(self.settings),
                 "real_order_lifecycle": self.real_lifecycle.snapshot(),
                 "blackbox": self.blackbox_recorder.snapshot(),
                 "instrument_cache": self.options_instrument_cache.snapshot(),
@@ -879,8 +879,9 @@ class OptionsAutoTerminalService:
                     break
                 try:
                     if self._live_scan_mode == MODE_REAL:
-                        self._sync_real_option_positions_locked()
-                        self.real_lifecycle_poll(dict(self._live_scan_payload or {}))
+                        broker_payload = self._real_live_broker_payload_locked(dict(self._live_scan_payload or {}))
+                        self._sync_real_option_positions_locked(broker_payload)
+                        self.real_lifecycle_poll(broker_payload)
                     self._run_live_scan_cycle_locked()
                     self._live_scan_cycle_count += 1
                     self._live_scan_last_cycle = datetime.now().isoformat(timespec="seconds")
@@ -902,7 +903,15 @@ class OptionsAutoTerminalService:
         result = self._evaluate_current_config_locked(payload, mode)
         live_scan_action: dict[str, Any]
         if mode == MODE_PAPER:
-            live_scan_action = self._paper_live_scan_action_locked(result, payload)
+            paper_market_update = self._paper_live_monitor_market_locked(result)
+            if paper_market_update.get("processed"):
+                live_scan_action = {
+                    "action": "PAPER_MARKET_PROCESSED",
+                    "reason": "Paper pending/active trade was updated from latest locked-contract quote.",
+                    "paper_market_update": paper_market_update,
+                }
+            else:
+                live_scan_action = self._paper_live_scan_action_locked(result, payload)
             if self.session.status not in {"PAPER_APPROVAL_PENDING", "PAPER_ENTRY_PENDING", "PAPER_TRADE_ACTIVE"}:
                 self.session.status = "PAPER_SCANNING"
         else:
@@ -912,6 +921,83 @@ class OptionsAutoTerminalService:
         result["live_scan_action"] = live_scan_action
         self.session.last_decision = {**dict(self.session.last_decision or {}), "live_scan_action": live_scan_action}
         return result
+
+    def _paper_live_monitor_market_locked(self, decision: dict[str, Any]) -> dict[str, Any]:
+        if not (self.paper_lifecycle.pending_entries or self.paper_lifecycle.active_trades):
+            return {"processed": False, "reason": "No paper pending entry or active trade."}
+        market = self._paper_market_from_decision(decision)
+        if not market:
+            return {"processed": False, "reason": "Latest locked-contract paper quote is unavailable."}
+        before_active = len(self.paper_lifecycle.active_trades)
+        before_pending = len(self.paper_lifecycle.pending_entries)
+        result = self.process_paper_market({"market": market})
+        updates = list(result.get("updates") or [])
+        return {
+            "processed": True,
+            "market": market,
+            "updates": updates,
+            "before_active": before_active,
+            "after_active": len(self.paper_lifecycle.active_trades),
+            "before_pending": before_pending,
+            "after_pending": len(self.paper_lifecycle.pending_entries),
+            "closed": any(bool(update.get("closed")) for update in updates),
+        }
+
+    def _paper_market_from_decision(self, decision: dict[str, Any]) -> dict[str, Any]:
+        symbol = self._paper_lifecycle_symbol()
+        if not symbol:
+            return {}
+        contract = self._contract_for_symbol(symbol, decision)
+        quote = self._quote_for_contract(contract, dict(decision.get("quotes") or {})) if contract else {}
+        if not quote:
+            selected = dict(decision.get("selected_contract") or {})
+            if str(selected.get("tradingsymbol") or "").upper() == symbol:
+                quote = selected
+        ltp = _number(quote.get("ltp"), quote.get("last_price"))
+        if ltp <= 0:
+            return {}
+        high = _number(quote.get("high"), ltp) or ltp
+        low = _number(quote.get("low"), ltp) or ltp
+        return {
+            "ltp": ltp,
+            "last_price": ltp,
+            "high": high,
+            "low": low,
+            "bid": quote.get("bid"),
+            "ask": quote.get("ask"),
+            "spread_pct": quote.get("spread_pct"),
+            "premium_return_1": quote.get("premium_return_1"),
+            "premium_return_3": quote.get("premium_return_3"),
+            "relative_volume": quote.get("relative_volume"),
+            "option_atr14": quote.get("option_atr14") or quote.get("atr14"),
+            "age_seconds": quote.get("age_seconds"),
+            "now_epoch": time.time(),
+            "market_cue": decision.get("market_cue") or {},
+            "regime": decision.get("regime") or {},
+            "index_features": ((decision.get("decision_snapshot") or {}).get("index_features") or {}),
+            "option_features": quote,
+        }
+
+    def _paper_lifecycle_symbol(self) -> str:
+        if self.paper_lifecycle.active_trades:
+            return str((self.paper_lifecycle.active_trades[0] or {}).get("tradingsymbol") or "").upper()
+        if self.paper_lifecycle.pending_entries:
+            pending = self.paper_lifecycle.pending_entries[0] or {}
+            plan = dict(pending.get("trade_plan") or {})
+            order = dict(pending.get("entry_order") or {})
+            return str(plan.get("tradingsymbol") or order.get("tradingsymbol") or "").upper()
+        return ""
+
+    def _contract_for_symbol(self, symbol: str, decision: dict[str, Any]) -> dict[str, Any]:
+        symbol = str(symbol or "").upper()
+        selected = dict(decision.get("selected_contract") or {})
+        if str(selected.get("tradingsymbol") or "").upper() == symbol:
+            return selected
+        lock = self.locked_contract_manager.lock or {}
+        for contract in (lock.get("ce") or {}, lock.get("pe") or {}):
+            if str((contract or {}).get("tradingsymbol") or "").upper() == symbol:
+                return dict(contract or {})
+        return {"tradingsymbol": symbol, "exchange": "BFO" if "SENSEX" in symbol or "BANKEX" in symbol else "NFO"}
 
     def _paper_live_scan_action_locked(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         if not self.settings.get("auto_entry_enabled"):
@@ -1013,6 +1099,13 @@ class OptionsAutoTerminalService:
             "last_error": self._live_scan_last_error,
             "cycle_count": self._live_scan_cycle_count,
         }
+
+    def _real_live_broker_payload_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        payload = dict(payload or {})
+        client = self.kite_client_provider("LIVE")
+        broker_orders = self._broker_orders(client, payload)
+        positions = self._broker_positions(client, payload)
+        return {**payload, "broker_orders": broker_orders, "positions": positions}
 
     def execute_paper_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.start_paper(payload)

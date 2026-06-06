@@ -1459,6 +1459,8 @@ class OptionsAutoTerminalService:
         if lots <= 0:
             raise ValueError("Lots must be greater than zero.")
         available = float(settings.get("paper_starting_balance") or 0)
+        if available <= 0:
+            raise ValueError(f"Backtest balance not configured. Set paper_starting_balance > 0 (currently: {available}).")
         max_hops = max(0, _int_setting(settings.get("max_hop_strikes"), 5))
         ce = self._select_backtest_major_contract(
             client=client,
@@ -1477,6 +1479,9 @@ class OptionsAutoTerminalService:
             to_dt=to_dt,
             interval=interval,
         )
+        if ce.get("error"):
+            raise ValueError(ce.get("blockers", ["Contract selection failed"])[0])
+        
         pe = self._select_backtest_major_contract(
             client=client,
             underlying=underlying,
@@ -1494,7 +1499,10 @@ class OptionsAutoTerminalService:
             to_dt=to_dt,
             interval=interval,
         )
-        contracts = [ce["contract"], pe["contract"]]
+        if pe.get("error"):
+            raise ValueError(pe.get("blockers", ["Contract selection failed"])[0])
+        
+        contracts = [ce["selected"], pe["selected"]]
         option_frames = [ce["frame"], pe["frame"]]
         lock = {
             "lock_id": f"OA_BACKTEST_LOCK_{trade_day.strftime('%Y%m%d')}_001",
@@ -1505,8 +1513,8 @@ class OptionsAutoTerminalService:
             "major_strike_step": major_step,
             "major_selection": major,
             "lots": lots,
-            "ce": ce["contract"],
-            "pe": pe["contract"],
+            "ce": ce["selected"],
+            "pe": pe["selected"],
             "locked_at": from_dt.isoformat(sep=" "),
             "valid_until": (from_dt + pd.Timedelta(minutes=int(settings.get("contract_reselection_minutes") or 60))).isoformat(sep=" "),
             "status": "CONTRACTS_LOCKED",
@@ -1533,11 +1541,11 @@ class OptionsAutoTerminalService:
             "contracts_requested": 2,
             "contracts_found": len(contracts),
             "contracts": [_contract_summary(contract) for contract in contracts],
-            "selected_ce": _contract_summary(ce["contract"]),
-            "selected_pe": _contract_summary(pe["contract"]),
+            "selected_ce": _contract_summary(ce["selected"]),
+            "selected_pe": _contract_summary(pe["selected"]),
             "lots": lots,
-            "fetched_lot_size": {"CE": ce["contract"].get("lot_size"), "PE": pe["contract"].get("lot_size")},
-            "final_quantity": {"CE": ce["contract"].get("quantity"), "PE": pe["contract"].get("quantity")},
+            "fetched_lot_size": {"CE": ce["selected"].get("lot_size"), "PE": pe["selected"].get("lot_size")},
+            "final_quantity": {"CE": ce["selected"].get("quantity"), "PE": pe["selected"].get("quantity")},
             "margin_hop_history": lock["margin_hop_history"],
             "contract_lock": lock,
             "lock_history": lock_history,
@@ -1611,8 +1619,97 @@ class OptionsAutoTerminalService:
         to_dt: datetime,
         interval: str,
     ) -> dict[str, Any]:
+        """Select affordable options contract for backtest with fallback to wider scan."""
+        hop_history: list[dict[str, Any]] = []
+        cheapest_checked: dict[str, Any] | None = None
+        
+        # Step 1: Try primary major-hop strategy
+        result = self._try_backtest_major_hop_selection(
+            client=client,
+            underlying=underlying,
+            exchange=exchange,
+            expiry=expiry,
+            option_type=option_type,
+            initial_strike=initial_strike,
+            hop_direction=hop_direction,
+            major_step=major_step,
+            lots=lots,
+            available_margin=available_margin,
+            max_hops=max_hops,
+            settings=settings,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            interval=interval,
+        )
+        if result.get("selected"):
+            return result
+        hop_history.extend(result.get("hop_history", []))
+        cheapest_checked = result.get("cheapest_checked")
+        
+        # Step 2: Try fallback scan for all available contracts of same expiry
+        result = self._backtest_fallback_contract_scan(
+            client=client,
+            underlying=underlying,
+            exchange=exchange,
+            expiry=expiry,
+            option_type=option_type,
+            initial_strike=initial_strike,
+            hop_direction=hop_direction,
+            major_step=major_step,
+            lots=lots,
+            available_margin=available_margin,
+            settings=settings,
+            from_dt=from_dt,
+            to_dt=to_dt,
+            interval=interval,
+        )
+        if result.get("selected"):
+            result["hop_history"] = hop_history + result.get("hop_history", [])
+            result["fallback_used"] = True
+            return result
+        hop_history.extend(result.get("hop_history", []))
+        if result.get("cheapest_checked"):
+            cheapest_checked = result["cheapest_checked"]
+        
+        # Step 3: Return diagnostic error instead of crashing
+        return {
+            "error": True,
+            "blockers": [self._backtest_contract_failure_diagnostics(
+                underlying=underlying,
+                option_type=option_type,
+                available_margin=available_margin,
+                cheapest_checked=cheapest_checked,
+                settings=settings,
+            )],
+            "hop_history": hop_history,
+            "cheapest_checked_contract": cheapest_checked,
+            "available_margin": available_margin,
+        }
+
+    def _try_backtest_major_hop_selection(
+        self,
+        *,
+        client: Any,
+        underlying: str,
+        exchange: str,
+        expiry: Any,
+        option_type: str,
+        initial_strike: int,
+        hop_direction: int,
+        major_step: int,
+        lots: int,
+        available_margin: float,
+        max_hops: int,
+        settings: dict[str, Any],
+        from_dt: datetime,
+        to_dt: datetime,
+        interval: str,
+    ) -> dict[str, Any]:
+        """Try to select contract using major-hop strategy."""
         hop_history: list[dict[str, Any]] = []
         initial_symbol = ""
+        cheapest_checked: dict[str, Any] | None = None
+        
         for hop in range(max_hops + 1):
             strike = initial_strike + hop_direction * major_step * hop
             contract = self.options_instrument_cache.find_option_contract(
@@ -1626,23 +1723,32 @@ class OptionsAutoTerminalService:
             if not contract:
                 hop_history.append({"option_type": option_type, "strike": strike, "hop_count": hop, "status": "MISSING_CONTRACT"})
                 continue
+            
             lot_size = get_contract_lot_size(contract)
             if lot_size <= 0:
-                raise ValueError("Lot size missing for selected contract. Refresh options instrument cache.")
-            frame = self._historical_frame(
-                client,
-                contract.get("instrument_token"),
-                from_dt,
-                to_dt,
-                interval,
-                str(contract.get("tradingsymbol") or contract.get("instrument_token") or "option"),
-            )
+                hop_history.append({"option_type": option_type, "strike": strike, "hop_count": hop, "status": "ERROR", "reason": "Lot size missing"})
+                continue
+            
+            try:
+                frame = self._historical_frame(
+                    client,
+                    contract.get("instrument_token"),
+                    from_dt,
+                    to_dt,
+                    interval,
+                    str(contract.get("tradingsymbol") or contract.get("instrument_token") or "option"),
+                )
+            except Exception as exc:
+                hop_history.append({"option_type": option_type, "strike": strike, "hop_count": hop, "status": "DATA_ERROR", "reason": str(exc)})
+                continue
+            
             premium = _first_close(frame)
             quantity = lots * lot_size
             margin = self._margin_requirement(premium, quantity, lots, settings)
             symbol = contract.get("tradingsymbol") or ""
             if hop == 0:
                 initial_symbol = symbol
+            
             entry = {
                 "option_type": option_type,
                 "contract": symbol,
@@ -1654,12 +1760,18 @@ class OptionsAutoTerminalService:
                 "premium": premium,
                 **margin,
             }
+            
             if premium <= 0:
-                entry.update({"status": "BLOCKED", "reason": "Historical option premium is unavailable."})
+                entry.update({"status": "NO_PREMIUM", "reason": "Historical premium unavailable"})
                 hop_history.append(entry)
-                raise ValueError("Historical option premium is unavailable.")
+                continue
+            
+            # Track cheapest for diagnostics
+            if cheapest_checked is None or margin["total_required"] < cheapest_checked["total_required"]:
+                cheapest_checked = entry
+            
             if margin["total_required"] <= available_margin:
-                reason = "" if hop == 0 else f"{initial_symbol or initial_strike}{option_type} exceeded available margin."
+                reason = "" if hop == 0 else f"Hopped from {initial_symbol or initial_strike} (margin exceeded)"
                 selected = {
                     **contract,
                     "lot_size": lot_size,
@@ -1675,13 +1787,168 @@ class OptionsAutoTerminalService:
                 entry.update({"status": "SELECTED", "hop_reason": reason})
                 hop_history.append(entry)
                 return {
-                    "contract": selected,
+                    "selected": selected,
                     "frame": _decorate_option_frame(frame, selected, underlying, exchange),
                     "hop_history": hop_history,
+                    "cheapest_checked": cheapest_checked,
                 }
-            entry.update({"status": "MARGIN_EXCEEDED", "reason": f"{symbol or strike}{option_type} exceeded available margin."})
+            
+            entry.update({"status": "MARGIN_EXCEEDED", "required": margin["total_required"], "available": available_margin})
             hop_history.append(entry)
-        raise ValueError(f"No affordable {underlying} {option_type} historical contract found within {max_hops} major-strike hops.")
+        
+        return {"selected": None, "hop_history": hop_history, "cheapest_checked": cheapest_checked}
+
+    def _backtest_fallback_contract_scan(
+        self,
+        *,
+        client: Any,
+        underlying: str,
+        exchange: str,
+        expiry: Any,
+        option_type: str,
+        initial_strike: int,
+        hop_direction: int,
+        major_step: int,
+        lots: int,
+        available_margin: float,
+        settings: dict[str, Any],
+        from_dt: datetime,
+        to_dt: datetime,
+        interval: str,
+    ) -> dict[str, Any]:
+        """Scan wider range of contracts as fallback when major-hops fail."""
+        hop_history: list[dict[str, Any]] = []
+        cheapest_checked: dict[str, Any] | None = None
+        
+        try:
+            instruments = self.options_instrument_cache.instruments(client, exchange)
+        except Exception as exc:
+            self.logger.log("WARN", f"Fallback scan failed to fetch instruments: {exc}", option_type=option_type)
+            return {"selected": None, "hop_history": hop_history, "cheapest_checked": cheapest_checked}
+        
+        expiry_text = _expiry_text(expiry)
+        major_step = max(1, int(major_step or 100))
+
+        # Filter to same underlying + expiry + option type. Zerodha option
+        # rows usually store CE/PE directly in instrument_type.
+        candidates = [
+            inst for inst in instruments
+            if (
+                str(inst.get("option_type") or inst.get("instrument_type") or "").upper() == option_type.upper()
+                and _is_underlying_row(inst, underlying)
+                and _expiry_text(inst.get("expiry")) == expiry_text
+                and _is_major_strike(inst.get("strike"), major_step)
+                and _directional_distance(inst.get("strike"), initial_strike, hop_direction) >= 0
+            )
+        ]
+
+        candidates.sort(key=lambda item: _directional_distance(item.get("strike"), initial_strike, hop_direction))
+        
+        for idx, candidate in enumerate(candidates[:20]):  # Limit to 20 candidates to avoid timeout
+            strike = float(candidate.get("strike") or 0)
+            symbol = candidate.get("tradingsymbol") or ""
+            
+            lot_size = get_contract_lot_size(candidate)
+            if lot_size <= 0:
+                hop_history.append({"option_type": option_type, "strike": strike, "symbol": symbol, "status": "MISSING_LOT_SIZE", "is_fallback": True})
+                continue
+            
+            try:
+                frame = self._historical_frame(
+                    client,
+                    candidate.get("instrument_token"),
+                    from_dt,
+                    to_dt,
+                    interval,
+                    symbol or str(candidate.get("instrument_token") or "option"),
+                )
+            except Exception as exc:
+                hop_history.append({"option_type": option_type, "strike": strike, "symbol": symbol, "status": "DATA_ERROR", "reason": str(exc)[:50], "is_fallback": True})
+                continue
+            
+            premium = _first_close(frame)
+            if premium <= 0:
+                hop_history.append({"option_type": option_type, "strike": strike, "symbol": symbol, "premium": premium, "status": "NO_PREMIUM", "is_fallback": True})
+                continue
+            
+            quantity = lots * lot_size
+            margin = self._margin_requirement(premium, quantity, lots, settings)
+            
+            entry = {
+                "option_type": option_type,
+                "contract": symbol,
+                "strike": strike,
+                "lot_size": lot_size,
+                "lots": lots,
+                "quantity": quantity,
+                "premium": premium,
+                "is_fallback": True,
+                "fallback_index": idx,
+                **margin,
+            }
+            
+            if cheapest_checked is None or margin["total_required"] < cheapest_checked["total_required"]:
+                cheapest_checked = entry
+            
+            if margin["total_required"] <= available_margin:
+                selected = {
+                    **candidate,
+                    "lot_size": lot_size,
+                    "lots": lots,
+                    "quantity": quantity,
+                    "premium": premium,
+                    "required_cash": margin["required_cash"],
+                    "margin_required_estimate": margin["total_required"],
+                    "fallback_selected": True,
+                    "fallback_index": idx,
+                    "hop_reason": f"Fallback selected {symbol} (OTM alternative)",
+                }
+                entry.update({"status": "SELECTED"})
+                hop_history.append(entry)
+                return {
+                    "selected": selected,
+                    "frame": _decorate_option_frame(frame, selected, underlying, exchange),
+                    "hop_history": hop_history,
+                    "cheapest_checked": cheapest_checked,
+                }
+            
+            entry.update({"status": "MARGIN_EXCEEDED", "required": margin["total_required"], "available": available_margin})
+            hop_history.append(entry)
+        
+        return {"selected": None, "hop_history": hop_history, "cheapest_checked": cheapest_checked}
+
+    def _backtest_contract_failure_diagnostics(
+        self,
+        underlying: str,
+        option_type: str,
+        available_margin: float,
+        cheapest_checked: dict[str, Any] | None,
+        settings: dict[str, Any],
+    ) -> str:
+        """Generate actionable diagnostic message when no affordable contract found."""
+        if cheapest_checked is None:
+            return f"No {underlying} {option_type} historical contracts available for backtesting."
+        
+        required = cheapest_checked.get("total_required", 0)
+        balance = available_margin
+        shortfall = required - balance
+        lots = int(settings.get("number_of_lots") or 1)
+        buffer_pct = float(settings.get("capital_buffer_pct") or 5.0)
+        
+        suggestions = []
+        
+        if lots > 1:
+            suggestions.append(f"reduce number_of_lots from {lots} to {max(1, lots - 1)}")
+        if buffer_pct > 0:
+            suggestions.append(f"reduce capital_buffer_pct from {buffer_pct}% to {max(0, buffer_pct - 5)}%")
+        suggestions.append(f"increase paper_starting_balance by at least ₹{shortfall:.0f} (to ₹{required:.0f})")
+        suggestions.append("increase max_hop_strikes to search broader strike range")
+        
+        return (
+            f"No affordable {underlying} {option_type} historical contract found. "
+            f"Available balance: ₹{balance:.0f}. Cheapest contract required: ₹{required:.2f}. "
+            f"Try: {', '.join(suggestions)}."
+        )
 
     def _index_token(self, client: Any, underlying: str, exchange: str) -> Any:
         if underlying == "NIFTY" and hasattr(client, "get_nifty50_token"):
@@ -2370,6 +2637,16 @@ def _parse_dt_value(value: Any) -> datetime | None:
 def _round_to_step(value: float, step: float) -> float:
     step = float(step or 1)
     return round(float(value) / step) * step
+
+
+def _is_major_strike(value: Any, major_step: int) -> bool:
+    strike = _number(value)
+    step = max(1, int(major_step or 100))
+    return strike > 0 and int(strike) % step == 0
+
+
+def _directional_distance(strike: Any, initial_strike: Any, hop_direction: int) -> float:
+    return (_number(strike) - _number(initial_strike)) * (1 if int(hop_direction or 1) >= 0 else -1)
 
 
 def _first_close(frame: pd.DataFrame) -> float:

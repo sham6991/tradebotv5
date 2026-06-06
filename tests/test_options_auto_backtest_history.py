@@ -65,6 +65,39 @@ class FakePaperZerodha:
         return pd.DataFrame(self.rows[int(instrument_token)])
 
 
+class WideFallbackZerodha:
+    def __init__(self):
+        self.rows = {}
+        self._instruments = []
+        for offset, strike in enumerate(range(22500, 23300, 100), start=1):
+            token = 9000 + offset
+            premium = 500 if strike <= 23000 else 50
+            self.rows[token] = _option_rows(f"NIFTY26JUN{strike}CE", token, "CE")
+            for row in self.rows[token]:
+                row["open"] = premium
+                row["high"] = premium + 5
+                row["low"] = premium - 2
+                row["close"] = premium
+            self._instruments.append({
+                "tradingsymbol": f"NIFTY26JUN{strike}CE",
+                "name": "NIFTY",
+                "instrument_token": token,
+                "instrument_type": "CE",
+                "segment": "NFO-OPT",
+                "strike": strike,
+                "expiry": date(2026, 6, 25),
+                "lot_size": 50,
+                "tick_size": 0.05,
+                "exchange": "NFO",
+            })
+
+    def instruments(self, exchange=None):
+        return list(self._instruments) if exchange == "NFO" else []
+
+    def historical_candles(self, instrument_token, from_dt, to_dt, interval="3minute"):
+        return pd.DataFrame(self.rows[int(instrument_token)])
+
+
 class OptionsAutoBacktestHistoryTests(unittest.TestCase):
     def test_backtest_fetches_zerodha_history_and_generates_trades(self):
         client = FakePaperZerodha()
@@ -106,6 +139,33 @@ class OptionsAutoBacktestHistoryTests(unittest.TestCase):
             service = OptionsAutoTerminalService(temp_dir)
             with self.assertRaisesRegex(ValueError, "Connect Paper Data Zerodha"):
                 service.backtest({"data_source": "zerodha_historical", "trade_date": "2026-06-04"})
+
+    def test_backtest_fallback_scans_farther_major_strikes_when_first_five_are_unaffordable(self):
+        client = WideFallbackZerodha()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: client)
+            result = service._select_backtest_major_contract(
+                client=client,
+                underlying="NIFTY",
+                exchange="NFO",
+                expiry="2026-06-25",
+                option_type="CE",
+                initial_strike=22500,
+                hop_direction=1,
+                major_step=100,
+                lots=1,
+                available_margin=5000,
+                max_hops=5,
+                settings={"estimated_charges_per_lot": 0, "capital_buffer_pct": 0},
+                from_dt=pd.Timestamp("2026-06-04 09:15").to_pydatetime(),
+                to_dt=pd.Timestamp("2026-06-04 15:30").to_pydatetime(),
+                interval="3minute",
+            )
+
+        self.assertEqual(result["selected"]["strike"], 23100)
+        self.assertTrue(result["fallback_used"])
+        self.assertTrue(result["selected"]["fallback_selected"])
+        self.assertNotIn(22550, [row.get("strike") for row in result["hop_history"]])
 
 
 if __name__ == "__main__":

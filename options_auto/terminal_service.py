@@ -1450,9 +1450,16 @@ class OptionsAutoTerminalService:
         option_exchange = str(config.get("option_exchange") or "NFO").upper()
         instruments = self.options_instrument_cache.instruments(client, option_exchange)
         expiry_requested = payload.get("expiry") or payload.get("option_expiry") or settings.get("expiry")
+        if self._should_refresh_backtest_option_instruments(option_exchange, instruments, underlying, expiry_requested):
+            instruments = self._refresh_backtest_option_instruments(client, option_exchange, instruments, underlying, expiry_requested)
         expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
         if not expiry:
             raise ValueError(f"No {underlying} option expiry found on {option_exchange}.")
+        if self._should_refresh_backtest_option_instruments(option_exchange, instruments, underlying, expiry):
+            instruments = self._refresh_backtest_option_instruments(client, option_exchange, instruments, underlying, expiry)
+            expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+            if not expiry:
+                raise ValueError(f"No {underlying} option expiry found on {option_exchange} after refreshing instrument cache.")
         major_step = _int_setting(settings.get("major_strike_step"), 100)
         major = select_major_strikes_for_spot(float(spot_result.get("spot") or 0), major_step)
         lots = _int_setting(settings.get("number_of_lots"), 1)
@@ -1549,9 +1556,81 @@ class OptionsAutoTerminalService:
             "margin_hop_history": lock["margin_hop_history"],
             "contract_lock": lock,
             "lock_history": lock_history,
+            "instrument_cache": self.options_instrument_cache.snapshot(),
             "historical_proxy_quote_warning": "Backtest uses OHLC-derived historical quote proxies for option bid/ask/depth.",
         }
         return index_frame, option_frames, metadata
+
+    def _should_refresh_backtest_option_instruments(
+        self,
+        exchange: str,
+        instruments: list[dict[str, Any]],
+        underlying: str,
+        expiry: Any,
+    ) -> bool:
+        metadata = (self.options_instrument_cache.snapshot().get("exchanges") or {}).get(str(exchange or "").upper()) or {}
+        row_count = int(_number(metadata.get("row_count"), len(instruments or [])))
+        source = str(metadata.get("source") or "").lower()
+        reasons: list[str] = []
+        if source == "daily_file" and row_count < 100:
+            reasons.append(f"daily instrument cache has only {row_count} rows")
+        if expiry:
+            counts = _option_side_counts(instruments, underlying, expiry)
+            if counts.get("CE", 0) <= 0:
+                reasons.append(f"missing CE rows for {underlying} expiry {_expiry_text(expiry)}")
+            if counts.get("PE", 0) <= 0:
+                reasons.append(f"missing PE rows for {underlying} expiry {_expiry_text(expiry)}")
+        if reasons:
+            self.logger.log(
+                "WARN",
+                "Options Auto backtest instrument cache refresh required",
+                exchange=exchange,
+                underlying=underlying,
+                expiry=_expiry_text(expiry),
+                source=source,
+                row_count=row_count,
+                reasons=reasons,
+            )
+        return bool(reasons)
+
+    def _refresh_backtest_option_instruments(
+        self,
+        client: Any,
+        exchange: str,
+        existing: list[dict[str, Any]],
+        underlying: str,
+        expiry: Any,
+    ) -> list[dict[str, Any]]:
+        try:
+            refreshed = self.options_instrument_cache.instruments(client, exchange, refresh=True)
+        except Exception as exc:
+            self.logger.log(
+                "WARN",
+                f"Options Auto backtest instrument cache refresh failed: {exc}",
+                exchange=exchange,
+                underlying=underlying,
+                expiry=_expiry_text(expiry),
+            )
+            return existing
+        if refreshed:
+            self.logger.log(
+                "INFO",
+                "Options Auto backtest instrument cache refreshed",
+                exchange=exchange,
+                underlying=underlying,
+                expiry=_expiry_text(expiry),
+                rows=len(refreshed),
+            )
+            return refreshed
+        self.logger.log(
+            "WARN",
+            "Options Auto backtest instrument cache refresh returned no rows; retaining existing rows",
+            exchange=exchange,
+            underlying=underlying,
+            expiry=_expiry_text(expiry),
+            existing_rows=len(existing or []),
+        )
+        return existing
 
     def _backtest_reselection_history(
         self,
@@ -2691,9 +2770,24 @@ def _is_underlying_row(row: dict[str, Any], underlying: str) -> bool:
     return name in {"", *aliases} or any(symbol.startswith(alias) for alias in aliases)
 
 
+def _option_side_counts(instruments: list[dict[str, Any]], underlying: str, expiry: Any) -> dict[str, int]:
+    expiry_text = _expiry_text(expiry)
+    counts = {"CE": 0, "PE": 0}
+    for row in instruments or []:
+        row_type = str(row.get("option_type") or row.get("instrument_type") or "").upper()
+        if row_type not in counts:
+            continue
+        if expiry_text and _expiry_text(row.get("expiry")) != expiry_text:
+            continue
+        if not _is_underlying_row(row, underlying):
+            continue
+        counts[row_type] += 1
+    return counts
+
+
 def _decorate_option_frame(frame: pd.DataFrame, contract: dict[str, Any], underlying: str, exchange: str) -> pd.DataFrame:
     result = frame.copy()
-    option_type = str(contract.get("instrument_type") or contract.get("option_type") or "").upper()
+    option_type = str(contract.get("option_type") or contract.get("instrument_type") or "").upper()
     result["name"] = str(contract.get("name") or underlying).upper()
     result["underlying"] = underlying
     result["tradingsymbol"] = contract.get("tradingsymbol") or ""

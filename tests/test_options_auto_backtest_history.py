@@ -39,6 +39,7 @@ def _option_rows(prefix: str, token: int, option_type: str, count=60):
 class FakePaperZerodha:
     def __init__(self):
         self.calls = []
+        self.instrument_calls = []
         self.rows = {
             256265: _index_rows(),
             1001: _option_rows("NIFTY26JUN22500CE", 1001, "CE"),
@@ -47,6 +48,7 @@ class FakePaperZerodha:
         }
 
     def instruments(self, exchange=None):
+        self.instrument_calls.append(exchange)
         if exchange == "NSE":
             return [{"tradingsymbol": "NIFTY 50", "name": "NIFTY 50", "instrument_token": 256265}]
         if exchange == "NFO":
@@ -133,6 +135,50 @@ class OptionsAutoBacktestHistoryTests(unittest.TestCase):
         self.assertTrue(result["trades"])
         first_entry = next(row for row in result["decisions"] if row["decision"] == "ENTRY")
         self.assertEqual(first_entry["tradingsymbol"], "NIFTY26JUN22500CE")
+
+    def test_backtest_refreshes_partial_daily_instrument_cache_for_selected_expiry(self):
+        client = FakePaperZerodha()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: client)
+            service.options_instrument_cache.persistent.save("NFO", [
+                {
+                    "tradingsymbol": "NIFTY26JUN22500PE",
+                    "name": "NIFTY",
+                    "instrument_token": 9999,
+                    "instrument_type": "PE",
+                    "segment": "NFO-OPT",
+                    "strike": 22500,
+                    "expiry": date(2026, 6, 25),
+                    "lot_size": 50,
+                    "tick_size": 0.05,
+                    "exchange": "NFO",
+                }
+            ])
+
+            result = service.backtest({
+                "data_source": "zerodha_historical",
+                "trade_date": "2026-06-04",
+                "underlying": "NIFTY",
+                "expiry": "2026-06-25",
+                "interval": "3minute",
+                "settings": {
+                    "buy_score_threshold": 20,
+                    "market_cue_alignment_required": False,
+                    "premium_expansion_required": False,
+                    "avoid_first_minutes": 0,
+                    "cooldown_after_trade_seconds": 0,
+                    "max_capital_per_trade_pct": 100,
+                    "max_risk_per_trade_pct": 10,
+                    "paper_starting_balance": 20000,
+                },
+            })
+
+        self.assertIn("NFO", client.instrument_calls)
+        self.assertEqual(result["contract_lock"]["ce"]["tradingsymbol"], "NIFTY26JUN22500CE")
+        self.assertEqual(result["contract_lock"]["pe"]["tradingsymbol"], "NIFTY26JUN22400PE")
+        cache = result["source_metadata"]["instrument_cache"]["exchanges"]["NFO"]
+        self.assertEqual(cache["source"], "zerodha_fetch")
+        self.assertEqual(cache["row_count"], 3)
 
     def test_backtest_history_requires_paper_connection(self):
         with tempfile.TemporaryDirectory() as temp_dir:

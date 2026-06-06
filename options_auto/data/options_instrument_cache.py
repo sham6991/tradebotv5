@@ -13,13 +13,22 @@ class OptionsInstrumentCache:
         self.persistent = PersistentInstrumentCache(cache_dir)
         self.metadata: dict[str, Any] = {}
 
-    def instruments(self, client: Any, exchange: str) -> list[dict[str, Any]]:
+    def instruments(self, client: Any, exchange: str, refresh: bool = False) -> list[dict[str, Any]]:
         exchange = str(exchange or "NFO").upper()
         key = (id(client), exchange, date.today().isoformat())
+        previous_rows = list(self._cache.get(key) or [])
+        if refresh:
+            self._cache.pop(key, None)
         if key not in self._cache:
-            cached = self.persistent.get_or_fetch(client, exchange, _client_instruments)
+            cached = self.persistent.get_or_fetch(client, exchange, _client_instruments, refresh=refresh)
             self.metadata[exchange] = {item: cached.get(item) for item in ("exchange", "cache_date", "path", "source", "stale", "stable_key")}
-            self._cache[key] = list(cached.get("rows") or [])
+            rows = list(cached.get("rows") or [])
+            if refresh and not rows and previous_rows:
+                rows = previous_rows
+                self.metadata[exchange]["source"] = "refresh_empty_retained_memory"
+                self.metadata[exchange]["stale"] = True
+            self.metadata[exchange]["row_count"] = len(rows)
+            self._cache[key] = rows
         return [dict(row) for row in self._cache[key]]
 
     def find_option_contract(
@@ -72,7 +81,7 @@ def find_option_contract(
     matches: list[dict[str, Any]] = []
     for row in instruments or []:
         candidate = dict(row or {})
-        row_type = str(candidate.get("instrument_type") or candidate.get("option_type") or "").upper()
+        row_type = str(candidate.get("option_type") or candidate.get("instrument_type") or "").upper()
         if row_type != option_type:
             continue
         if abs(_number(candidate.get("strike")) - strike_value) > 0.0001:
@@ -116,7 +125,7 @@ def _client_instruments(client: Any, exchange: str) -> list[dict[str, Any]]:
 
 
 def _normalise_contract(row: dict[str, Any], underlying: str, exchange: str) -> dict[str, Any]:
-    option_type = str(row.get("instrument_type") or row.get("option_type") or "").upper()
+    option_type = str(row.get("option_type") or row.get("instrument_type") or "").upper()
     return {
         **row,
         "name": _display_underlying(underlying),

@@ -6,6 +6,7 @@ from typing import Any
 from options_auto.constants import SIDE_CE, SIDE_PE, SIDE_WAIT
 from options_auto.indicators.option_metrics import liquidity_components, moneyness, premium_affordability_score, premium_momentum_metrics
 from options_auto.indicators.technicals import bid_ask_spread_pct, market_depth_imbalance
+from options_auto.intelligence.simple_ohlcv_entry import score_simple_ohlcv_entry, simple_ohlcv_entry_enabled, simple_ohlcv_threshold
 from options_auto.intelligence.trade_score_engine import TradeScoreEngine
 
 
@@ -49,7 +50,8 @@ class StrikeSelector:
         if not instruments:
             return StrikeSelection(side=side, selected=None, score=0.0, blockers=["No option instruments available."])
         quotes = quotes or {}
-        threshold = float(settings.get("buy_score_threshold") or 70)
+        simple_mode = simple_ohlcv_entry_enabled(settings)
+        threshold = simple_ohlcv_threshold(settings) if simple_mode else float(settings.get("buy_score_threshold") or 70)
         underlying = str(settings.get("underlying") or "").upper()
         available = float(settings.get("available_capital") or settings.get("paper_starting_balance") or 0)
         candidates = []
@@ -63,8 +65,10 @@ class StrikeSelector:
             blockers = self._candidate_blockers(candidate, settings)
             candidate["blockers"] = blockers
             if not blockers:
-                score = self.score_engine.score(candidate, context)
+                score = score_simple_ohlcv_entry(candidate, context, settings) if simple_mode else self.score_engine.score(candidate, context)
                 candidate.update(score)
+                if score.get("warnings"):
+                    candidate["warnings"] = list(score.get("warnings") or [])
             else:
                 candidate["score"] = 0.0
                 candidate["breakdown"] = {}
@@ -120,6 +124,10 @@ class StrikeSelector:
             "depth_imbalance": depth,
             "volume": volume,
             "oi": oi,
+            "candle": dict(quote.get("candle") or {}),
+            "premium_return_1": quote.get("premium_return_1"),
+            "premium_return_3": quote.get("premium_return_3"),
+            "option_vwap": quote.get("option_vwap") or quote.get("vwap"),
             "liquidity_score": liquidity["score"],
             "liquidity_components": liquidity,
             "affordability_score": affordability,
@@ -187,7 +195,7 @@ class StrikeSelector:
             blockers.append("Liquidity score too low.")
         if not settings.get("allow_deep_otm", False) and candidate.get("moneyness") == "OTM" and float(candidate.get("distance_pct") or 0) > 1.2:
             blockers.append("Deep OTM disabled.")
-        if settings.get("premium_expansion_required") and not candidate.get("premium_expansion_confirmed"):
+        if settings.get("premium_expansion_required") and not simple_ohlcv_entry_enabled(settings) and not candidate.get("premium_expansion_confirmed"):
             blockers.append("Option premium is not confirming index direction.")
         return blockers
 

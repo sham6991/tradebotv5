@@ -196,13 +196,20 @@
                     <option>AGGRESSIVE</option>
                   </select>
                 </label>
+                <label>Entry Mode
+                  <select id="oa-backtest-entry-mode">
+                    <option value="OHLCV_VOLUME_PROFILE">OHLCV + Volume Profile</option>
+                    <option value="PROFILE">Profile default</option>
+                    <option value="FULL_CONFIRMATION">Full confirmation</option>
+                  </select>
+                </label>
                 <label>Optional backtest FII/DII CSV <input id="oa-backtest-fii" type="file" accept=".csv"></label>
               </div>
               <details class="oa-collapsible">
                 <summary>Advanced backtest settings</summary>
                 <div class="oa-form-grid">
                   <label>Max Trades <input id="oa-backtest-max-trades" type="number" min="1" step="1" value="3"></label>
-                  <label>Buy Score Threshold <input id="oa-backtest-score" type="number" min="0" max="100" value="70"></label>
+                  <label>Buy Score Threshold <input id="oa-backtest-score" type="number" min="0" max="100" value="50"></label>
                   <label>Candidate Strike Span <input id="oa-backtest-span" type="number" min="0" max="10" step="1" value="4"></label>
                 </div>
               </details>
@@ -467,6 +474,13 @@
               <summary>Entry</summary>
               <div class="oa-form-grid">
                 <label>Buy Score Threshold <input id="oa-score-threshold" type="number" min="0" max="100" step="1"></label>
+                <label>Entry Mode
+                  <select id="oa-entry-mode">
+                    <option value="OHLCV_VOLUME_PROFILE">OHLCV + Volume Profile</option>
+                    <option value="PROFILE">Profile default</option>
+                    <option value="FULL_CONFIRMATION">Full confirmation</option>
+                  </select>
+                </label>
                 <label>Max Chase Points <input id="oa-max-chase" type="number" min="0" step="0.05"></label>
                 <label>Avoid First Minutes <input id="oa-avoid-first" type="number" min="0" step="1"></label>
                 <label>No New Trade After <input id="oa-no-new-after" type="time"></label>

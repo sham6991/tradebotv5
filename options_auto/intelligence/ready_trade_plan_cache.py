@@ -48,6 +48,7 @@ class ReadyTradePlanCache:
             "scores": {
                 "trade_score": decision.get("trade_score"),
                 "theta_premium_risk": decision.get("theta_premium_risk"),
+                "entry_dependency_mode": decision.get("entry_dependency_mode") or (decision.get("trade_score") or {}).get("entry_dependency_mode"),
             },
             "market_context": {
                 "market_cue": decision.get("market_cue"),

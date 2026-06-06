@@ -12,8 +12,13 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "enabled_underlyings": ["NIFTY", "SENSEX"],
     "chart_interval": "3minute",
     "strategy_profile": "BALANCED",
+    "entry_dependency_mode": "OHLCV_VOLUME_PROFILE",
+    "aggressive_uses_simple_ohlcv_entry": True,
+    "simple_ohlcv_score_threshold": 50.0,
+    "simple_ohlcv_side_score_threshold": 35.0,
+    "simple_ohlcv_min_relative_volume": 0.0,
     "paper_starting_balance": 20000.0,
-    "buy_score_threshold": 70.0,
+    "buy_score_threshold": 50.0,
     "approval_timeout_seconds": 30,
     "ask_permission_before_entry": True,
     "auto_entry_enabled": False,
@@ -59,7 +64,7 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "min_volume": 0,
     "min_oi": 0,
     "quote_stale_seconds": 3.0,
-    "market_cue_alignment_required": True,
+    "market_cue_alignment_required": False,
     "news_sentiment_weight": 3.0,
     "trend_strength_threshold": 55.0,
     "atr_target_multiplier": 1.5,
@@ -107,7 +112,7 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "auto_expiry_switch": False,
     "expiry_scalping_mode": False,
     "same_day_expiry_cutoff_time": "11:30",
-    "premium_expansion_required": True,
+    "premium_expansion_required": False,
     "expiry_scalp_enabled": False,
     "allow_expiry_far_otm": False,
     "late_scalp_enabled": False,
@@ -209,12 +214,16 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "strict_liquidity_filter",
         "auto_expiry_switch",
         "expiry_scalping_mode",
+        "aggressive_uses_simple_ohlcv_entry",
     ):
         settings[key] = _bool(settings.get(key), bool(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 
     for key in (
         "paper_starting_balance",
         "buy_score_threshold",
+        "simple_ohlcv_score_threshold",
+        "simple_ohlcv_side_score_threshold",
+        "simple_ohlcv_min_relative_volume",
         "max_capital_per_trade_pct",
         "max_risk_per_trade_pct",
         "max_daily_loss",
@@ -296,6 +305,14 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
     settings["mode"] = str(settings.get("mode") or MODE_PAPER).strip().upper()
     settings["underlying"] = str(settings.get("underlying") or "NIFTY").strip().upper()
     settings["strategy_profile"] = str(settings.get("strategy_profile") or "BALANCED").strip().upper()
+    entry_mode = str(settings.get("entry_dependency_mode") or "PROFILE").strip().upper()
+    if entry_mode in {"SIMPLE", "SIMPLE_OHLCV", "MAIN_APP_STYLE", "OHLCV_VOLUME", "OHLCV_VOLUME_PROFILE"}:
+        entry_mode = "OHLCV_VOLUME_PROFILE"
+    elif entry_mode in {"FULL", "FULL_CONFIRMATION", "CONFIRMATION_STACK"}:
+        entry_mode = "FULL_CONFIRMATION"
+    else:
+        entry_mode = "PROFILE"
+    settings["entry_dependency_mode"] = entry_mode
     settings["expiry_preference"] = str(settings.get("expiry_preference") or "AUTO").strip().upper()
     settings["backtest_entry_mode"] = str(settings.get("backtest_entry_mode") or "NEXT_CANDLE_OPEN_PLUS_SLIPPAGE").strip().upper()
     settings["same_day_expiry_cutoff_time"] = str(settings.get("same_day_expiry_cutoff_time") or "11:30").strip()

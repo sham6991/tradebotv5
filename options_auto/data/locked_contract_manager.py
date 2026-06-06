@@ -24,6 +24,7 @@ class LockedContractManager:
     lock: dict[str, Any] | None = None
     history: list[dict[str, Any]] = field(default_factory=list)
     last_reason: str = ""
+    cooldown_until: str = ""
 
     def begin_selection(self) -> None:
         self.state = SELECTING_CONTRACTS if not self.lock else RESELECTING_CONTRACTS
@@ -55,9 +56,12 @@ class LockedContractManager:
             return True
         if active_trade:
             return False
+        now = now or datetime.now()
+        if self.state in {TRADE_EXITED, COOLDOWN} and bool(settings.get("reselect_after_exit_cooldown", True)):
+            cooldown_until = _parse_dt(self.cooldown_until or self.lock.get("cooldown_until"))
+            return not cooldown_until or now >= cooldown_until
         if not bool(settings.get("lock_contracts_until_trade_or_timeout", True)):
             return True
-        now = now or datetime.now()
         valid_until = _parse_dt(self.lock.get("valid_until"))
         if valid_until and now >= valid_until:
             return True
@@ -72,15 +76,21 @@ class LockedContractManager:
             self.state = TRADE_ACTIVE
             self.lock["status"] = TRADE_ACTIVE
 
-    def mark_trade_exited(self) -> None:
+    def mark_trade_exited(self, cooldown_seconds: int | float | str = 0) -> None:
         if self.lock:
-            self.state = TRADE_EXITED
+            cooldown = _cooldown_seconds(cooldown_seconds)
+            exited_at = datetime.now()
+            self.cooldown_until = (exited_at + timedelta(seconds=cooldown)).isoformat(timespec="seconds") if cooldown > 0 else ""
+            self.state = COOLDOWN if cooldown > 0 else TRADE_EXITED
             self.lock["status"] = TRADE_EXITED
+            self.lock["exited_at"] = exited_at.isoformat(timespec="seconds")
+            self.lock["cooldown_until"] = self.cooldown_until
 
     def unlock(self, reason: str = "") -> None:
         self.last_reason = reason
         self.lock = None
         self.state = NO_CONTRACTS
+        self.cooldown_until = ""
 
     def blocked(self, reason: str) -> None:
         self.last_reason = reason
@@ -92,6 +102,7 @@ class LockedContractManager:
             "lock": dict(self.lock or {}),
             "history": list(self.history),
             "last_reason": self.last_reason,
+            "cooldown_until": self.cooldown_until,
         }
 
 
@@ -105,7 +116,7 @@ def build_valid_until(minutes: int | float | str, now: datetime | None = None) -
 
 
 def _lock_id() -> str:
-    return "OA_LOCK_" + datetime.now().strftime("%Y%m%d_%H%M%S")
+    return "OA_LOCK_" + datetime.now().strftime("%Y%m%d_%H%M%S_%f")
 
 
 def _expiry_text(value: Any) -> str:
@@ -125,3 +136,10 @@ def _parse_dt(value: Any) -> datetime | None:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
     except ValueError:
         return None
+
+
+def _cooldown_seconds(value: Any) -> int:
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return 0

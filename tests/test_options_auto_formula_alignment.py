@@ -17,8 +17,23 @@ from options_auto.indicators.technicals import (
 )
 from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
 from options_auto.intelligence.feature_builder import build_index_features
+from options_auto.intelligence.low_latency_decision_engine import LowLatencyDecisionEngine
 from options_auto.intelligence.market_cue_engine import MarketCueEngine
 from tests.test_options_auto_auto_spot import index_rows
+
+
+def strong_bullish_ohlcv_rows(count=55):
+    return [
+        {
+            "datetime": f"2026-06-04 10:{i % 60:02d}:00",
+            "open": 22400 + i * 4,
+            "high": 22418 + i * 4,
+            "low": 22396 + i * 4,
+            "close": 22416 + i * 5,
+            "volume": 10000 + i * 700,
+        }
+        for i in range(count)
+    ]
 
 
 class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
@@ -181,10 +196,90 @@ class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("Live index candle data is unavailable.", result["blockers"])
 
+    def test_aggressive_profile_uses_simple_ohlcv_entry_dependencies(self):
+        result = evaluate_options_auto_decision(
+            mode="PAPER",
+            settings={
+                "mode": "PAPER",
+                "underlying": "NIFTY",
+                "strategy_profile": "AGGRESSIVE",
+                "paper_starting_balance": 20000,
+                "max_capital_per_trade_pct": 100,
+                "max_risk_per_trade_pct": 10,
+            },
+            index_history=pd.DataFrame(strong_bullish_ohlcv_rows()),
+            option_candidates=[{
+                "name": "NIFTY",
+                "tradingsymbol": "NIFTY26JUN22600CE",
+                "instrument_token": "1",
+                "instrument_type": "CE",
+                "strike": 22600,
+                "expiry": "2026-06-25",
+                "lot_size": 50,
+                "tick_size": 0.05,
+            }],
+            quotes={"1": {
+                "ltp": 90,
+                "bid": 89.95,
+                "ask": 90.05,
+                "bid_qty": 1000,
+                "ask_qty": 1000,
+                "volume": 45000,
+                "oi": 200000,
+                "relative_volume": 1.0,
+                "option_atr14": 8,
+            }},
+            market_cue_payload={"phase": "LUNCH", "spot": 22620, "quote_age_seconds": 0},
+            risk_state={},
+            account_state={"available_capital": 20000},
+            timestamp="2026-06-04 12:00:00",
+        )
+
+        self.assertTrue(result["allowed"], result["blockers"])
+        self.assertEqual(result["selected_side"], "CE")
+        self.assertEqual(result["entry_dependency_mode"], "OHLCV_VOLUME_PROFILE")
+        self.assertEqual(result["trade_score"]["entry_dependency_mode"], "OHLCV_VOLUME_PROFILE")
+        self.assertNotIn("Option premium is not confirming index direction.", result["blockers"])
+
+    def test_simple_ohlcv_final_validation_keeps_quote_safety_hard(self):
+        engine = LowLatencyDecisionEngine()
+        plan = {
+            "status": "READY",
+            "last_refreshed_epoch": 100,
+            "side": "CE",
+            "entry_plan": {"entry_limit": 100, "signal_price": 105, "tick_size": 0.05},
+            "contract": {"tradingsymbol": "NIFTY26JUN22600CE"},
+        }
+        settings = {"strategy_profile": "AGGRESSIVE", "entry_dependency_mode": "OHLCV_VOLUME_PROFILE", "quote_stale_seconds": 3}
+        state = {
+            "market_cue": {"recommended_side": "PE"},
+            "regime": {"recommended_side": "WAIT"},
+            "governor_allowed": True,
+        }
+
+        allowed = engine.validate_final_entry(
+            plan,
+            {"ltp": 99, "bid": 98.95, "ask": 99.05, "premium_return_1": -1, "age_seconds": 0},
+            settings,
+            state,
+            now_epoch=101,
+        )
+        stale = engine.validate_final_entry(
+            plan,
+            {"ltp": 99, "bid": 98.95, "ask": 99.05, "premium_return_1": -1, "age_seconds": 9},
+            settings,
+            state,
+            now_epoch=101,
+        )
+
+        self.assertTrue(allowed["allowed"], allowed["blockers"])
+        self.assertFalse(stale["allowed"])
+        self.assertIn("Quote stale.", stale["blockers"])
+
     def test_weak_far_otm_expiry_option_blocks(self):
         result = evaluate_options_auto_decision(
             mode="PAPER",
-            settings={"mode": "PAPER", "underlying": "NIFTY", "buy_score_threshold": 40, "max_capital_per_trade_pct": 100, "max_risk_per_trade_pct": 10, "paper_starting_balance": 20000, "strict_liquidity_filter": True},
+            settings={"mode": "PAPER", "underlying": "NIFTY", "entry_dependency_mode": "FULL_CONFIRMATION", "premium_expansion_required": True, "buy_score_threshold": 40, "max_capital_per_trade_pct": 100, "max_risk_per_trade_pct": 10, "paper_starting_balance": 20000, "strict_liquidity_filter": True},
             index_history=pd.DataFrame(index_rows()),
             option_candidates=[{"name": "NIFTY", "tradingsymbol": "NIFTY26JUN23000CE", "instrument_token": "1", "instrument_type": "CE", "strike": 23000, "expiry": "2026-06-04", "lot_size": 50}],
             quotes={"1": {"ltp": 18, "bid": 17, "ask": 18.5, "bid_qty": 100, "ask_qty": 100, "volume": 3000, "oi": 12000, "premium_return_1": -0.5, "premium_return_3": 0.2, "relative_volume": 0.6, "option_atr14": 0.5}},

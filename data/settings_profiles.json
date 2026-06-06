@@ -79,7 +79,7 @@
     "time_exit": "4",
     "cooldown": "2",
     "chart_interval": "3 min",
-    "trend_set": "Bearish",
+    "trend_set": "Auto",
     "bullish_threshold": "15",
     "bearish_threshold": "-15",
     "rsi_bull": "50",

@@ -19,6 +19,9 @@ def build_index_features(index_history: pd.DataFrame) -> dict[str, Any]:
     if frame.empty:
         return {
             "close": 0.0,
+            "open": 0.0,
+            "high": 0.0,
+            "low": 0.0,
             "ema9": 0.0,
             "ema20": 0.0,
             "ema50": 0.0,
@@ -31,6 +34,7 @@ def build_index_features(index_history: pd.DataFrame) -> dict[str, Any]:
             "body_pct": 0.0,
             "upper_wick_pct": 0.0,
             "lower_wick_pct": 0.0,
+            "close_position_pct": 50.0,
             "ema_alignment": "MIXED",
             "vwap_position": "AT_VWAP",
             "trend_strength_score": 0.0,
@@ -39,6 +43,9 @@ def build_index_features(index_history: pd.DataFrame) -> dict[str, Any]:
 
     row = frame.iloc[-1]
     close = _float(row.get("close"))
+    open_ = _float(row.get("open"))
+    high = _float(row.get("high"))
+    low = _float(row.get("low"))
     ema9 = _float(row.get("ema9"))
     ema20 = _float(row.get("ema20"))
     ema50 = _float(row.get("ema50"))
@@ -52,7 +59,7 @@ def build_index_features(index_history: pd.DataFrame) -> dict[str, Any]:
     body_pct = _float(row.get("body_pct"))
     upper_wick_pct = _float(row.get("upper_wick_pct"))
     lower_wick_pct = _float(row.get("lower_wick_pct"))
-    open_ = _float(row.get("open"))
+    close_position_pct = (close - low) / max(high - low, 0.01) * 100 if close > 0 and high > low else 50.0
 
     if ema9 > ema20 > ema50:
         ema_alignment = "BULLISH"
@@ -83,6 +90,9 @@ def build_index_features(index_history: pd.DataFrame) -> dict[str, Any]:
 
     return {
         "close": round(close, 4),
+        "open": round(open_, 4),
+        "high": round(high, 4),
+        "low": round(low, 4),
         "ema9": round(ema9, 4),
         "ema20": round(ema20, 4),
         "ema50": round(ema50, 4),
@@ -95,6 +105,7 @@ def build_index_features(index_history: pd.DataFrame) -> dict[str, Any]:
         "body_pct": round(body_pct, 4),
         "upper_wick_pct": round(upper_wick_pct, 4),
         "lower_wick_pct": round(lower_wick_pct, 4),
+        "close_position_pct": round(close_position_pct, 4),
         "ema_alignment": ema_alignment,
         "vwap_position": vwap_position,
         "trend_strength_score": round(trend_strength_score, 2),

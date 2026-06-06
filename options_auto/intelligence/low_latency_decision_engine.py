@@ -8,6 +8,7 @@ from options_auto.core.performance_monitor import PerformanceMonitor
 from options_auto.core.task_priority import FAST_LANE_DISALLOWED_TASKS
 from options_auto.indicators.technicals import bid_ask_spread_pct
 from options_auto.intelligence.entry_timing_engine import round_to_tick
+from options_auto.intelligence.simple_ohlcv_entry import simple_ohlcv_entry_enabled
 
 
 def fast_entry_limit_formula(plan: dict[str, Any], latest_quote: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
@@ -47,6 +48,7 @@ class LowLatencyDecisionEngine:
         settings = dict(settings or {})
         plan = dict(plan or {})
         latest_quote = dict(latest_quote or {})
+        simple_mode = simple_ohlcv_entry_enabled(settings)
         blockers: list[str] = []
         warnings: list[str] = []
 
@@ -72,30 +74,36 @@ class LowLatencyDecisionEngine:
         planned_entry = _number((plan.get("entry_plan") or {}).get("entry_limit"))
         chase_distance = ask - planned_entry if ask > 0 and planned_entry > 0 else 0.0
         if chase_distance > _number(settings.get("max_chase_points"), 3.0):
-            blockers.append("Entry is chasing premium.")
+            if simple_mode:
+                warnings.append("Simple OHLCV mode warning: Entry is chasing premium.")
+            else:
+                blockers.append("Entry is chasing premium.")
         option_atr14 = _number(latest_quote.get("option_atr14"), _number((plan.get("premium_context") or {}).get("option_atr14")))
         if option_atr14 > 0 and chase_distance > option_atr14 * _number(settings.get("max_chase_atr_fraction"), 0.35):
-            blockers.append("Entry moved too far from signal.")
+            if simple_mode:
+                warnings.append("Simple OHLCV mode warning: Entry moved too far from signal.")
+            else:
+                blockers.append("Entry moved too far from signal.")
 
         side = str(plan.get("side") or SIDE_WAIT).upper()
         premium_return_1 = _number(latest_quote.get("premium_return_1"), _number((plan.get("premium_context") or {}).get("premium_return_1")))
         ltp = _number(latest_quote.get("ltp"), latest_quote.get("last_price"))
         signal_price = _number((plan.get("entry_plan") or {}).get("signal_price"))
-        if side in {SIDE_CE, SIDE_PE} and premium_return_1 < 0 and ltp < signal_price:
+        if side in {SIDE_CE, SIDE_PE} and premium_return_1 < 0 and ltp < signal_price and not simple_mode:
             blockers.append("Premium no longer confirms.")
 
         market_cue = dict(state.get("market_cue") or (plan.get("market_context") or {}).get("market_cue") or {})
         cue_side = str(market_cue.get("recommended_side") or market_cue.get("side") or SIDE_WAIT).upper()
-        if side == SIDE_CE and cue_side == SIDE_PE and not state.get("reversal_setup_confirmed"):
+        if side == SIDE_CE and cue_side == SIDE_PE and not state.get("reversal_setup_confirmed") and not simple_mode:
             blockers.append("Market cue reversed.")
-        if side == SIDE_PE and cue_side == SIDE_CE and not state.get("reversal_setup_confirmed"):
+        if side == SIDE_PE and cue_side == SIDE_CE and not state.get("reversal_setup_confirmed") and not simple_mode:
             blockers.append("Market cue reversed.")
 
         regime = dict(state.get("regime") or (plan.get("market_context") or {}).get("regime") or {})
         regime_side = str(regime.get("recommended_side") or regime.get("side") or SIDE_WAIT).upper()
-        if regime_side == SIDE_WAIT:
+        if regime_side == SIDE_WAIT and not simple_mode:
             blockers.append("Regime changed to WAIT.")
-        elif regime_side in {SIDE_CE, SIDE_PE} and side in {SIDE_CE, SIDE_PE} and regime_side != side:
+        elif regime_side in {SIDE_CE, SIDE_PE} and side in {SIDE_CE, SIDE_PE} and regime_side != side and not simple_mode:
             blockers.append("Regime reversed.")
 
         if state.get("active_order_conflict"):

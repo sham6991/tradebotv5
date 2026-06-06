@@ -59,6 +59,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-backtest-expiry"', html)
         self.assertIn('id="oa-backtest-lots"', html)
         self.assertIn('id="oa-backtest-major-step"', html)
+        self.assertIn('id="oa-backtest-entry-mode"', html)
+        self.assertIn('id="oa-entry-mode"', html)
         self.assertIn('id="oa-backtest-span"', html)
         self.assertIn('data_source: "zerodha_historical"', body)
         self.assertIn("trade_date: tradeDate", body)
@@ -66,6 +68,7 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("backtest_spot: backtestSpot", body)
         self.assertIn("number_of_lots", body)
         self.assertIn("major_strike_step", body)
+        self.assertIn("entry_dependency_mode", body)
         self.assertIn("atm_scan_strike_span: span", body)
         self.assertIn("underlying", body)
         self.assertIn("interval", body)
@@ -88,6 +91,7 @@ class OptionsAutoStaticUITests(unittest.TestCase):
             "Candle Interval",
             "No Trade Reason",
             "Major Strike Step",
+            "Entry Mode",
             "CE Locked",
             "PE Locked",
             "Fetched Lot Size",

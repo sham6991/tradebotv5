@@ -1022,11 +1022,13 @@ class OptionsAutoTerminalService:
         result = self.paper_lifecycle.process_market(market)
         result["exit_updates"] = exit_updates
         result["adaptive_pending_updates"] = adaptive_pending_updates
+        trade_closed = any(bool(update.get("closed")) for update in result.get("updates") or [])
         for update in result.get("updates") or []:
             if update.get("action") == "ENTRY_FILLED":
                 for key in ("entry_order", "target_order", "stoploss_order"):
                     if update.get(key):
                         self.session.orders.append(update[key])
+                self.locked_contract_manager.mark_trade_active()
         self.session.active_trades = list(self.paper_lifecycle.active_trades)
         if self.session.active_trades:
             self.session.status = "PAPER_TRADE_ACTIVE"
@@ -1034,6 +1036,8 @@ class OptionsAutoTerminalService:
             self.session.status = "PAPER_ENTRY_PENDING"
         else:
             self.session.status = "PAPER_IDLE"
+            if trade_closed and bool(self.settings.get("reselect_after_exit_cooldown", True)):
+                self.locked_contract_manager.mark_trade_exited(self.settings.get("cooldown_after_trade_seconds") or 0)
         self.logger.log("INFO", "Options Auto paper market processed", updates=len(result.get("updates") or []))
         return {**result, "paper_account": self.paper_broker.snapshot(), "session": self.session.to_dict()}
 
@@ -1884,8 +1888,11 @@ class OptionsAutoTerminalService:
         self.session.active_trades = active
         self.session.orders = option_orders[-100:]
         if active:
+            self.locked_contract_manager.mark_trade_active()
             if self.session.status not in {"REAL_SCANNING", "REAL_DRY_RUN_SCANNING", "REAL_ENTRY_ORDER_OPEN"}:
                 self.session.status = "REAL_POSITION_ACTIVE"
+        elif self.locked_contract_manager.state == "TRADE_ACTIVE" and bool(self.settings.get("reselect_after_exit_cooldown", True)):
+            self.locked_contract_manager.mark_trade_exited(self.settings.get("cooldown_after_trade_seconds") or 0)
         return {
             "synced": True,
             "active_trades": len(active),

@@ -19,6 +19,7 @@ from options_auto.intelligence.market_cue_engine import MarketCueEngine
 from options_auto.intelligence.options_greeks_risk_engine import OptionsGreeksRiskEngine
 from options_auto.intelligence.professional_discipline import ProfessionalDisciplineEngine
 from options_auto.intelligence.regime_classifier import RegimeClassifier
+from options_auto.intelligence.simple_ohlcv_entry import resolve_entry_dependency_mode, resolve_simple_ohlcv_side, simple_ohlcv_entry_enabled, simple_ohlcv_threshold
 from options_auto.intelligence.strike_selector import StrikeSelector
 
 
@@ -48,7 +49,12 @@ def evaluate_options_auto_decision(
     cue_payload = {**dict(market_cue_payload or {}), "index_features": index_features, "features": index_features}
     market_cue = MarketCueEngine().evaluate(cue_payload, phase=cue_payload.get("phase") or cue_payload.get("market_phase") or cue_payload.get("cue_phase") or "")
     regime = RegimeClassifier().classify(index_features, market_cue.to_dict())
+    entry_dependency_mode = resolve_entry_dependency_mode(settings)
+    simple_mode = simple_ohlcv_entry_enabled(settings)
     selected_side = _selected_side(cue_payload, market_cue.to_dict(), regime.to_dict())
+    simple_side = resolve_simple_ohlcv_side(index_features, settings) if simple_mode else {}
+    if simple_mode and simple_side.get("side") in {SIDE_CE, SIDE_PE}:
+        selected_side = str(simple_side["side"])
 
     available_capital = _available_capital(mode, settings, account_state)
     settings["available_capital"] = available_capital
@@ -63,6 +69,8 @@ def evaluate_options_auto_decision(
         "avoid_first_minutes_enabled": bool(settings.get("avoid_first_minutes")),
         "late_scalp_enabled": bool(settings.get("late_scalp_enabled")),
         "time_of_day_score": cue_payload.get("time_of_day_score"),
+        "entry_dependency_mode": entry_dependency_mode,
+        "simple_ohlcv_side": simple_side,
     }
 
     spot = _number(cue_payload.get("spot"), _number(cue_payload.get("index_ltp"), index_features.get("close", 0.0)))
@@ -117,17 +125,23 @@ def evaluate_options_auto_decision(
             "regime_target_multiplier": regime.target_multiplier,
         }
         theta_premium_risk = OptionsGreeksRiskEngine().evaluate(selected, theta_settings, today=_date_from(timestamp))
+        if simple_mode:
+            theta_premium_risk = _relax_simple_ohlcv_theta(theta_premium_risk)
         selected["theta_premium_risk"] = theta_premium_risk
         blockers.extend(theta_premium_risk.get("blockers") or [])
         warnings.extend(theta_premium_risk.get("warnings") or [])
+        warnings.extend(selected.get("warnings") or [])
 
         trade_score = {
             "score": selected.get("score", 0.0),
             "breakdown": selected.get("breakdown", {}),
             "weights": selected.get("weights", {}),
+            "entry_dependency_mode": selected.get("entry_dependency_mode") or entry_dependency_mode,
+            "entry_dependency_reason": selected.get("entry_dependency_reason"),
         }
-        if float(trade_score.get("score") or 0) < float(settings.get("buy_score_threshold") or 70):
-            blockers.append(f"TotalScore {float(trade_score.get('score') or 0):.1f} is below threshold {float(settings.get('buy_score_threshold') or 70):.1f}.")
+        effective_threshold = _effective_entry_score_threshold(settings)
+        if float(trade_score.get("score") or 0) < effective_threshold:
+            blockers.append(f"TotalScore {float(trade_score.get('score') or 0):.1f} is below threshold {effective_threshold:.1f}.")
 
         entry_timing = EntryTimingEngine().evaluate(
             dict(cue_payload.get("signal_candle") or selected.get("candle") or {}),
@@ -140,6 +154,8 @@ def evaluate_options_auto_decision(
             },
             settings,
         )
+        if simple_mode:
+            entry_timing = _relax_simple_ohlcv_entry_timing(entry_timing)
         blockers.extend(entry_timing.get("blockers") or [])
         warnings.extend(entry_timing.get("warnings") or [])
 
@@ -159,14 +175,16 @@ def evaluate_options_auto_decision(
     market_blockers = []
     if (market_cue.to_dict().get("fii_dii_status") or {}).get("status") == "REQUIRED_MISSING_UPLOAD":
         market_blockers.append("FII/DII CSV upload is required for pre-market cue.")
-    if regime.recommended_side == SIDE_WAIT:
+    if regime.recommended_side == SIDE_WAIT and not (simple_mode and selected_side in {SIDE_CE, SIDE_PE}):
         market_blockers.append(regime.no_trade_reason or "Regime says WAIT.")
     if mode in {MODE_PAPER, MODE_REAL} and not index_features.get("close"):
         market_blockers.append("Live index candle data is unavailable.")
-    if market_cue.recommended_side == SIDE_WAIT and settings.get("market_cue_alignment_required"):
+    if market_cue.recommended_side == SIDE_WAIT and settings.get("market_cue_alignment_required") and not simple_mode:
         market_blockers.append("Market cue says WAIT.")
-    if selected_side in {SIDE_CE, SIDE_PE} and market_cue.recommended_side in {SIDE_CE, SIDE_PE} and selected_side != market_cue.recommended_side:
+    if selected_side in {SIDE_CE, SIDE_PE} and market_cue.recommended_side in {SIDE_CE, SIDE_PE} and selected_side != market_cue.recommended_side and not simple_mode:
         market_blockers.append("Market cue is strongly opposite the selected side.")
+    if simple_mode and selected_side == SIDE_WAIT:
+        market_blockers.append("Simple OHLCV/volume-profile entry did not produce a directional setup.")
 
     strategy_blockers = list(dict.fromkeys(blockers))
     governor = MasterGovernor().evaluate(
@@ -212,6 +230,8 @@ def evaluate_options_auto_decision(
         "selected_contract": selected,
         "selection": selection.to_dict(),
         "trade_score": trade_score,
+        "entry_dependency_mode": entry_dependency_mode,
+        "simple_ohlcv_side": simple_side,
         "data_quality": data_quality,
         "theta_premium_risk": theta_premium_risk,
         "options_risk": theta_premium_risk,
@@ -347,6 +367,46 @@ def _explanation(allowed: bool, side: str, selected: dict[str, Any], score: dict
     if allowed:
         return f"{side} setup allowed for {selected.get('tradingsymbol')} with score {float(score.get('score') or 0):.1f}."
     return "No trade: setup did not produce a valid selected contract."
+
+
+def _effective_entry_score_threshold(settings: dict[str, Any]) -> float:
+    if simple_ohlcv_entry_enabled(settings):
+        return simple_ohlcv_threshold(settings)
+    return _number(settings.get("buy_score_threshold"), 70.0)
+
+
+def _relax_simple_ohlcv_theta(theta: dict[str, Any]) -> dict[str, Any]:
+    result = dict(theta or {})
+    blockers = []
+    warnings = list(result.get("warnings") or [])
+    for blocker in result.get("blockers") or []:
+        text = str(blocker or "")
+        if text == "Expected premium move does not beat theta/spread/slippage/charges.":
+            warnings.append("Simple OHLCV mode warning: " + text)
+        else:
+            blockers.append(text)
+    result["blockers"] = list(dict.fromkeys(blockers))
+    result["warnings"] = list(dict.fromkeys(warnings))
+    result["allowed"] = not result["blockers"]
+    return result
+
+
+def _relax_simple_ohlcv_entry_timing(entry_timing: dict[str, Any]) -> dict[str, Any]:
+    result = dict(entry_timing or {})
+    hard = {"Signal is stale.", "Signal age is invalid.", "Spread too wide."}
+    blockers = []
+    warnings = list(result.get("warnings") or [])
+    for blocker in result.get("blockers") or []:
+        text = str(blocker or "")
+        if text in hard:
+            blockers.append(text)
+        else:
+            warnings.append("Simple OHLCV mode warning: " + text)
+    result["blockers"] = list(dict.fromkeys(blockers))
+    result["warnings"] = list(dict.fromkeys(warnings))
+    result["allowed"] = not result["blockers"]
+    result["state"] = "TIMING_OK" if not result["blockers"] else "BLOCKED_BY_TIMING"
+    return result
 
 
 def _execution_state(mode: str) -> dict[str, Any]:

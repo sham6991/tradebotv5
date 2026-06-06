@@ -364,7 +364,12 @@ class OptionsAutoTerminalService:
         option_exchange = str(config.get("option_exchange") or ("BFO" if underlying in {"SENSEX", "BANKEX"} else "NFO")).upper()
         instruments = self.options_instrument_cache.instruments(client, option_exchange)
         expiry_requested = payload.get("expiry") or payload.get("option_expiry") or settings.get("expiry")
+        if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry_requested, "live"):
+            instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry_requested, "live")
         expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+        if expiry and self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry, "live"):
+            instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry, "live")
+            expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
         warnings = list(base_diagnostics.get("warnings") or [])
         if not expiry_requested and expiry:
             warnings.append("Expiry date was blank; using nearest valid Zerodha expiry. Select Expiry Date to lock a specific expiry.")
@@ -528,6 +533,21 @@ class OptionsAutoTerminalService:
             major = select_major_strikes_for_spot(spot_value, major_step)
         except ValueError as exc:
             return {"allowed": False, "blockers": [str(exc)]}
+        instruments = self.options_instrument_cache.instruments(client, exchange)
+        if self._should_refresh_option_instruments(exchange, instruments, underlying, expiry, "live contract lock"):
+            instruments = self._refresh_option_instruments(client, exchange, instruments, underlying, expiry, "live contract lock")
+        side_counts = _option_side_counts(instruments, underlying, expiry)
+        missing_sides = [side for side in ("CE", "PE") if side_counts.get(side, 0) <= 0]
+        if missing_sides:
+            return {
+                "allowed": False,
+                "blockers": [
+                    f"No {underlying} {'/'.join(missing_sides)} contracts found for expiry {_expiry_text(expiry)} on {exchange} after refreshing instrument cache."
+                ],
+                "warnings": ["Refresh options instrument cache or choose a valid Zerodha expiry."],
+                "instrument_cache": self.options_instrument_cache.snapshot(),
+                "option_side_counts": side_counts,
+            }
         provider = OptionsQuoteProvider(client, source=source)
         available = self._available_capital(mode)
         if available <= 0:
@@ -687,7 +707,7 @@ class OptionsAutoTerminalService:
         expiries = sorted({
             _expiry_text(row.get("expiry"))
             for row in instruments or []
-            if str(row.get("instrument_type") or row.get("option_type") or "").upper() in {"CE", "PE"}
+            if str(row.get("option_type") or row.get("instrument_type") or "").upper() in {"CE", "PE"}
             and _is_underlying_row(row, underlying)
             and _expiry_text(row.get("expiry")) >= today_text
         })
@@ -1450,13 +1470,13 @@ class OptionsAutoTerminalService:
         option_exchange = str(config.get("option_exchange") or "NFO").upper()
         instruments = self.options_instrument_cache.instruments(client, option_exchange)
         expiry_requested = payload.get("expiry") or payload.get("option_expiry") or settings.get("expiry")
-        if self._should_refresh_backtest_option_instruments(option_exchange, instruments, underlying, expiry_requested):
-            instruments = self._refresh_backtest_option_instruments(client, option_exchange, instruments, underlying, expiry_requested)
+        if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry_requested, "backtest"):
+            instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry_requested, "backtest")
         expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
         if not expiry:
             raise ValueError(f"No {underlying} option expiry found on {option_exchange}.")
-        if self._should_refresh_backtest_option_instruments(option_exchange, instruments, underlying, expiry):
-            instruments = self._refresh_backtest_option_instruments(client, option_exchange, instruments, underlying, expiry)
+        if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry, "backtest"):
+            instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry, "backtest")
             expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
             if not expiry:
                 raise ValueError(f"No {underlying} option expiry found on {option_exchange} after refreshing instrument cache.")
@@ -1561,12 +1581,13 @@ class OptionsAutoTerminalService:
         }
         return index_frame, option_frames, metadata
 
-    def _should_refresh_backtest_option_instruments(
+    def _should_refresh_option_instruments(
         self,
         exchange: str,
         instruments: list[dict[str, Any]],
         underlying: str,
         expiry: Any,
+        context: str,
     ) -> bool:
         metadata = (self.options_instrument_cache.snapshot().get("exchanges") or {}).get(str(exchange or "").upper()) or {}
         row_count = int(_number(metadata.get("row_count"), len(instruments or [])))
@@ -1583,7 +1604,8 @@ class OptionsAutoTerminalService:
         if reasons:
             self.logger.log(
                 "WARN",
-                "Options Auto backtest instrument cache refresh required",
+                "Options Auto instrument cache refresh required",
+                context=context,
                 exchange=exchange,
                 underlying=underlying,
                 expiry=_expiry_text(expiry),
@@ -1593,20 +1615,22 @@ class OptionsAutoTerminalService:
             )
         return bool(reasons)
 
-    def _refresh_backtest_option_instruments(
+    def _refresh_option_instruments(
         self,
         client: Any,
         exchange: str,
         existing: list[dict[str, Any]],
         underlying: str,
         expiry: Any,
+        context: str,
     ) -> list[dict[str, Any]]:
         try:
             refreshed = self.options_instrument_cache.instruments(client, exchange, refresh=True)
         except Exception as exc:
             self.logger.log(
                 "WARN",
-                f"Options Auto backtest instrument cache refresh failed: {exc}",
+                f"Options Auto instrument cache refresh failed: {exc}",
+                context=context,
                 exchange=exchange,
                 underlying=underlying,
                 expiry=_expiry_text(expiry),
@@ -1615,7 +1639,8 @@ class OptionsAutoTerminalService:
         if refreshed:
             self.logger.log(
                 "INFO",
-                "Options Auto backtest instrument cache refreshed",
+                "Options Auto instrument cache refreshed",
+                context=context,
                 exchange=exchange,
                 underlying=underlying,
                 expiry=_expiry_text(expiry),
@@ -1624,7 +1649,8 @@ class OptionsAutoTerminalService:
             return refreshed
         self.logger.log(
             "WARN",
-            "Options Auto backtest instrument cache refresh returned no rows; retaining existing rows",
+            "Options Auto instrument cache refresh returned no rows; retaining existing rows",
+            context=context,
             exchange=exchange,
             underlying=underlying,
             expiry=_expiry_text(expiry),

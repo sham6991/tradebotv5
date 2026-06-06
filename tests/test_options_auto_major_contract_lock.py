@@ -59,6 +59,15 @@ class FakeMajorStrikeClient:
         }
 
 
+class TrackingMajorStrikeClient(FakeMajorStrikeClient):
+    def __init__(self):
+        self.instrument_calls = []
+
+    def instruments(self, exchange=None):
+        self.instrument_calls.append(exchange)
+        return super().instruments(exchange)
+
+
 class OptionsAutoMajorContractLockTests(unittest.TestCase):
     def test_major_strike_examples_avoid_in_between_strikes(self):
         examples = {
@@ -114,6 +123,51 @@ class OptionsAutoMajorContractLockTests(unittest.TestCase):
         self.assertEqual(lock["ce"]["hop_count"], 1)
         self.assertEqual(lock["pe"]["hop_count"], 1)
         self.assertNotIn(23350, [row.get("strike") for row in lock["margin_hop_history"]])
+
+    def test_live_contract_lock_refreshes_partial_daily_instrument_cache(self):
+        client = TrackingMajorStrikeClient()
+        settings = default_settings()
+        settings.update({
+            "underlying": "NIFTY",
+            "number_of_lots": 1,
+            "major_strike_step": 100,
+            "max_hop_strikes": 5,
+            "estimated_charges_per_lot": 0,
+            "capital_buffer_pct": 0,
+        })
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: client)
+            service.options_instrument_cache.persistent.save("NFO", [{
+                "tradingsymbol": "NIFTY26JUN23200PE",
+                "name": "NIFTY",
+                "underlying": "NIFTY",
+                "exchange": "NFO",
+                "segment": "NFO-OPT",
+                "instrument_token": 222,
+                "instrument_type": "PE",
+                "strike": 23200,
+                "expiry": date(2026, 6, 25),
+                "lot_size": 65,
+                "tick_size": 0.05,
+            }])
+            result = service._select_and_lock_major_contracts(
+                client=client,
+                mode=MODE_PAPER,
+                underlying="NIFTY",
+                exchange="NFO",
+                expiry="2026-06-25",
+                spot_value=23350,
+                settings=settings,
+                source="zerodha_paper_data",
+            )
+            cache = service.options_instrument_cache.snapshot()["exchanges"]["NFO"]
+
+        self.assertTrue(result["allowed"], result.get("blockers"))
+        self.assertIn("NFO", client.instrument_calls)
+        self.assertEqual(cache["source"], "zerodha_fetch")
+        self.assertEqual(cache["row_count"], 5)
+        self.assertEqual(result["lock"]["ce"]["strike"], 23500)
+        self.assertEqual(result["lock"]["pe"]["strike"], 23200)
 
     def test_user_lots_must_be_positive(self):
         client = FakeMajorStrikeClient()

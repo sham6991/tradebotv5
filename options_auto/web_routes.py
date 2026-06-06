@@ -9,7 +9,9 @@ class OptionsAutoWebRoutes:
         self.app_state = app_state
         self.service = OptionsAutoTerminalService(
             base_result_folder,
-            kite_client_provider=lambda mode: app_state.zerodha_clients_by_mode.get("LIVE" if str(mode).upper() == MODE_REAL else "PAPER"),
+            kite_client_provider=lambda mode: app_state.zerodha_clients_by_mode.get(
+                "LIVE" if str(mode).upper() in {MODE_REAL, "LIVE"} else "PAPER"
+            ),
         )
 
     def can_handle_get(self, path: str) -> bool:

@@ -82,6 +82,14 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
         self.assertEqual(routes.service.place_payload["kite_profile"], {"user_id": "REAL1"})
         self.assertTrue(result["account_status"]["real"]["connected"])
 
+    def test_options_auto_service_provider_maps_real_and_live_to_live_client(self):
+        app_state = FakeAppState(paper_connected=False, live_connected=True)
+        live_client = app_state.zerodha_clients_by_mode["LIVE"]
+        routes = OptionsAutoWebRoutes(app_state, "results")
+
+        self.assertIs(routes.service.kite_client_provider("REAL"), live_client)
+        self.assertIs(routes.service.kite_client_provider("LIVE"), live_client)
+
     def test_fii_dii_upload_route_updates_service_status(self):
         routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=False), "results")
         routes.service = FakeOptionsAutoService()

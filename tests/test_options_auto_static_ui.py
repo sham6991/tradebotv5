@@ -19,6 +19,9 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-fii-dii-file"', html)
         self.assertIn('id="oa-data-source-panel"', html)
         self.assertIn('id="oa-demo-banner"', html)
+        self.assertIn('id="oa-live-feed-panel"', html)
+        self.assertIn('id="oa-real-lifecycle-panel"', html)
+        self.assertIn('id="oa-blackbox-panel"', html)
         self.assertEqual(html.count('data-index-tick-panel'), 3)
         self.assertEqual(html.count('data-contract-lock-card'), 3)
         self.assertEqual(html.count('data-contract-lock-badge'), 3)
@@ -86,6 +89,10 @@ class OptionsAutoStaticUITests(unittest.TestCase):
             "Valid Quote Count",
             "Missing Quote Keys",
             "Live Scanner",
+            "Quote Source",
+            "Data Mode",
+            "Instrument Cache",
+            "Cache File",
             "Next Action",
             "Index Candles",
             "Candle Interval",
@@ -103,9 +110,15 @@ class OptionsAutoStaticUITests(unittest.TestCase):
 
     def test_index_tick_stream_renders_from_status_buffer(self):
         js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
 
         self.assertIn("function renderIndexTickStreams", js)
         self.assertIn("function renderContractLockCards", js)
+        self.assertIn("function renderIndustryDiagnostics", js)
+        self.assertIn("WEBSOCKET_TICKS", js)
+        self.assertIn("QUOTE_SNAPSHOT_POLLING", js)
+        self.assertIn("Latency Blackbox", html)
+        self.assertIn("Real Lifecycle", html)
         self.assertIn("state.status.index_ticks", js)
         self.assertIn("slice(-80)", js)
         self.assertIn("data-index-tick-badge", js)

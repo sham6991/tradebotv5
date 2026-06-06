@@ -78,6 +78,7 @@ class StreamingOptionsZerodha:
                 rows[key] = {
                     "last_price": self.spot,
                     "timestamp": self.tick_time,
+                    "age_seconds": 0,
                     "volume": 200000 + self.tick_index * 1000,
                     "source": self.label,
                 }
@@ -100,6 +101,7 @@ class StreamingOptionsZerodha:
                     "option_vwap": price - 2,
                     "option_atr14": 6.0,
                     "timestamp": self.tick_time,
+                    "age_seconds": 0,
                     "source": self.label,
                 }
         return rows

@@ -52,13 +52,14 @@ class OptionsAutoIndexDataProvider:
                 f"Check {label} connection and index quote key {quote_key}.",
             )
         timestamp = row.get("timestamp") or row.get("last_trade_time") or row.get("exchange_timestamp") or datetime.now().isoformat(timespec="seconds")
+        age_seconds = row.get("age_seconds")
         return {
             "underlying": underlying,
             "spot": spot,
             "spot_source": source,
             "quote_key": quote_key,
             "timestamp": _timestamp_text(timestamp),
-            "age_seconds": _age_seconds(timestamp),
+            "age_seconds": _number(age_seconds, _age_seconds(timestamp)) if age_seconds not in ("", None) else _age_seconds(timestamp),
             "fresh": True,
             "demo_data": False,
             "blockers": [],
@@ -181,7 +182,7 @@ def _age_seconds(value: Any) -> float:
     try:
         timestamp = value
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            return max(0.0, (datetime.now() - timestamp).total_seconds())
         return max(0.0, (datetime.now(timezone.utc) - timestamp).total_seconds())
     except Exception:
         return 0.0

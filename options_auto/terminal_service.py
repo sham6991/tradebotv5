@@ -26,13 +26,16 @@ from options_auto.data.live_index_candles import LiveIndexCandleStore
 from options_auto.data.locked_contract_manager import LockedContractManager, build_valid_until
 from options_auto.data.major_strike_selector import select_major_strikes_for_spot
 from options_auto.data.option_chain_builder import OptionChainBuilder
+from options_auto.data.options_live_feed import OptionsLiveFeed
 from options_auto.data.options_instrument_cache import OptionsInstrumentCache, get_contract_lot_size
 from options_auto.data.options_quote_provider import OptionsQuoteProvider, quote_key_for
+from options_auto.execution.blackbox_recorder import BlackboxRecorder
 from options_auto.execution.execution_safety import DataQualityEngine, RealOrderPreflight
 from options_auto.execution.kite_api_manager import KiteApiManager, RateLimiter
 from options_auto.execution.kite_order_adapter import KiteOrderAdapter
 from options_auto.execution.paper_broker import PaperBroker
 from options_auto.execution.paper_lifecycle import PaperLifecycleEngine
+from options_auto.execution.real_order_lifecycle import RealOrderLifecycleEngine, UNPROTECTED_POSITION
 from options_auto.execution.reconciliation import ReconciliationEngine
 from options_auto.execution.real_execution_controller import RealExecutionController, results_folder_writable
 from options_auto.data.fii_dii_loader import fii_dii_status_from_upload, parse_fii_dii_csv_text
@@ -54,6 +57,7 @@ from options_auto.intelligence.strategy_drift import StrategyDriftMonitor
 from options_auto.intelligence.strike_selector import StrikeSelector
 from options_auto.shadow_mode import ShadowModeEngine
 from options_auto.telegram_safety import TelegramSafety
+from web_core.path_safety import safe_user_path
 
 
 class OptionsAutoTerminalService:
@@ -89,6 +93,7 @@ class OptionsAutoTerminalService:
         self.options_risk = OptionsGreeksRiskEngine()
         self.reconciliation = ReconciliationEngine()
         self.real_controller = RealExecutionController(self.real_api_manager, self.reconciliation)
+        self.real_lifecycle = RealOrderLifecycleEngine(self.real_controller)
         self.shadow_engine = ShadowModeEngine()
         self.telegram_safety = TelegramSafety()
         self.performance_monitor = PerformanceMonitor(
@@ -101,7 +106,9 @@ class OptionsAutoTerminalService:
         self.latest_fii_dii_snapshot: dict[str, Any] | None = None
         self.index_ticks: list[dict[str, Any]] = []
         self.live_index_candles = LiveIndexCandleStore()
-        self.options_instrument_cache = OptionsInstrumentCache()
+        self.options_live_feed = OptionsLiveFeed()
+        self.blackbox_recorder = BlackboxRecorder()
+        self.options_instrument_cache = OptionsInstrumentCache(cache_dir=os.path.join(self.result_root(), "instrument_cache"))
         self.locked_contract_manager = LockedContractManager()
         self._lock = threading.RLock()
         self._live_scan_stop = threading.Event()
@@ -143,6 +150,10 @@ class OptionsAutoTerminalService:
                 "live_index_candles": self.live_index_candles.snapshot(),
                 "contract_lock": self.locked_contract_manager.snapshot(),
                 "live_scan": self._live_scan_state_locked(),
+                "options_live_feed": self.options_live_feed.snapshot(),
+                "real_order_lifecycle": self.real_lifecycle.snapshot(),
+                "blackbox": self.blackbox_recorder.snapshot(),
+                "instrument_cache": self.options_instrument_cache.snapshot(),
             }
 
     def result_root(self) -> str:
@@ -426,7 +437,13 @@ class OptionsAutoTerminalService:
             self.locked_contract_manager.mark_scanning()
 
         contracts = [dict(current_lock.get("ce") or {}), dict(current_lock.get("pe") or {})]
-        quote_result = OptionsQuoteProvider(client, source=source).quote_candidates(contracts)
+        try:
+            index_token = self._index_token(client, underlying, str(config.get("index_exchange") or "NSE"))
+        except Exception:
+            index_token = None
+        self.options_live_feed.quote_polling_fallback = bool(settings.get("quote_polling_fallback_enabled", True))
+        self.options_live_feed.subscribe_locked_contracts(index_token, contracts[0], contracts[1])
+        quote_result = OptionsQuoteProvider(client, source=source).quote_candidates(contracts, settings)
         valid_quote_count = int(quote_result.get("valid_quote_count") or 0)
         selected_symbols = [contract.get("tradingsymbol") for contract in contracts if contract.get("tradingsymbol")]
         diagnostics.update({
@@ -445,6 +462,9 @@ class OptionsAutoTerminalService:
             "quotes": quote_result.get("quotes") or {},
             "missing_quote_keys": quote_result.get("missing_quote_keys") or [],
             "quote_warnings": quote_result.get("warnings") or [],
+            "quote_errors": quote_result.get("errors") or [],
+            "quote_source": quote_result.get("quote_source"),
+            "data_mode": quote_result.get("data_mode") or diagnostics.get("data_mode"),
             "valid_quote_count": valid_quote_count,
             "requested_quote_keys": quote_result.get("requested_quote_keys") or [],
             "options_data_health": {
@@ -455,8 +475,18 @@ class OptionsAutoTerminalService:
                 "contracts_found": len(contracts),
                 "valid_quote_count": valid_quote_count,
                 "missing_quote_keys": quote_result.get("missing_quote_keys") or [],
+                "quote_errors": quote_result.get("errors") or [],
+                "data_mode": quote_result.get("data_mode"),
             },
         })
+        if quote_result.get("errors") and settings.get("quote_error_pause_new_entries", True):
+            return {
+                "blocked": True,
+                "blockers": quote_result.get("errors") or ["Zerodha quote snapshot failed."],
+                "warnings": warnings + list(quote_result.get("warnings") or []),
+                "next_action": "Keep Zerodha connected; the scanner will retry quote snapshots.",
+                "diagnostics": diagnostics,
+            }
         if valid_quote_count <= 0:
             return {
                 "blocked": True,
@@ -602,7 +632,7 @@ class OptionsAutoTerminalService:
                     "blockers": ["Lot size missing for selected contract. Refresh options instrument cache."],
                     "hop_history": hop_history,
                 }
-            quote_result = provider.quote_candidates([contract])
+            quote_result = provider.quote_candidates([contract], settings)
             quote = self._quote_for_contract(contract, quote_result.get("quotes") or {})
             premium = self._quote_premium(quote)
             quantity = lots * lot_size
@@ -830,6 +860,7 @@ class OptionsAutoTerminalService:
                 try:
                     if self._live_scan_mode == MODE_REAL:
                         self._sync_real_option_positions_locked()
+                        self.real_lifecycle_poll(dict(self._live_scan_payload or {}))
                     self._run_live_scan_cycle_locked()
                     self._live_scan_cycle_count += 1
                     self._live_scan_last_cycle = datetime.now().isoformat(timespec="seconds")
@@ -904,9 +935,17 @@ class OptionsAutoTerminalService:
             "action": "REAL_SCAN_ONLY",
             "dry_run": dry_run,
             "orders_sent": 0,
-            "reason": "Real live scanner refreshes market data continuously; order sending remains behind guarded Start Real Engine.",
+            "real_auto_entry_enabled": bool(self.settings.get("real_auto_entry_enabled")),
+            "reason": "Real scanner is decision-only. No real orders will be sent automatically.",
         }
         if decision.get("allowed"):
+            if not self.settings.get("real_auto_entry_enabled"):
+                action.update({
+                    "setup_found": True,
+                    "reason": "real_auto_entry_enabled is false. Real scanner remains decision-only.",
+                })
+                self.session.record_safety_event("Real Options Auto setup found decision-only", {"orders_sent": 0})
+                return action
             action["adaptive_dry_run"] = self._real_adaptive_dry_run(decision, payload)
             self.session.record_safety_event("Real Options Auto setup found by live scanner", {"dry_run": dry_run, "orders_sent": 0})
         return action
@@ -1106,10 +1145,29 @@ class OptionsAutoTerminalService:
         positions = self._broker_positions(client, payload)
         trade_plan = payload.get("trade_plan") or self.session.last_decision.get("trade_plan") or {}
         result = self.real_controller.reconcile(self.session.orders, broker_orders, positions, trade_plan)
+        lifecycle = self.real_lifecycle.reconcile_positions(broker_orders, positions)
         self.session.record_safety_event("Real reconciliation checked", {"state": result["state"], "blockers": result["blockers"]})
+        if lifecycle.get("state") == UNPROTECTED_POSITION:
+            self.session.status = "UNPROTECTED_REAL_POSITION"
         result["session"] = self.session.to_dict()
+        result["real_order_lifecycle"] = lifecycle
         self.logger.log("INFO", "Options Auto real reconciliation checked", ok=result["ok"], blockers=result["blockers"])
         return result
+
+    def real_lifecycle_poll(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        payload = dict(payload or {})
+        client = self.kite_client_provider("LIVE")
+        broker_orders = self._broker_orders(client, payload)
+        positions = self._broker_positions(client, payload)
+        adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
+        lifecycle = self.real_lifecycle.poll_entry_status(broker_orders, settings=self.settings, adapter=adapter)
+        lifecycle = self.real_lifecycle.verify_protection_orders(broker_orders)
+        lifecycle = self.real_lifecycle.monitor_oco(broker_orders, adapter=adapter)
+        if positions is not None:
+            lifecycle = self.real_lifecycle.reconcile_positions(broker_orders, positions)
+        if lifecycle.get("state") == UNPROTECTED_POSITION:
+            self.session.status = "UNPROTECTED_REAL_POSITION"
+        return {"real_order_lifecycle": lifecycle, "session": self.session.to_dict(), "real_safety": self.real_controller.snapshot()}
 
     def real_stop_new_entries(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -1232,14 +1290,28 @@ class OptionsAutoTerminalService:
                 self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
                 return {**blocked, "live_scan": self._live_scan_state_locked()}
 
+            order_submitted_at = datetime.now()
             adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard)
             controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
+            broker_ack_at = datetime.now()
             if not controller_result.get("real_order_sent"):
                 blocked = self._blocked_real_order(controller_result.get("blockers") or ["Real entry order failed."], preflight=preflight, decision=decision, final_validation=final_validation, execution=controller_result)
                 self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
                 return {**blocked, "live_scan": self._live_scan_state_locked()}
 
             entry_order = controller_result["entry_order"]
+            lifecycle = self.real_lifecycle.submit_entry(entry_order, trade_plan, self.settings)
+            self.blackbox_recorder.record(
+                signal_generated_at=decision.get("timestamp") or datetime.now(),
+                final_validation_started_at=decision.get("timestamp") or datetime.now(),
+                final_validation_completed_at=datetime.now(),
+                order_submitted_at=order_submitted_at,
+                broker_ack_at=broker_ack_at,
+                order_status_first_seen_at=broker_ack_at,
+                data_age_ms=float((final_validation.get("quote_age_seconds") or 0) or 0) * 1000,
+                tradingsymbol=entry_order.get("tradingsymbol"),
+                order_id=entry_order.get("order_id"),
+            )
             self.session.orders.append(entry_order)
             self.session.status = "REAL_ENTRY_ORDER_OPEN"
             self.session.record_safety_event("Real Options Auto entry order sent", {"order_id": entry_order.get("order_id"), "tradingsymbol": entry_order.get("tradingsymbol")})
@@ -1254,6 +1326,7 @@ class OptionsAutoTerminalService:
                 "preflight": preflight,
                 "final_validation": final_validation,
                 "execution": controller_result,
+                "real_order_lifecycle": lifecycle,
                 "session": self.session.to_dict(),
                 "live_scan": self._live_scan_state_locked(),
                 "message": "Real BUY LIMIT entry sent through guarded Kite adapter. Real scanner remains active for fresh data and monitoring.",
@@ -1267,9 +1340,16 @@ class OptionsAutoTerminalService:
         if file_path and not csv_text:
             file_name = payload.get("file_name") or os.path.basename(str(file_path))
             try:
-                with open(file_path, "r", encoding="utf-8-sig") as handle:
+                base_dir = os.getcwd()
+                safe_path = safe_user_path(
+                    str(file_path),
+                    [os.path.join(base_dir, "data", "uploads"), os.path.join(base_dir, "results")],
+                    must_exist=True,
+                    allowed_extensions={".csv"},
+                )
+                with open(safe_path, "r", encoding="utf-8-sig") as handle:
                     csv_text = handle.read()
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 parsed = {"status": "FAILED", "file_name": file_name, "warnings": [f"Could not read CSV: {exc}"], "fii_net": None, "dii_net": None}
                 snapshot = fii_dii_status_from_upload(parsed, payload.get("phase") or "PREMARKET")
                 self.latest_fii_dii_snapshot = snapshot
@@ -1428,10 +1508,12 @@ class OptionsAutoTerminalService:
             "ce": ce["contract"],
             "pe": pe["contract"],
             "locked_at": from_dt.isoformat(sep=" "),
-            "valid_until": to_dt.isoformat(sep=" "),
+            "valid_until": (from_dt + pd.Timedelta(minutes=int(settings.get("contract_reselection_minutes") or 60))).isoformat(sep=" "),
             "status": "CONTRACTS_LOCKED",
             "margin_hop_history": list(ce.get("hop_history") or []) + list(pe.get("hop_history") or []),
+            "reason_for_reselection": "Initial lock.",
         }
+        lock_history = self._backtest_reselection_history(index_frame, lock, underlying, expiry, major_step, settings)
         metadata = {
             "data_source": "zerodha_historical",
             "data_source_label": "Zerodha Historical (Paper Data)",
@@ -1458,10 +1540,57 @@ class OptionsAutoTerminalService:
             "final_quantity": {"CE": ce["contract"].get("quantity"), "PE": pe["contract"].get("quantity")},
             "margin_hop_history": lock["margin_hop_history"],
             "contract_lock": lock,
-            "lock_history": [lock],
+            "lock_history": lock_history,
             "historical_proxy_quote_warning": "Backtest uses OHLC-derived historical quote proxies for option bid/ask/depth.",
         }
         return index_frame, option_frames, metadata
+
+    def _backtest_reselection_history(
+        self,
+        index_frame: pd.DataFrame,
+        initial_lock: dict[str, Any],
+        underlying: str,
+        expiry: Any,
+        major_step: int,
+        settings: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        history = [dict(initial_lock)]
+        if not bool(settings.get("backtest_reselect_contracts_using_index_candle_close", True)):
+            return history
+        minutes = max(1, _int_setting(settings.get("contract_reselection_minutes"), 60))
+        if index_frame.empty:
+            return history
+        first_time = _parse_dt_value(index_frame.iloc[0].get("datetime") or index_frame.iloc[0].get("timestamp") or index_frame.iloc[0].get("date"))
+        if not first_time:
+            return history
+        next_reselect = first_time + pd.Timedelta(minutes=minutes)
+        lock_index = 2
+        for _, row in index_frame.iterrows():
+            when = _parse_dt_value(row.get("datetime") or row.get("timestamp") or row.get("date"))
+            if not when or when < next_reselect:
+                continue
+            spot = _number(row.get("close"))
+            if spot <= 0:
+                continue
+            major = select_major_strikes_for_spot(spot, major_step)
+            history.append({
+                "lock_id": f"OA_BACKTEST_LOCK_{when.strftime('%Y%m%d_%H%M%S')}_{lock_index:03d}",
+                "underlying": underlying,
+                "expiry": _expiry_text(expiry),
+                "spot_at_lock": spot,
+                "spot": spot,
+                "major_strike_step": major_step,
+                "major_selection": major,
+                "ce": {"strike": major["ce_strike"], "option_type": "CE", "tradingsymbol": f"{underlying}_BT_{int(major['ce_strike'])}CE"},
+                "pe": {"strike": major["pe_strike"], "option_type": "PE", "tradingsymbol": f"{underlying}_BT_{int(major['pe_strike'])}PE"},
+                "locked_at": when.isoformat(sep=" "),
+                "valid_until": (when + pd.Timedelta(minutes=minutes)).isoformat(sep=" "),
+                "status": "CONTRACTS_LOCKED",
+                "reason_for_reselection": f"No setup within {minutes} minutes.",
+            })
+            lock_index += 1
+            next_reselect = when + pd.Timedelta(minutes=minutes)
+        return history
 
     def _select_backtest_major_contract(
         self,
@@ -2220,6 +2349,22 @@ def _parse_trade_day(value: Any) -> date:
     if not text:
         return date.today()
     return pd.to_datetime(text, errors="raise").date()
+
+
+def _parse_dt_value(value: Any) -> datetime | None:
+    if value in ("", None):
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        parsed = pd.to_datetime(value, errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    if hasattr(parsed, "to_pydatetime"):
+        return parsed.to_pydatetime()
+    return None
 
 
 def _round_to_step(value: float, step: float) -> float:

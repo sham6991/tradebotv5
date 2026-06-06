@@ -84,6 +84,11 @@ class OptionsAutoWebRoutes:
             if blockers:
                 raise ValueError(blockers[0])
             return handler.send_json(self._with_account_status(self.service.real_reconcile(payload)))
+        if path == "/api/options-auto/real/lifecycle-poll":
+            blockers = self._mode_blockers("LIVE")
+            if blockers:
+                raise ValueError(blockers[0])
+            return handler.send_json(self._with_account_status(self.service.real_lifecycle_poll(payload)))
         if path == "/api/options-auto/real/emergency-plan":
             blockers = self._mode_blockers("LIVE")
             if blockers:
@@ -135,7 +140,7 @@ class OptionsAutoWebRoutes:
         }
 
     def _with_account_status(self, payload: dict) -> dict:
-        payload = dict(payload)
+        payload = _redact_sensitive(dict(payload))
         payload["account_status"] = self.account_status()
         return payload
 
@@ -180,3 +185,14 @@ class OptionsAutoWebRoutes:
         if require_connection and not self.app_state.connection_status(requested_mode).get("connected"):
             return [f"Connect {self.app_state.auth_label(requested_mode)} before Options Auto real dry-run."]
         return []
+
+
+SENSITIVE_KEYS = {"access_token", "api_secret", "request_token", "enctoken", "authorization"}
+
+
+def _redact_sensitive(value):
+    if isinstance(value, dict):
+        return {key: ("***" if str(key).lower() in SENSITIVE_KEYS else _redact_sensitive(item)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact_sensitive(item) for item in value]
+    return value

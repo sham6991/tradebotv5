@@ -140,6 +140,26 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "allow_deep_otm": False,
     "expiry_day_max_lots": 1,
     "dry_run_real_only": True,
+    "real_auto_entry_enabled": False,
+    "real_entry_poll_seconds": 1,
+    "real_entry_timeout_seconds": 30,
+    "partial_fill_protect_immediately": True,
+    "cancel_unfilled_entry_after_timeout": True,
+    "real_protection_retry_count": 2,
+    "real_protection_retry_delay_seconds": 1,
+    "real_order_update_source": "POLLING_OR_POSTBACK",
+    "options_live_feed_enabled": True,
+    "quote_polling_fallback_enabled": True,
+    "max_tick_age_seconds": 3,
+    "max_quote_age_seconds": 3,
+    "websocket_reconnect_max_attempts": 5,
+    "websocket_reconnect_backoff_seconds": 2,
+    "pause_entries_on_feed_stale": True,
+    "backtest_reselect_contracts_using_index_candle_close": True,
+    "max_full_quote_batch_size": 500,
+    "quote_snapshot_min_interval_seconds": 1,
+    "quote_failure_backoff_seconds": 5,
+    "quote_error_pause_new_entries": True,
 }
 
 
@@ -206,6 +226,14 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "volatility_exit_enabled",
         "allow_deep_otm",
         "dry_run_real_only",
+        "real_auto_entry_enabled",
+        "partial_fill_protect_immediately",
+        "cancel_unfilled_entry_after_timeout",
+        "options_live_feed_enabled",
+        "quote_polling_fallback_enabled",
+        "pause_entries_on_feed_stale",
+        "backtest_reselect_contracts_using_index_candle_close",
+        "quote_error_pause_new_entries",
         "require_telegram_position_preview",
         "major_strike_selection_enabled",
         "use_major_strikes_only",
@@ -255,6 +283,9 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "theta_exit_risk_score",
         "iv_crush_exit_pct",
         "max_latency_warning_ms",
+        "quote_snapshot_min_interval_seconds",
+        "quote_failure_backoff_seconds",
+        "websocket_reconnect_backoff_seconds",
     ):
         settings[key] = _float(settings.get(key), float(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 
@@ -299,6 +330,14 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "telegram_duplicate_window_seconds",
         "expiry_day_max_lots",
         "backtest_entry_validity_candles",
+        "real_entry_poll_seconds",
+        "real_entry_timeout_seconds",
+        "real_protection_retry_count",
+        "real_protection_retry_delay_seconds",
+        "max_tick_age_seconds",
+        "max_quote_age_seconds",
+        "websocket_reconnect_max_attempts",
+        "max_full_quote_batch_size",
     ):
         settings[key] = _int(settings.get(key), int(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 

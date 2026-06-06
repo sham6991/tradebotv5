@@ -4,17 +4,22 @@ from datetime import date
 from typing import Any
 
 from options_auto.constants import SIDE_CE, SIDE_PE
+from options_auto.data.persistent_instrument_cache import PersistentInstrumentCache
 
 
 class OptionsInstrumentCache:
-    def __init__(self) -> None:
+    def __init__(self, cache_dir: str | None = None) -> None:
         self._cache: dict[tuple[int, str, str], list[dict[str, Any]]] = {}
+        self.persistent = PersistentInstrumentCache(cache_dir)
+        self.metadata: dict[str, Any] = {}
 
     def instruments(self, client: Any, exchange: str) -> list[dict[str, Any]]:
         exchange = str(exchange or "NFO").upper()
         key = (id(client), exchange, date.today().isoformat())
         if key not in self._cache:
-            self._cache[key] = _client_instruments(client, exchange)
+            cached = self.persistent.get_or_fetch(client, exchange, _client_instruments)
+            self.metadata[exchange] = {item: cached.get(item) for item in ("exchange", "cache_date", "path", "source", "stale", "stable_key")}
+            self._cache[key] = list(cached.get("rows") or [])
         return [dict(row) for row in self._cache[key]]
 
     def find_option_contract(
@@ -37,6 +42,11 @@ class OptionsInstrumentCache:
 
     def clear(self) -> None:
         self._cache.clear()
+        self.metadata.clear()
+        self.persistent.clear()
+
+    def snapshot(self) -> dict[str, Any]:
+        return {"exchanges": dict(self.metadata)}
 
 
 def find_option_contract(

@@ -79,6 +79,11 @@ function percent(input) {
   return `${Number(input).toFixed(2)}%`;
 }
 
+function latency(item) {
+  if (!item || typeof item !== "object") return "-";
+  return `${numberValue(item.p95, 0).toFixed(0)} ms`;
+}
+
 function escapeHtml(input) {
   return text(input, "").replace(/[&<>"']/g, char => ({
     "&": "&amp;",
@@ -362,6 +367,7 @@ function renderTopStatus() {
 function renderAll() {
   renderTopStatus();
   renderDashboard();
+  renderIndustryDiagnostics();
   renderIndexTickStreams();
   renderContractLockCards();
   renderBacktestResults();
@@ -479,6 +485,10 @@ function renderDataSourcePanel(result = {}) {
   const demo = source === "DEBUG" || source === "DEMO" || Boolean(result.demo_data);
   const health = result.options_data_health || {};
   const scan = result.live_scan || state.status.live_scan || {};
+  const cache = result.instrument_cache || state.status.instrument_cache || {};
+  const exchanges = cache.exchanges || {};
+  const cacheRows = Object.values(exchanges);
+  const firstCache = cacheRows[0] || {};
   const sourceOk = source === "LIVE" || source === "zerodha_paper_data" || source === "zerodha_real_data";
   setBadge("#oa-data-source-badge", source, demo ? "yellow" : sourceOk ? "green" : "grey");
   setHtml("#oa-demo-banner", demo ? `<div class="oa-data-banner">DEMO/SAMPLE DATA - not live market data.</div>` : "");
@@ -494,8 +504,12 @@ function renderDataSourcePanel(result = {}) {
     metric("Missing Quote Keys", (result.missing_quote_keys || health.missing_quote_keys || []).length),
     metric("Index Candles", result.live_index_candle_count ?? "-"),
     metric("Candle Interval", result.live_index_candle_interval || "-"),
+    metric("Quote Source", result.quote_source || health.quote_source || "-"),
+    metric("Data Mode", result.data_mode || health.data_mode || "-"),
     metric("Quote Age", `${text(result.quote_age_seconds ?? $("#oa-quote-age")?.value, "-")} sec`),
     metric("Stale Threshold", `${text((result.settings || state.status.settings || state.defaults.settings || {}).quote_stale_seconds, 3)} sec`),
+    metric("Instrument Cache", firstCache.source || "-"),
+    metric("Cache File", firstCache.path || "-"),
     metric("FII/DII", (state.fiiDiiStatus.status || result.market_cue?.fii_dii_status?.status || "Not uploaded")),
     metric("News", result.market_cue?.components?.news !== undefined ? score(result.market_cue.components.news) : "No news summary"),
     metric("Trading Allowed", result.allowed ? "YES" : "NO"),
@@ -504,6 +518,58 @@ function renderDataSourcePanel(result = {}) {
     metric("Last Scan", scan.last_cycle || "-"),
     metric("Scan Count", scan.cycle_count ?? "-"),
     metric("Next Action", result.next_action || "-"),
+  ].join(""));
+}
+
+function renderIndustryDiagnostics() {
+  const result = state.lastResult || {};
+  const feed = result.options_live_feed || state.status.options_live_feed || {};
+  const feedHealth = feed.health || {};
+  const feedMode = feedHealth.data_mode || feed.data_mode || "UNKNOWN";
+  const feedStale = Boolean(feedHealth.feed_stale);
+  setBadge("#oa-live-feed-badge", feedMode, feedStale ? "red" : feedMode === "WEBSOCKET_TICKS" ? "green" : feedMode === "QUOTE_SNAPSHOT_POLLING" ? "yellow" : "grey");
+  setHtml("#oa-live-feed-panel", [
+    metric("Data Mode", feedMode),
+    metric("Websocket", feed.websocket_connected ? "CONNECTED" : "DISCONNECTED"),
+    metric("Quote Fallback", feed.quote_polling_fallback ? "ENABLED" : "OFF"),
+    metric("Index Tick", feedHealth.last_index_tick || "-"),
+    metric("CE Tick", feedHealth.last_ce_tick || "-"),
+    metric("PE Tick", feedHealth.last_pe_tick || "-"),
+    metric("Feed Stale", feedStale ? "YES" : "NO"),
+    metric("Stale Labels", (feedHealth.stale_labels || []).join(", ") || "-"),
+    metric("Subscribed Tokens", (feed.subscribed_tokens || []).join(", ") || "-"),
+    metric("Option Streams", (feed.option_candles?.streams || []).length),
+  ].join(""));
+
+  const lifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
+  const lifecycleState = lifecycle.state || "IDLE";
+  const lifecycleBad = /UNPROTECTED|SAFE|MANUAL|REJECTED|CANCELLED|TIMEOUT/.test(String(lifecycleState));
+  const lifecycleGood = /OCO_ACTIVE|TARGET_FILLED|SL_FILLED|EXIT_RECONCILED/.test(String(lifecycleState));
+  setBadge("#oa-real-lifecycle-badge", lifecycleState, lifecycleBad ? "red" : lifecycleGood ? "green" : lifecycleState === "IDLE" ? "grey" : "yellow");
+  setHtml("#oa-real-lifecycle-panel", [
+    metric("State", lifecycleState),
+    metric("Safe Mode", lifecycle.safe_mode ? "YES" : "NO"),
+    metric("Entry Order", lifecycle.entry_order?.order_id || "-"),
+    metric("Entry Status", lifecycle.entry_order?.status || "-"),
+    metric("Fill Qty", lifecycle.fill?.filled_quantity || "-"),
+    metric("Avg Fill", lifecycle.fill?.average_price || "-"),
+    metric("Target", lifecycle.target_order?.order_id || lifecycle.target_order?.status || "-"),
+    metric("Stoploss", lifecycle.stoploss_order?.order_id || lifecycle.stoploss_order?.status || "-"),
+    metric("Blocker", (lifecycle.blockers || [])[0] || "-"),
+  ].join(""));
+
+  const blackbox = result.blackbox || state.status.blackbox || {};
+  const report = blackbox.latency_report || {};
+  const count = report.count || (blackbox.events || []).length || 0;
+  setBadge("#oa-blackbox-badge", count ? `${count} Events` : "No Events", count ? "blue" : "grey");
+  setHtml("#oa-blackbox-panel", [
+    metric("Events", count),
+    metric("Decision p95", latency(report.decision_latency_ms)),
+    metric("Validation p95", latency(report.validation_latency_ms)),
+    metric("Submit Ack p95", latency(report.submit_to_ack_ms)),
+    metric("Ack Fill p95", latency(report.ack_to_fill_ms)),
+    metric("Protection p95", latency(report.protection_delay_ms)),
+    metric("Data Age p95", latency(report.data_age_ms)),
   ].join(""));
 }
 

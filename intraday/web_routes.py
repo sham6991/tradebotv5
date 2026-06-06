@@ -9,7 +9,9 @@ class IntradayWebRoutes:
         self.app_state = app_state
         self.service = IntradayTerminalService(
             base_result_folder,
-            zerodha_client_provider=lambda mode: app_state.zerodha_clients_by_mode.get("LIVE" if str(mode).upper() == "REAL" else "PAPER"),
+            zerodha_client_provider=lambda mode: app_state.zerodha_clients_by_mode.get(
+                "LIVE" if str(mode).upper() in {"REAL", "LIVE"} else "PAPER"
+            ),
         )
 
     def can_handle_get(self, path: str) -> bool:

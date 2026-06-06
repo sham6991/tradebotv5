@@ -73,6 +73,15 @@ class IntradayWebRoutesTests(unittest.TestCase):
             app.zerodha_clients_by_mode["PAPER"] = object()
             self.assertTrue(routes.account_status()["paper"]["connected"])
 
+    def test_service_provider_maps_real_and_live_to_live_client(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            app = DummyApp()
+            app.zerodha_clients_by_mode["LIVE"] = object()
+            routes = IntradayWebRoutes(app, temp_dir)
+
+            self.assertIs(routes.service.manager.zerodha_client_provider("REAL"), app.zerodha_clients_by_mode["LIVE"])
+            self.assertIs(routes.service.manager.zerodha_client_provider("LIVE"), app.zerodha_clients_by_mode["LIVE"])
+
 
 if __name__ == "__main__":
     unittest.main()

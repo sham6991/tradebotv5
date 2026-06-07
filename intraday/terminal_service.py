@@ -69,6 +69,8 @@ class IntradayTerminalService:
             return self._with_engine_state(self.manager.reject_entry(payload))
 
     def kill_switch(self) -> dict:
+        self.manager.kill_requested = True
+        self._engine_stop.set()
         with self._lock:
             self._stop_engine_locked()
             return self._with_engine_state(self.manager.kill_switch())

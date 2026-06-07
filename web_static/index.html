@@ -4,10 +4,11 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>TradeBotV5 Web Control Center</title>
+    <link rel="stylesheet" href="/static/terminal_design.css">
     <link rel="stylesheet" href="/static/app.css">
   </head>
-  <body>
-    <div class="shell">
+  <body class="app-shell">
+    <div class="shell app-shell">
       <aside class="sidebar">
         <div class="brand">
           <span class="brand-mark">TB</span>
@@ -17,19 +18,43 @@
           </div>
         </div>
         <nav>
-          <button class="nav active" data-view="dashboard">Dashboard</button>
+          <span class="nav-group">Today</span>
+          <button class="nav active" data-view="dashboard">Overview</button>
+          <button class="nav" data-view="paper">Paper Desk</button>
+          <button class="nav" data-view="live">Live Monitor</button>
+          <span class="nav-group">Trading</span>
+          <a class="nav nav-link" href="/options-auto">Options Auto</a>
+          <a class="nav nav-link nav-intraday" href="/intraday">Intraday Stocks</a>
+          <span class="nav-group">Research</span>
           <button class="nav" data-view="market-cue">Market Cue</button>
           <button class="nav" data-view="backtest">Backtest</button>
-          <button class="nav" data-view="paper">Paper Desk</button>
-          <button class="nav" data-view="live">Live Trading</button>
-          <a class="nav nav-link" href="/options-auto">Options Auto</a>
-          <a class="nav nav-link nav-intraday" href="/intraday">Intraday Stocks Terminal</a>
           <button class="nav" data-view="replay">Session Replay</button>
+          <span class="nav-group">Admin</span>
           <button class="nav" data-view="zerodha">Connections</button>
         </nav>
       </aside>
 
       <main>
+        <section class="top-safety-bar command-center-bar">
+          <div>
+            <h1>TRADEBOTV5 COMMAND CENTER</h1>
+            <small id="command-next-action">Next safe action: Refresh status</small>
+          </div>
+          <div class="safety-pills">
+            <span id="cmd-market-status" class="status-pill status-muted">Market UNKNOWN</span>
+            <span id="cmd-paper-connection" class="status-pill status-muted">Paper Not Connected</span>
+            <span id="cmd-real-connection" class="status-pill status-muted">Real Not Connected</span>
+            <span id="cmd-feed-health" class="status-pill status-muted">Feed Stopped</span>
+            <span id="cmd-mode" class="status-pill status-info">PAPER</span>
+            <span id="cmd-real-state" class="status-pill status-muted">Real Locked</span>
+            <span id="cmd-kill-switch" class="status-pill status-success">Kill OFF</span>
+            <span id="cmd-data-lag" class="status-pill status-muted">Lag -</span>
+            <span id="cmd-pnl" class="status-pill status-muted">PnL 0.00</span>
+            <span id="cmd-active-orders" class="status-pill status-muted">Orders 0</span>
+          </div>
+        </section>
+        <div id="main-ui-stale-warning" class="risk-banner ui-stale-warning">UI stale - waiting for a fresh status response.</div>
+
         <header class="topbar">
           <div>
             <h1 id="view-title">Dashboard</h1>
@@ -46,6 +71,38 @@
         </header>
 
         <section id="dashboard" class="view active">
+          <div class="operator-grid command-center-grid">
+            <article class="metric-card" id="readiness-card">
+              <h2 class="section-title">Trading Readiness</h2>
+              <p class="section-subtitle" id="readiness-summary">Waiting for status.</p>
+              <div class="metric-list" id="readiness-list"></div>
+            </article>
+            <article class="risk-card" id="risk-summary-card">
+              <h2 class="section-title">Risk Summary</h2>
+              <p class="section-subtitle" id="risk-summary-state">No risk event active.</p>
+              <div class="metric-list" id="risk-summary-list"></div>
+            </article>
+            <article class="metric-card" id="data-health-card">
+              <h2 class="section-title">Data Health</h2>
+              <p class="section-subtitle" id="data-health-state">Waiting for feed.</p>
+              <div class="metric-list" id="data-health-list"></div>
+            </article>
+            <article class="metric-card" id="execution-health-card">
+              <h2 class="section-title">Execution Health</h2>
+              <p class="section-subtitle" id="execution-health-state">No execution issue reported.</p>
+              <div class="metric-list" id="execution-health-list"></div>
+            </article>
+            <article class="metric-card" id="broker-update-card">
+              <h2 class="section-title">Broker Updates</h2>
+              <p class="section-subtitle">Postback is disabled for this local app.</p>
+              <div class="metric-list" id="broker-update-list"></div>
+            </article>
+            <article class="metric-card" id="app-health-card">
+              <h2 class="section-title">App Health</h2>
+              <p class="section-subtitle" id="app-health-state">Runtime status.</p>
+              <div class="metric-list" id="app-health-list"></div>
+            </article>
+          </div>
           <div class="metrics">
             <article><span>Feed</span><strong id="feed-status">Stopped</strong></article>
             <article><span>Ticks/s All Streams</span><strong id="ticks-rate">0</strong></article>
@@ -126,9 +183,12 @@
                 <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
               </div>
             </section>
-            <section class="panel">
-              <h2>Latest Result</h2>
-              <pre id="latest-result">No run yet</pre>
+            <section class="panel debug-panel">
+              <details>
+                <summary>Developer Tools - Latest Result JSON</summary>
+                <p class="developer-note">Raw payloads are hidden during normal trading. Open only for debugging.</p>
+                <pre id="latest-result">No run yet</pre>
+              </details>
             </section>
           </div>
           <section class="panel">
@@ -401,7 +461,7 @@
             <div class="copy-list">
               <label>Redirect URL <input id="zerodha-redirect-copy" readonly></label>
             </div>
-            <p class="note">Postback is disabled. The app continues to refresh order status, fill quantity, average price, and pending quantity through the existing polling flow.</p>
+            <p class="note">Postback is disabled for this local app. Order status is maintained through polling, broker orderbook checks, positions checks, and reconciliation.</p>
           </section>
         </section>
       </main>

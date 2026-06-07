@@ -4,10 +4,11 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>TradeBotV5 Intraday Stocks Terminal</title>
+  <link rel="stylesheet" href="/static/terminal_design.css">
   <link rel="stylesheet" href="/static/intraday.css">
 </head>
-<body>
-  <div class="terminal-shell">
+<body class="app-shell">
+  <div class="terminal-shell app-shell">
     <header class="topbar">
       <div>
         <h1>TradeBotV5 Intraday Stocks Terminal</h1>
@@ -22,10 +23,11 @@
         <span>Used Margin <strong id="used-margin">0.00</strong></span>
         <span>Active Trade <strong id="active-symbol">None</strong></span>
         <span>Lock <strong id="lock-status">OPEN</strong></span>
+        <span>Kill Switch <strong id="intraday-kill-state">OFF</strong></span>
+        <span>Last Scan <strong id="intraday-last-scan">-</strong></span>
       </div>
       <div class="actions">
         <a href="/" class="secondary-link">Main App</a>
-        <button id="kill-switch" class="danger">Kill Switch</button>
         <button id="stop-session">Export Session</button>
       </div>
     </header>
@@ -42,6 +44,13 @@
           <h2>Locked Session Setup</h2>
           <span id="account-status">Checking main app connections...</span>
         </div>
+        <section class="terminal-panel setup-checklist-card">
+          <div class="panel-title">
+            <h3>Session Setup Checklist</h3>
+            <span id="setup-checklist-status" class="status-pill status-muted">WAITING</span>
+          </div>
+          <div id="setup-checklist" class="metric-list"></div>
+        </section>
         <section class="connection-summary">
           <div id="paper-connection-card" class="connection-card">
             <h3>Virtual/Paper Zerodha</h3>
@@ -240,6 +249,7 @@
       </section>
 
       <section id="terminal-step" class="flow-panel">
+        <div id="intraday-ui-stale-warning" class="risk-banner ui-stale-warning">UI stale - waiting for Intraday status.</div>
         <section id="data-source-card" class="data-source-card">
           <div class="panel-title compact-title">
             <h2>Data Source</h2>
@@ -308,6 +318,24 @@
             <div class="button-row">
               <button id="process-orders">Refresh Orders</button>
               <button id="force-timeout">Cancel Unfilled After 1m</button>
+            </div>
+          </section>
+
+          <section class="danger-zone terminal-panel">
+            <h2>Danger Zone</h2>
+            <p>Use only to stop trading activity or handle a stuck live session.</p>
+            <div class="button-row">
+              <button id="kill-switch" class="danger">Kill Switch</button>
+              <button id="intraday-emergency-note" disabled>Emergency Exit Active Trade</button>
+            </div>
+          </section>
+
+          <section class="terminal-panel">
+            <h2>Reports</h2>
+            <div class="button-row">
+              <button id="export-session-shortcut" type="button">Export Session</button>
+              <button type="button" disabled>Download Trades CSV</button>
+              <button type="button" disabled>Download Journal</button>
             </div>
           </section>
 

@@ -545,6 +545,44 @@ class WebTradeBotApp:
                 "last_replay": self.last_replay,
             }
 
+    def status_summary_payload(self):
+        payload = self.status_payload()
+        connections = payload.get("connections") or {}
+        feed = payload.get("feed") or {}
+        session = payload.get("session_summary") or {}
+        health = payload.get("health") or {}
+        active_orders = payload.get("active_orders") or []
+        order_history = payload.get("order_history") or []
+        live_recovery = (payload.get("recovery_status") or {}).get("LIVE", {}) or {}
+        real_connected = bool((connections.get("LIVE") or {}).get("connected"))
+        paper_connected = bool((connections.get("PAPER") or {}).get("connected"))
+        broker_state = "MANUAL_RECONCILIATION_REQUIRED" if live_recovery.get("severity") in {"Danger", "Critical"} else "OK"
+        return {
+            "app_mode": "LOCAL",
+            "host_mode": "LOCALHOST",
+            "broker_update_mode": "POLLING_AND_RECONCILIATION",
+            "postback_required": False,
+            "postback_enabled": False,
+            "public_callback_required": False,
+            "local_app_safe": True,
+            "kite_connected": paper_connected or real_connected,
+            "market_status": "OPEN" if feed.get("market_open") is True else "CLOSED" if feed.get("market_open") is False else "UNKNOWN",
+            "paper_connected": paper_connected,
+            "real_connected": real_connected,
+            "feed_health": feed.get("feed_status") or "Stopped",
+            "current_mode": payload.get("current_mode") or "PAPER",
+            "real_money_state": "ARMED" if real_connected else "LOCKED",
+            "kill_switch": bool(health.get("kill_switch_active") or health.get("safe_mode")),
+            "broker_state": broker_state,
+            "manual_reconciliation_required": broker_state != "OK",
+            "today_pnl": session.get("session_pnl") or 0,
+            "data_lag": feed.get("last_tick_age_ms") or feed.get("data_lag_ms") or feed.get("backlog") or 0,
+            "active_orders_count": len(active_orders),
+            "recent_rejected_orders": len([row for row in order_history if "REJECT" in str(row.get("status") or row.get("Order Status") or "").upper()]),
+            "last_broker_reconciliation_time": live_recovery.get("checked_at") or "",
+            "last_update": datetime.now().isoformat(timespec="seconds"),
+        }
+
     def run_network_health_check(self, mode):
         mode = str(mode or self.current_mode or "PAPER").upper()
         if mode not in {"PAPER", "LIVE"}:
@@ -1961,6 +1999,8 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.app_state.options_auto_routes.handle_get(self, path, parsed)
         if self.app_state.intraday_routes.can_handle_get(path):
             return self.app_state.intraday_routes.handle_get(self, path, parsed)
+        if path == "/api/status/summary":
+            return self.send_json(self.app_state.status_summary_payload())
         if path == "/api/status":
             return self.send_json(self.app_state.status_payload())
         if path == "/api/candles":

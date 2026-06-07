@@ -27,6 +27,10 @@ class OptionsAutoWebRoutes:
             return handler.send_json(self.service.defaults())
         if path == "/api/options-auto/status":
             return handler.send_json(self._with_account_status(self.service.status()))
+        if path == "/api/options-auto/ui-summary":
+            return handler.send_json(self.ui_summary())
+        if path == "/api/options-auto/lifecycle":
+            return handler.send_json(self.service.status().get("real_order_lifecycle") or {})
         if path == "/api/options-auto/account-status":
             return handler.send_json(self.account_status())
         if path == "/api/options-auto/shadow/report":
@@ -145,6 +149,49 @@ class OptionsAutoWebRoutes:
         payload = _redact_sensitive(dict(payload))
         payload["account_status"] = self.account_status()
         return payload
+
+    def ui_summary(self) -> dict:
+        status = self._with_account_status(self.service.status())
+        settings = status.get("settings") or {}
+        account = status.get("account_status") or {}
+        lifecycle = status.get("real_order_lifecycle") or {}
+        session = status.get("session") or {}
+        feed = status.get("options_live_feed") or {}
+        live_scan = status.get("live_scan") or {}
+        lock = ((status.get("contract_lock") or {}).get("lock") or {})
+        mode = str(settings.get("mode") or "PAPER").upper()
+        real_connected = bool((account.get("real") or {}).get("connected"))
+        paper_connected = bool((account.get("paper") or {}).get("connected"))
+        data_health = feed.get("health") or {}
+        protection_state = str(lifecycle.get("protected_state") or "FLAT").upper()
+        lifecycle_state = str(lifecycle.get("state") or "IDLE").upper()
+        blockers = []
+        if mode == "REAL" and not real_connected:
+            blockers.append("Real money locked")
+        if mode != "REAL" and not paper_connected:
+            blockers.append("Paper data Zerodha not connected")
+        if data_health.get("stale"):
+            blockers.append("Options feed is stale")
+        if not (lock.get("ce") and lock.get("pe")):
+            blockers.append("Contracts are not locked")
+        if "FAILED" in protection_state or "UNPROTECTED" in lifecycle_state or "RECONCILIATION" in protection_state:
+            blockers.append("Position protection requires manual attention")
+        return {
+            "mode": mode,
+            "real_money_state": "ARMED" if mode == "REAL" and real_connected else "LOCKED",
+            "kite": "CONNECTED" if (real_connected if mode == "REAL" else paper_connected) else "DISCONNECTED",
+            "data": "STALE" if data_health.get("stale") else "HEALTHY" if data_health else "WAITING",
+            "engine": "RUNNING" if live_scan.get("running") else "IDLE",
+            "position": "OPEN" if (session.get("active_trades") or []) else "FLAT",
+            "protection": "FAILED" if blockers and any("protection" in item.lower() for item in blockers) else "PROTECTED" if protection_state == "PROTECTIVE_EXIT_ACTIVE" else "INACTIVE",
+            "oco": "ACTIVE" if lifecycle_state == "OCO_ACTIVE" else "INACTIVE",
+            "kill_switch": bool((status.get("real_safety") or {}).get("safe_mode")),
+            "can_trade": not blockers,
+            "blockers": blockers,
+            "active_instrument": (((session.get("active_trades") or [{}])[0] or {}).get("tradingsymbol") or ""),
+            "session_pnl": status.get("paper_account", {}).get("realized_pnl") or 0,
+            "last_update": status.get("session", {}).get("updated_at") or "",
+        }
 
     def _with_profile(self, payload: dict | None) -> dict:
         payload = dict(payload or {})

@@ -13,7 +13,60 @@ const state = {
   statusPollBusy: false,
   statusPollCount: 0,
   fiiDiiUpload: null,
+  lastStatusOkAt: 0,
 };
+
+const uiCache = {};
+const pendingCommands = new Set();
+
+function stableStringify(value) {
+  try { return JSON.stringify(value ?? null); }
+  catch { return String(value); }
+}
+
+function shouldRender(key, value) {
+  const next = stableStringify(value);
+  if (uiCache[key] === next) return false;
+  uiCache[key] = next;
+  return true;
+}
+
+function isNearBottom(node, threshold = 40) {
+  if (!node) return true;
+  return node.scrollHeight - node.scrollTop - node.clientHeight < threshold;
+}
+
+async function guardedCommand(key, button, fn) {
+  if (pendingCommands.has(key)) return null;
+  pendingCommands.add(key);
+  if (button) {
+    button.disabled = true;
+    button.dataset.pending = "true";
+  }
+  try {
+    return await fn();
+  } finally {
+    pendingCommands.delete(key);
+    if (button) {
+      button.disabled = false;
+      button.dataset.pending = "false";
+    }
+  }
+}
+
+function setText(selector, value) {
+  const node = typeof selector === "string" ? $(selector) : selector;
+  if (!node) return;
+  const next = String(value ?? "");
+  if (node.textContent !== next) node.textContent = next;
+}
+
+function setStatusPill(selector, label, ok) {
+  const node = $(selector);
+  if (!node) return;
+  setText(node, label);
+  node.className = `status-pill ${ok === true ? "status-success" : ok === false ? "status-danger" : "status-warning"}`;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -337,6 +390,8 @@ function renderConnectionCard(cardSelector, stateSelector, detailSelector, conne
 
 function renderStatus(data) {
   state.status = data;
+  state.lastStatusOkAt = Date.now();
+  $("#intraday-ui-stale-warning")?.classList.remove("is-visible");
   const settings = data.settings || {};
   const funds = data.funds || data.paper_account || {};
   const pnl = data.session_pnl || {};
@@ -350,6 +405,9 @@ function renderStatus(data) {
   $("#used-margin").textContent = money(funds.used_margin);
   $("#day-pnl").textContent = money(pnl.total);
   $("#active-symbol").textContent = active?.status === "OPEN" ? `${active.symbol} ${active.side}` : "None";
+  setText("#intraday-kill-state", data.kill_switch_report?.active || data.kill_switch_active ? "ON" : "OFF");
+  setText("#intraday-last-scan", data.last_scan_at || data.updated_at || new Date().toLocaleTimeString());
+  renderSetupChecklist(data);
   renderWatch(data.snapshots || []);
   renderBest(data.pending_signal || data.last_signal);
   renderMargin(data.pending_signal || data.last_signal, settings);
@@ -382,6 +440,31 @@ function renderStatus(data) {
     stopStatusPolling();
   }
   applyModeLock();
+}
+
+function renderSetupChecklist(data = {}) {
+  const settings = data.settings || {};
+  const account = state.accountStatus || {};
+  const paperConnected = Boolean(account.paper?.zerodha_data_connection?.connected || account.paper?.connected);
+  const realConnected = Boolean(account.real?.zerodha?.connected || account.real?.connected);
+  const mode = String(settings.mode || $("#mode")?.value || "PAPER").toUpperCase();
+  const checks = [
+    ["Main app connection", mode === "REAL" ? realConnected : paperConnected, mode === "REAL" ? "Real Zerodha" : "Paper Zerodha"],
+    ["FII/DII CSV uploaded", Boolean(data.fii_dii_upload || state.fiiDiiUpload), "Market breadth context"],
+    ["Mode selected", Boolean(mode), mode],
+    ["Permission selected", true, settings.ask_before_entry ? "Ask before entry" : "Auto after checks"],
+    ["Strategy profile", Boolean(settings.strategy_profile), settings.strategy_profile || "BALANCED"],
+    ["Side selected", Boolean(settings.side || $("#side")?.value), settings.side || $("#side")?.value || "-"],
+    ["Risk configured", Number(settings.risk_per_trade || settings.max_risk_per_trade || 1) > 0, "Risk checks active"],
+    ["Real safety", mode !== "REAL" || realConnected, mode === "REAL" ? "Real connection required" : "Not real mode"],
+    ["Broker updates", true, "Polling + reconciliation"],
+    ["Postback required", true, "No; localhost app remains fully supported"],
+  ];
+  const blocked = checks.some(([, ok]) => !ok);
+  setStatusPill("#setup-checklist-status", blocked ? "BLOCKED" : "READY", !blocked);
+  const html = checks.map(([label, ok, detail]) => `<div class="metric-row"><span>${escapeHtml(label)}</span><strong>${ok ? "YES" : "NO"}</strong><small>${escapeHtml(detail || "-")}</small></div>`).join("");
+  const node = $("#setup-checklist");
+  if (node && shouldRender("intraday:setup-checklist", html)) node.innerHTML = html;
 }
 
 function renderDataSource(data = {}) {
@@ -503,8 +586,9 @@ function renderFiiDiiStatus(upload) {
 }
 
 function renderWatch(rows) {
+  const visibleRows = (rows || []).slice(0, 50);
   $("#snapshot-count").textContent = `${rows.length} snapshots`;
-  $("#watch-body").innerHTML = rows.map((row) => {
+  const html = visibleRows.map((row) => {
     const change = row.close - row.open;
     const changeClass = change >= 0 ? "positive" : "negative";
     const entryGate = entryGateText(row);
@@ -532,6 +616,8 @@ function renderWatch(rows) {
       <td>${row.selected_side}</td>
     </tr>`;
   }).join("");
+  const body = $("#watch-body");
+  if (body && shouldRender("intraday:watch", html)) body.innerHTML = html;
 }
 
 function entryGateText(row) {
@@ -745,12 +831,17 @@ function renderActiveTrade(trade) {
 
 function renderOrders(rows) {
   const table = $("#order-history");
-  if (!rows.length) {
-    table.innerHTML = "<tr><td>No session orders yet.</td></tr>";
+  const visibleRows = (rows || []).slice(-50);
+  if (!visibleRows.length) {
+    const empty = "<tr><td>No session orders yet.</td></tr>";
+    if (table && shouldRender("intraday:orders", empty)) table.innerHTML = empty;
     return;
   }
-  table.innerHTML = `<thead><tr><th>Time</th><th>Role</th><th>Symbol</th><th>Txn</th><th>Type</th><th>Qty</th><th>Price</th><th>Trigger</th><th>Status</th><th>Message</th></tr></thead><tbody>${
-    rows.map((row) => `<tr>
+  const wrap = table.closest(".table-wrap");
+  const nearBottom = isNearBottom(wrap);
+  const scrollTop = wrap ? wrap.scrollTop : 0;
+  const html = `<thead><tr><th>Time</th><th>Role</th><th>Symbol</th><th>Txn</th><th>Type</th><th>Qty</th><th>Price</th><th>Trigger</th><th>Status</th><th>Message</th></tr></thead><tbody>${
+    visibleRows.map((row) => `<tr class="${orderRowClass(row)}">
       <td>${row.updated_at || row.created_at || ""}</td>
       <td>${row.role || ""}</td>
       <td>${row.symbol || ""}</td>
@@ -763,6 +854,18 @@ function renderOrders(rows) {
       <td>${row.status_message || ""}</td>
     </tr>`).join("")
   }</tbody>`;
+  if (table && shouldRender("intraday:orders", html)) {
+    table.innerHTML = html;
+    if (wrap) wrap.scrollTop = nearBottom ? wrap.scrollHeight : scrollTop;
+  }
+}
+
+function orderRowClass(row) {
+  const status = String(row.status || "").toUpperCase();
+  if (/REJECT|FAIL/.test(status)) return "row-danger";
+  if (/PARTIAL|OPEN|TRIGGER/.test(status)) return "row-warning";
+  if (/COMPLETE/.test(status)) return "row-success";
+  return "";
 }
 
 async function refreshAccounts() {
@@ -770,7 +873,12 @@ async function refreshAccounts() {
 }
 
 async function refreshIntradayStatus() {
-  renderStatus(await api("/api/intraday/status"));
+  try {
+    renderStatus(await api("/api/intraday/status"));
+  } catch (error) {
+    showIntradayStale(error.message);
+    throw error;
+  }
 }
 
 async function updatePaperBalance(reset = true) {
@@ -809,10 +917,30 @@ async function pollRunningEngine() {
       await refreshAccounts();
     }
   } catch (error) {
+    showIntradayStale(error.message);
     $("#journal-output").textContent = error.message;
   } finally {
     state.statusPollBusy = false;
   }
+}
+
+function showIntradayStale(message) {
+  const node = $("#intraday-ui-stale-warning");
+  if (!node) return;
+  const age = state.lastStatusOkAt ? `${Math.round((Date.now() - state.lastStatusOkAt) / 1000)}s ago` : "never";
+  node.textContent = `UI stale - ${message || "status refresh failed"}; last successful update ${age}.`;
+  node.classList.add("is-visible");
+}
+
+function bindCommand(selector, key, handler) {
+  const button = $(selector);
+  if (!button) return;
+  button.addEventListener("click", event => guardedCommand(key, button, () => handler(event)));
+}
+
+function commandId(prefix) {
+  const random = window.crypto?.randomUUID ? window.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${random}`;
 }
 
 async function init() {
@@ -853,7 +981,7 @@ async function init() {
     }
   });
 
-  $("#save-paper-balance").addEventListener("click", async () => {
+  bindCommand("#save-paper-balance", "save-paper-balance", async () => {
     try {
       await updatePaperBalance(false);
     } catch (error) {
@@ -862,7 +990,7 @@ async function init() {
     }
   });
 
-  $("#reset-paper-balance").addEventListener("click", async () => {
+  bindCommand("#reset-paper-balance", "reset-paper-balance", async () => {
     try {
       await updatePaperBalance(true);
     } catch (error) {
@@ -870,7 +998,7 @@ async function init() {
     }
   });
 
-  $("#start-session").addEventListener("click", async () => {
+  bindCommand("#start-session", "start-session", async () => {
     try {
       const data = await api("/api/intraday/start", { method: "POST", body: JSON.stringify(payloadFromForm()) });
       renderStatus(data);
@@ -881,7 +1009,7 @@ async function init() {
     }
   });
 
-  $("#run-backtest").addEventListener("click", async () => {
+  bindCommand("#run-backtest", "run-backtest", async () => {
     const button = $("#run-backtest");
     try {
       button.disabled = true;
@@ -907,7 +1035,7 @@ async function init() {
     }
   });
 
-  $("#evaluate").addEventListener("click", async () => {
+  bindCommand("#evaluate", "evaluate", async () => {
     try {
       renderStatus(await api("/api/intraday/evaluate", { method: "POST", body: JSON.stringify({ market_trend: "Bullish" }) }));
       startStatusPolling();
@@ -917,15 +1045,15 @@ async function init() {
     }
   });
 
-  $("#approve-entry").addEventListener("click", async () => {
+  bindCommand("#approve-entry", "approve-entry", async () => {
     try {
-      renderStatus(await api("/api/intraday/approve", { method: "POST", body: "{}" }));
+      renderStatus(await api("/api/intraday/approve", { method: "POST", body: JSON.stringify({ command_id: commandId("intraday-approve") }) }));
     } catch (error) {
       $("#journal-output").textContent = error.message;
     }
   });
 
-  $("#reject-entry").addEventListener("click", async () => {
+  bindCommand("#reject-entry", "reject-entry", async () => {
     try {
       renderStatus(await api("/api/intraday/reject", { method: "POST", body: JSON.stringify({ reason: "Rejected from terminal" }) }));
     } catch (error) {
@@ -933,7 +1061,7 @@ async function init() {
     }
   });
 
-  $("#process-orders").addEventListener("click", async () => {
+  bindCommand("#process-orders", "process-orders", async () => {
     try {
       renderStatus(await api("/api/intraday/process-orders", { method: "POST", body: JSON.stringify({}) }));
       await refreshAccounts();
@@ -942,7 +1070,7 @@ async function init() {
     }
   });
 
-  $("#force-timeout").addEventListener("click", async () => {
+  bindCommand("#force-timeout", "force-timeout", async () => {
     try {
       renderStatus(await api("/api/intraday/process-orders", { method: "POST", body: JSON.stringify({ force_entry_timeout: true }) }));
       await refreshAccounts();
@@ -951,12 +1079,18 @@ async function init() {
     }
   });
 
-  $("#kill-switch").addEventListener("click", async () => {
+  bindCommand("#kill-switch", "kill-switch", async () => {
     stopStatusPolling();
     renderStatus(await api("/api/intraday/kill-switch", { method: "POST", body: "{}" }));
   });
 
-  $("#stop-session").addEventListener("click", async () => {
+  bindCommand("#stop-session", "stop-session", async () => {
+    stopStatusPolling();
+    renderStatus(await api("/api/intraday/stop", { method: "POST", body: "{}" }));
+    await refreshAccounts();
+  });
+
+  bindCommand("#export-session-shortcut", "stop-session", async () => {
     stopStatusPolling();
     renderStatus(await api("/api/intraday/stop", { method: "POST", body: "{}" }));
     await refreshAccounts();

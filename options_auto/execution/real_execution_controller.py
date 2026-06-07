@@ -259,6 +259,7 @@ class RealExecutionController:
         positions: list[dict[str, Any]] | dict[str, Any] | None,
         settings: dict[str, Any],
         confirmed: bool = False,
+        adapter: Any | None = None,
     ) -> dict[str, Any]:
         settings = dict(settings or {})
         rows = self.reconciliation._normalise_positions(positions)
@@ -277,21 +278,56 @@ class RealExecutionController:
             exit_side = "SELL" if quantity > 0 else "BUY"
             actions.append({
                 "tradingsymbol": symbol,
+                "exchange": position.get("exchange") or "NFO",
+                "product": position.get("product") or "NRML",
                 "transaction_type": exit_side,
                 "quantity": abs(quantity),
                 "order_type": "LIMIT",
+                "ltp": position.get("last_price") or position.get("ltp") or position.get("average_price") or position.get("close"),
                 "reason": "Emergency position close plan; dry-run only by default.",
             })
 
-        if settings.get("allow_real_emergency_orders"):
-            blockers.append("Emergency order sending is not enabled in Options Auto yet; use broker terminal/manual supervision.")
+        allow_flatten = bool(settings.get("allow_real_emergency_flatten"))
+        orders_sent = 0
+        placed_orders: list[dict[str, Any]] = []
+        if allow_flatten and confirmed and not blockers:
+            if not adapter:
+                blockers.append("Emergency flatten adapter is unavailable; use broker terminal/manual supervision.")
+            for action in actions:
+                if blockers:
+                    break
+                if action.get("transaction_type") != "SELL":
+                    blockers.append("Emergency flatten supports long option SELL exits only.")
+                    break
+                ltp = _number(action.get("ltp"), 0)
+                max_slippage = max(0.0, _number(settings.get("emergency_flatten_max_slippage_points"), 2.0))
+                if ltp <= 0:
+                    if settings.get("emergency_flatten_market_allowed"):
+                        blockers.append("Emergency MARKET flatten is not implemented in this local adapter; use broker terminal/manual supervision.")
+                    else:
+                        blockers.append("Emergency flatten LTP is missing; aggressive LIMIT cannot be priced.")
+                    break
+                price = round_to_tick(max(0.05, ltp - max_slippage), _number(settings.get("tick_size"), 0.05))
+                response = adapter.place_emergency_sell_limit(
+                    tradingsymbol=action["tradingsymbol"],
+                    quantity=int(action["quantity"]),
+                    price=price,
+                    exchange=action.get("exchange") or "NFO",
+                    product=action.get("product") or "NRML",
+                    tag="OPTIONS_AUTO_EMERGENCY",
+                )
+                orders_sent += 1 if response.get("ok") else 0
+                placed_orders.append({**action, "price": price, "response": response})
+                if not response.get("ok"):
+                    blockers.append(response.get("error") or "Emergency flatten order failed.")
         result = {
-            "allowed": False,
-            "state": "EMERGENCY_PLAN_DRY_RUN",
+            "allowed": bool(allow_flatten and confirmed and orders_sent and not blockers),
+            "state": "EMERGENCY_FLATTEN_SUBMITTED" if orders_sent and not blockers else "EMERGENCY_PLAN_DRY_RUN" if not allow_flatten else "MANUAL_RECONCILIATION_REQUIRED",
             "blockers": blockers,
             "actions": actions,
-            "dry_run": True,
-            "orders_sent": 0,
+            "placed_orders": placed_orders,
+            "dry_run": not allow_flatten,
+            "orders_sent": orders_sent,
             "timestamp": iso_now(),
         }
         self.state.emergency_history.append(result)

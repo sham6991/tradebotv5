@@ -29,6 +29,36 @@ class WebAppFeedInputTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Call token must be a numeric"):
             app.token_map_from_payload(payload)
 
+    def test_status_summary_payload_contains_command_center_keys(self):
+        app = WebTradeBotApp()
+
+        summary = app.status_summary_payload()
+
+        for key in (
+            "app_mode",
+            "host_mode",
+            "broker_update_mode",
+            "postback_required",
+            "postback_enabled",
+            "public_callback_required",
+            "market_status",
+            "paper_connected",
+            "real_connected",
+            "feed_health",
+            "current_mode",
+            "real_money_state",
+            "kill_switch",
+            "today_pnl",
+            "active_orders_count",
+        ):
+            self.assertIn(key, summary)
+        self.assertEqual(summary["app_mode"], "LOCAL")
+        self.assertEqual(summary["host_mode"], "LOCALHOST")
+        self.assertEqual(summary["broker_update_mode"], "POLLING_AND_RECONCILIATION")
+        self.assertFalse(summary["postback_required"])
+        self.assertFalse(summary["postback_enabled"])
+        self.assertFalse(summary["public_callback_required"])
+
 
 if __name__ == "__main__":
     unittest.main()

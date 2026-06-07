@@ -469,3 +469,67 @@ th {
   .metrics-strip { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
   .symbols-grid { grid-template-columns: 1fr; }
 }
+
+body.app-shell {
+  background: var(--bg-main);
+  color: var(--text-primary);
+}
+
+body.app-shell .topbar,
+body.app-shell .flow-panel,
+body.app-shell .watch-panel,
+body.app-shell .best-panel,
+body.app-shell .margin-panel,
+body.app-shell .active-panel,
+body.app-shell .orders-panel,
+body.app-shell .journal-panel,
+body.app-shell .news-panel,
+body.app-shell .connection-card,
+body.app-shell .backtest-report-panel,
+body.app-shell .data-source-card {
+  background: var(--bg-panel);
+  border-color: var(--border-subtle);
+  color: var(--text-primary);
+}
+
+body.app-shell input,
+body.app-shell select,
+body.app-shell textarea {
+  background: #0f1722;
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+body.app-shell table {
+  color: var(--text-primary);
+}
+
+body.app-shell th {
+  background: #0f1722;
+  color: #cbd5e1;
+}
+
+.setup-checklist-card {
+  margin: 14px 0;
+}
+
+.setup-checklist-card .metric-row small {
+  color: var(--text-muted);
+}
+
+.row-danger td {
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.row-warning td {
+  background: rgba(246, 183, 60, 0.10);
+}
+
+.row-success td {
+  background: rgba(20, 184, 122, 0.08);
+}
+
+.danger-zone p {
+  margin: 0 0 12px;
+  color: var(--text-muted);
+}

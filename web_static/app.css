@@ -908,3 +908,123 @@ dialog h2 {
     min-width: 620px;
   }
 }
+
+/* Professional command-center overlay */
+body.app-shell {
+  color-scheme: dark;
+  --ink: var(--text-primary);
+  --muted: var(--text-muted);
+  --line: var(--border-subtle);
+  --panel: var(--bg-panel);
+  --paper: var(--bg-main);
+  --blue: var(--info);
+  --green: var(--success);
+  --red: var(--danger);
+  --amber: var(--warning);
+  --soft-blue: rgba(74, 163, 255, 0.12);
+  --soft-green: rgba(20, 184, 122, 0.12);
+  background: var(--bg-main);
+  color: var(--text-primary);
+}
+
+body.app-shell button {
+  background: var(--bg-panel-soft);
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+body.app-shell button.primary,
+body.app-shell .primary-link {
+  background: var(--info);
+  color: #06111d;
+  border-color: rgba(74, 163, 255, 0.65);
+}
+
+body.app-shell button.danger {
+  background: var(--danger);
+  color: white;
+  border-color: rgba(239, 68, 68, 0.7);
+}
+
+body.app-shell input,
+body.app-shell select,
+body.app-shell textarea {
+  background: #0f1722;
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+body.app-shell .sidebar {
+  background: #080d14;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.nav-group {
+  margin: 14px 8px 2px;
+  color: #718198;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+body.app-shell .topbar,
+body.app-shell .panel,
+body.app-shell .metrics article,
+body.app-shell .account-strip > div,
+body.app-shell .connection-grid > div,
+body.app-shell .account-grid > div {
+  background: var(--bg-panel);
+  border-color: var(--border-subtle);
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+}
+
+body.app-shell .account-strip span,
+body.app-shell .account-grid span,
+body.app-shell .live-account-card span {
+  color: #9fb1c7;
+}
+
+body.app-shell .account-strip strong,
+body.app-shell .account-grid strong,
+body.app-shell .live-account-card strong {
+  color: var(--text-primary);
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.command-center-bar {
+  margin-bottom: 14px;
+}
+
+.command-center-grid {
+  margin-bottom: 14px;
+}
+
+.command-center-grid .metric-card,
+.command-center-grid .risk-card {
+  min-height: 180px;
+}
+
+body.app-shell table {
+  color: var(--text-primary);
+}
+
+body.app-shell th {
+  background: #0f1722;
+  color: #cbd5e1;
+}
+
+body.app-shell td {
+  border-color: var(--border-subtle);
+}
+
+.debug-panel summary {
+  cursor: pointer;
+  font-weight: 900;
+  color: var(--text-primary);
+}
+
+.debug-panel pre {
+  margin-top: 10px;
+}

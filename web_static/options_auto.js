@@ -14,9 +14,43 @@ const state = {
   activeTab: "dashboard",
   dataSource: "UNKNOWN",
   fiiDiiStatus: {},
+  refreshBusy: false,
+  lastRefreshOkAt: 0,
 };
 
 let refreshTimer = null;
+const uiCache = {};
+const pendingCommands = new Set();
+
+function stableStringify(value) {
+  try { return JSON.stringify(value ?? null); }
+  catch { return String(value); }
+}
+
+function shouldRender(key, value) {
+  const next = stableStringify(value);
+  if (uiCache[key] === next) return false;
+  uiCache[key] = next;
+  return true;
+}
+
+async function guardedCommand(key, button, fn) {
+  if (pendingCommands.has(key)) return null;
+  pendingCommands.add(key);
+  if (button) {
+    button.disabled = true;
+    button.dataset.pending = "true";
+  }
+  try {
+    return await fn();
+  } finally {
+    pendingCommands.delete(key);
+    if (button) {
+      button.disabled = false;
+      button.dataset.pending = "false";
+    }
+  }
+}
 
 // api helper
 async function api(path, payload) {
@@ -96,12 +130,13 @@ function escapeHtml(input) {
 
 function setText(id, content) {
   const node = $(id);
-  if (node) node.textContent = text(content);
+  if (node && node.textContent !== text(content)) node.textContent = text(content);
 }
 
 function setHtml(id, html) {
   const node = $(id);
-  if (node) node.innerHTML = html;
+  if (!node || !shouldRender(`html:${id}`, html)) return;
+  node.innerHTML = html;
 }
 
 function badgeClass(kind) {
@@ -335,22 +370,28 @@ function initTabs() {
 
 // status rendering
 function renderTopStatus() {
+  const status = state.status || {};
   const result = state.lastResult || {};
-  const settings = result.settings || state.status.settings || state.defaults.settings || {};
-  const mode = text(result.mode || settings.mode || "PAPER");
-  const account = result.account_status || state.status.account_status || {};
+  const settings = status.settings || result.settings || state.defaults.settings || {};
+  const mode = text(settings.mode || status.mode || result.mode || "PAPER");
+  const account = status.account_status || result.account_status || {};
   const isReal = mode === "REAL";
   const connected = isReal ? Boolean(account.real?.connected) : Boolean(account.paper?.connected);
-  const activeTrades = activeTradesFrom(result);
+  const activeTrades = activeTradesFrom(status);
   const protectedOk = !activeTrades.length || activeTrades.every(trade => trade.position_protected);
   const ocoOk = !activeTrades.length || activeTrades.every(trade => trade.oco_active);
-  const dataAllowed = result.data_quality?.allowed;
-  const resultDemo = Boolean(result.demo_data || result.data_quality?.blockers?.some(item => String(item).includes("demo/sample")));
-  const dataSource = result.data_source || state.dataSource || "UNKNOWN";
+  const lifecycle = status.real_order_lifecycle || result.real_order_lifecycle || {};
+  const protectedState = String(lifecycle.protected_state || (protectedOk ? "PROTECTED" : "INACTIVE")).toUpperCase();
+  const protectionFailed = /FAILED|UNPROTECTED|RECONCILIATION/.test(protectedState) || lifecycle.state === "UNPROTECTED_POSITION";
+  const protectionActive = /PROTECTIVE_EXIT_ACTIVE|PROTECTED/.test(protectedState) || protectedOk;
+  const dataQuality = status.data_quality || result.data_quality || {};
+  const dataAllowed = dataQuality.allowed;
+  const resultDemo = Boolean(status.demo_data || result.demo_data || dataQuality.blockers?.some(item => String(item).includes("demo/sample")));
+  const dataSource = status.data_source || result.data_source || state.dataSource || "UNKNOWN";
   const dataLabel = resultDemo ? "Demo" : dataAllowed ? "Fresh" : dataSource === "LIVE" ? "Stale" : "Waiting";
-  const governor = result.governor || {};
+  const governor = status.governor || result.governor || {};
   const governorLabel = governor.allowed === true ? "Allow" : governor.state ? "Blocked" : "Waiting";
-  const engine = result.session?.status || state.status.session?.status || "Idle";
+  const engine = status.session?.status || result.session?.status || "Idle";
   const pnl = realizedPnl();
 
   setBadge("#oa-mode", mode, isReal ? "red" : mode === "PAPER" ? "green" : "blue");
@@ -360,12 +401,15 @@ function renderTopStatus() {
   setBadge("#oa-governor", governorLabel, governor.allowed === true ? "green" : governor.state ? "yellow" : "grey");
   setBadge("#oa-engine", engine, /RUNNING|ACTIVE|READY/.test(String(engine)) ? "green" : /LOCK|ERROR|MANUAL/.test(String(engine)) ? "red" : "grey");
   setBadge("#oa-position", activeTrades.length ? (protectedOk ? "Protected" : "Unprotected") : "No Position", activeTrades.length ? (protectedOk ? "green" : "red") : "grey");
+  setBadge("#oa-protection", protectionFailed ? "Failed" : protectionActive ? "Protected" : "Inactive", protectionFailed ? "red" : protectionActive ? "green" : "grey");
   setBadge("#oa-oco", activeTrades.length ? (ocoOk ? "Active" : "Inactive") : "Inactive", activeTrades.length ? (ocoOk ? "green" : "red") : "grey");
+  setBadge("#oa-kill-state", status.real_safety?.safe_mode || status.session?.status === "KILL_SWITCH_ACTIVE" ? "ON" : "OFF", status.real_safety?.safe_mode ? "red" : "green");
   setBadge("#oa-daily-pnl", money(pnl), pnl > 0 ? "green" : pnl < 0 ? "red" : "grey");
 }
 
 function renderAll() {
   renderTopStatus();
+  renderCockpitSafety();
   renderDashboard();
   renderIndustryDiagnostics();
   renderIndexTickStreams();
@@ -376,6 +420,139 @@ function renderAll() {
   renderPaperAccount();
   renderReports();
   renderDeveloperRawJson();
+}
+
+function renderCockpitSafety(result = state.status || state.lastResult) {
+  result = result || {};
+  const status = state.status || {};
+  const mode = String(status.settings?.mode || result.mode || settingsPayload().mode || "PAPER").toUpperCase();
+  const account = status.account_status || result.account_status || {};
+  const isReal = mode === "REAL";
+  const connected = isReal ? Boolean(account.real?.connected) : Boolean(account.paper?.connected);
+  const lifecycle = result.real_order_lifecycle || status.real_order_lifecycle || {};
+  const lifecycleState = String(lifecycle.state || "IDLE").toUpperCase();
+  const protectedState = String(lifecycle.protected_state || "FLAT").toUpperCase();
+  const lock = contractLockFromState();
+  const feed = status.options_live_feed || {};
+  const feedHealth = feed.health || {};
+  const dataHealthy = !feedHealth.stale && !status.live_scan?.blocked;
+  const governor = result.governor || {};
+  const blockers = [];
+  if (!connected) blockers.push(`${isReal ? "Real" : "Paper"} Kite not connected`);
+  if (isReal && !account.real?.connected) blockers.push("Real money is locked");
+  if (!dataHealthy) blockers.push("Feed is waiting or stale");
+  if (!(lock.ce && lock.pe)) blockers.push("CE/PE contracts are not locked");
+  if (governor.allowed === false) blockers.push(...(governor.blockers || ["Governor is blocking"]));
+  if (/UNPROTECTED|FAILED|RECONCILIATION/.test(`${lifecycleState} ${protectedState}`)) blockers.push("Position protection requires manual attention");
+  const canTrade = blockers.length === 0 && (mode !== "REAL" || account.real?.connected);
+  setBadge("#oa-can-trade-badge", canTrade ? "YES" : "NO", canTrade ? "green" : "red");
+  setHtml("#oa-can-trade-body", [
+    checklistRow("Kite connected", connected, connected ? "Connected" : "Connect in Main App"),
+    checklistRow("Access token valid", connected, connected ? "Token available" : "Login required"),
+    checklistRow("Feed fresh", dataHealthy, dataHealthy ? "Fresh" : "Waiting/stale"),
+    checklistRow("Contract locked", Boolean(lock.ce && lock.pe), lock.ce && lock.pe ? "CE and PE locked" : "Start engine to lock contracts"),
+    checklistRow("Governor ready", governor.allowed !== false, (governor.blockers || [])[0] || "No blocker"),
+    checklistRow("No unsafe open position", !/UNPROTECTED|FAILED|RECONCILIATION/.test(`${lifecycleState} ${protectedState}`), protectedState),
+    checklistRow("Real money armed", mode !== "REAL" || account.real?.connected, mode === "REAL" ? "Real connection required" : "Paper/shadow/backtest"),
+  ].join(""));
+  renderDangerBanner(lifecycle, blockers, lock);
+  renderLifecycleTimeline(lifecycle);
+  renderContractCards(lock);
+  renderRealWorkflow(canTrade, blockers);
+}
+
+function renderDangerBanner(lifecycle = {}, blockers = [], lock = {}) {
+  const stateText = String(lifecycle.state || "").toUpperCase();
+  const protectedState = String(lifecycle.protected_state || "").toUpperCase();
+  const danger = /UNPROTECTED|FAILED|RECONCILIATION|KILL_SWITCH|REJECTED|PARTIAL_FILL_UNRESOLVED|BROKER_STATE_UNKNOWN/.test(`${stateText} ${protectedState}`);
+  const node = $("#oa-danger-banner");
+  if (!node) return;
+  node.hidden = !danger;
+  if (!danger) return;
+  const fill = lifecycle.fill || {};
+  node.innerHTML = [
+    `<strong>DANGER: POSITION PROTECTION REQUIRES ATTENTION</strong>`,
+    `<div>State: ${escapeHtml(stateText || "-")} | Protected State: ${escapeHtml(protectedState || "-")}</div>`,
+    `<div>Instrument: ${escapeHtml(lifecycle.entry_order?.tradingsymbol || lock.ce?.tradingsymbol || lock.pe?.tradingsymbol || "-")}</div>`,
+    `<div>Qty: ${escapeHtml(fill.filled_quantity || lifecycle.entry_order?.quantity || "-")} | Avg: ${escapeHtml(fill.average_price || "-")}</div>`,
+    `<div>Manual action: Open Kite orderbook and verify position, target, and stoploss immediately.</div>`,
+    `<div>Blocker: ${escapeHtml((lifecycle.blockers || blockers || [])[0] || "-")}</div>`,
+  ].join("");
+}
+
+function renderLifecycleTimeline(lifecycle = {}) {
+  const stateText = String(lifecycle.state || "IDLE").toUpperCase();
+  const protectedState = String(lifecycle.protected_state || "FLAT").toUpperCase();
+  setBadge("#oa-lifecycle-stage", protectedState || stateText, /FAILED|UNPROTECTED|RECONCILIATION/.test(`${stateText} ${protectedState}`) ? "red" : /ACTIVE|OCO|FLAT/.test(`${stateText} ${protectedState}`) ? "green" : "yellow");
+  const steps = [
+    ["Waiting for signal", !state.lastResult.allowed],
+    ["Signal accepted", Boolean(state.lastResult.allowed)],
+    ["Entry submitted", /ENTRY|PROTECTION|OCO|TARGET|SL|EXIT|UNPROTECTED/.test(stateText)],
+    ["Entry open", /ENTRY_ORDER_OPEN/.test(stateText)],
+    ["Entry partial", /ENTRY_PARTIAL/.test(stateText)],
+    ["Entry filled", /ENTRY_COMPLETE|PROTECTION|OCO|TARGET|SL|EXIT|UNPROTECTED/.test(stateText)],
+    ["Protective exit placing", protectedState === "PROTECTIVE_EXIT_PLACING"],
+    ["Protective exit active", protectedState === "PROTECTIVE_EXIT_ACTIVE" || stateText === "OCO_ACTIVE"],
+    ["Position protected", protectedState === "PROTECTIVE_EXIT_ACTIVE" || stateText === "OCO_ACTIVE"],
+    ["Exit filled", /TARGET_FILLED|SL_FILLED|EXIT_RECONCILED/.test(stateText)],
+    ["Flat", protectedState === "FLAT" || stateText === "EXIT_RECONCILED"],
+    ["Reconciled", Boolean(lifecycle.reconciliation)],
+  ];
+  setHtml("#oa-lifecycle-timeline", steps.map(([label, active]) => `<li class="${active ? "is-active" : ""}">${escapeHtml(label)}</li>`).join(""));
+}
+
+function renderContractCards(lock = {}) {
+  renderContractCard("#oa-ce-contract-card", lock.ce || {}, "CE");
+  renderContractCard("#oa-pe-contract-card", lock.pe || {}, "PE");
+}
+
+function renderContractCard(selector, contract, label) {
+  const node = $(selector);
+  if (!node) return;
+  const body = node.querySelector(".oa-summary-grid");
+  if (!body) return;
+  const rows = [
+    metric("Symbol", contract.tradingsymbol || `No ${label} locked`),
+    metric("Strike", contract.strike || "-"),
+    metric("Expiry", contract.expiry || "-"),
+    metric("LTP", contract.ltp || contract.premium || "-"),
+    metric("Bid", contract.bid || "-"),
+    metric("Ask", contract.ask || "-"),
+    metric("Spread", contract.spread_pct ?? "-"),
+    metric("Bid Qty", contract.bid_qty || "-"),
+    metric("Ask Qty", contract.ask_qty || "-"),
+    metric("Tick Age", contract.age_seconds !== undefined ? `${contract.age_seconds}s` : "-"),
+    metric("Volume", contract.volume || "-"),
+    metric("OI", contract.oi || "-"),
+    metric("Signal", contract.signal_state || contract.status || "-"),
+    metric("Blocker", contract.blocker || contract.hop_reason || "None"),
+  ].join("");
+  if (shouldRender(`contract:${selector}`, rows)) body.innerHTML = rows;
+}
+
+function renderRealWorkflow(canTrade, blockers = []) {
+  const account = state.status.account_status || {};
+  const connected = Boolean(account.real?.connected);
+  const lifecycle = state.status.real_order_lifecycle || {};
+  const lock = contractLockFromState();
+  const steps = [
+    ["Connect real Zerodha in main app", connected],
+    ["Verify access token", connected],
+    ["Load instruments", Boolean(lock.ce || lock.pe || state.status.instrument_cache)],
+    ["Confirm market open", true],
+    ["Check margin", Boolean(account.real_margin || account.real?.funds)],
+    ["Check feed freshness", !(state.status.options_live_feed?.health || {}).stale],
+    ["Check spread/depth", true],
+    ["Run real preflight", Boolean(state.lastResult.preflight || state.lastResult.evidence)],
+    ["Run real dry run", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
+    ["Arm real trading", connected && Boolean($("#oa-confirm-real")?.checked)],
+    ["Start real engine", state.status.live_scan?.running && state.status.live_scan?.mode === "REAL"],
+    ["Monitor lifecycle", Boolean(lifecycle.state)],
+    ["Stop new entries if needed", true],
+    ["Emergency flatten / kill switch only if needed", !/UNPROTECTED|FAILED/.test(`${lifecycle.state} ${lifecycle.protected_state}`)],
+  ];
+  setBadge("#oa-real-workflow-badge", canTrade ? "READY" : "BLOCKED", canTrade ? "green" : "yellow");
+  setHtml("#oa-real-workflow", steps.map(([label, done]) => `<li class="${done ? "is-active" : ""}">${escapeHtml(label)}${!done && blockers[0] ? `<small>${escapeHtml(blockers[0])}</small>` : ""}</li>`).join(""));
 }
 
 function activeTradesFrom(result) {
@@ -535,6 +712,9 @@ function renderIndustryDiagnostics() {
   setBadge("#oa-live-feed-badge", feedMode, feedStale ? "red" : feedMode === "WEBSOCKET_TICKS" ? "green" : feedMode === "QUOTE_SNAPSHOT_POLLING" ? "yellow" : "grey");
   setHtml("#oa-live-feed-panel", [
     metric("Data Mode", feedMode),
+    metric("Broker Updates", "Polling + reconciliation"),
+    metric("Postback Required", "NO"),
+    metric("Postback", "DISABLED"),
     metric("Websocket", feed.websocket_connected ? "CONNECTED" : "DISCONNECTED"),
     metric("Quote Fallback", feed.quote_polling_fallback ? "ENABLED" : "OFF"),
     metric("Index Tick", feedHealth.last_index_tick || "-"),
@@ -1496,17 +1676,41 @@ function renderPlanRows(plan) {
 
 function on(selector, event, handler) {
   const node = $(selector);
-  if (node) node.addEventListener(event, handler);
+  if (!node) return;
+  if (event === "click" && node.tagName === "BUTTON") {
+    node.addEventListener(event, eventObject => guardedCommand(selector, node, () => handler(eventObject)));
+    return;
+  }
+  node.addEventListener(event, handler);
 }
 
 // init
 async function refresh() {
-  const payload = await api("/api/options-auto/status");
-  state.status = payload;
-  if (payload.session?.last_decision && Object.keys(payload.session.last_decision).length) {
-    state.lastResult = hydrateStatusDecision(payload);
+  if (state.refreshBusy) return;
+  state.refreshBusy = true;
+  const staleWarning = $("#oa-ui-stale-warning");
+  try {
+    const payload = await api("/api/options-auto/status");
+    state.lastRefreshOkAt = Date.now();
+    staleWarning?.classList.remove("is-visible");
+    state.status = payload;
+    if (payload.session?.last_decision && Object.keys(payload.session.last_decision).length) {
+      state.lastResult = hydrateStatusDecision(payload);
+    }
+    renderAll();
+  } catch (error) {
+    if (staleWarning) {
+      staleWarning.textContent = `UI stale - ${error.message}`;
+      staleWarning.classList.add("is-visible");
+    }
+    throw error;
+  } finally {
+    state.refreshBusy = false;
+    if (staleWarning && state.lastRefreshOkAt && Date.now() - state.lastRefreshOkAt > 6000) {
+      staleWarning.textContent = `UI stale - last successful update ${Math.round((Date.now() - state.lastRefreshOkAt) / 1000)}s ago.`;
+      staleWarning.classList.add("is-visible");
+    }
   }
-  renderAll();
 }
 
 function hydrateStatusDecision(payload) {

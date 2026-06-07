@@ -60,6 +60,24 @@ class KiteOrderAdapter:
     def place_target_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
         return self.place_target_sell_limit(tradingsymbol, quantity, price, exchange, product, tag)
 
+    def place_emergency_sell_limit(self, tradingsymbol: str, quantity: int, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO_EMERGENCY") -> dict[str, Any]:
+        self.mode_guard.assert_real_order_allowed()
+        return self.api.call(
+            "place_emergency_sell_limit",
+            lambda: self.api.client.place_limit_order(
+                tradingsymbol=tradingsymbol,
+                transaction_type="SELL",
+                quantity=int(quantity),
+                price=float(price),
+                exchange=exchange,
+                product=product,
+                variety="regular",
+                validity="DAY",
+                tag=tag,
+            ),
+            priority="EMERGENCY",
+        )
+
     def place_stoploss_sell_sl_limit(self, tradingsymbol: str, quantity: int, trigger_price: float, price: float, exchange: str, product: str = "NRML", tag: str = "OPTIONS_AUTO") -> dict[str, Any]:
         self.mode_guard.assert_real_order_allowed()
         return self.api.call(

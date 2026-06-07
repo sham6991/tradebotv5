@@ -9,7 +9,61 @@ const state = {
   marketCueOverrides: [],
   lastStatus: null,
   redirectUrl: "",
+  refreshBusy: false,
+  lastRefreshOkAt: 0,
 };
+
+const uiCache = {};
+const pendingCommands = new Set();
+
+function stableStringify(value) {
+  try { return JSON.stringify(value ?? null); }
+  catch { return String(value); }
+}
+
+function shouldRender(key, value) {
+  const next = stableStringify(value);
+  if (uiCache[key] === next) return false;
+  uiCache[key] = next;
+  return true;
+}
+
+function setText(selector, value) {
+  const node = typeof selector === "string" ? $(selector) : selector;
+  if (!node) return;
+  const next = String(value ?? "");
+  if (node.textContent !== next) node.textContent = next;
+}
+
+function setPill(selector, label, tone = "muted") {
+  const node = typeof selector === "string" ? $(selector) : selector;
+  if (!node) return;
+  setText(node, label);
+  node.className = `status-pill status-${tone}`;
+}
+
+function isNearBottom(node, threshold = 40) {
+  if (!node) return true;
+  return node.scrollHeight - node.scrollTop - node.clientHeight < threshold;
+}
+
+async function guardedCommand(key, button, fn) {
+  if (pendingCommands.has(key)) return null;
+  pendingCommands.add(key);
+  if (button) {
+    button.disabled = true;
+    button.dataset.pending = "true";
+  }
+  try {
+    return await fn();
+  } finally {
+    pendingCommands.delete(key);
+    if (button) {
+      button.disabled = false;
+      button.dataset.pending = "false";
+    }
+  }
+}
 
 const titles = {
   dashboard: "Dashboard",
@@ -151,8 +205,9 @@ function text(value) {
 
 function renderTickTable(table, rows) {
   const wrap = table?.closest(".tick-scroll");
+  const nearBottom = isNearBottom(wrap);
   renderTable(table, (rows || []).slice(-80), ["time", "name", "token", "ltp", "volume"]);
-  if (wrap) wrap.scrollTop = wrap.scrollHeight;
+  if (wrap && nearBottom) wrap.scrollTop = wrap.scrollHeight;
 }
 
 const labelOverrides = {
@@ -359,9 +414,14 @@ function milliseconds(value) {
 function renderTable(target, rows, columns = null) {
   const table = typeof target === "string" ? $(target) : target;
   if (!table) return;
-  table.textContent = "";
   const normalized = Array.isArray(rows) ? rows : [];
+  const capped = normalized.slice(-tableLimit(table));
   const cols = columns || Array.from(new Set(normalized.flatMap(row => Object.keys(row || {}))));
+  if (!shouldRender(`table:${table.id || table.dataset.field || "anon"}`, { rows: capped, cols })) return;
+  const wrap = table.closest(".table-wrap");
+  const scrollTop = wrap ? wrap.scrollTop : 0;
+  const nearBottom = isNearBottom(wrap);
+  table.textContent = "";
   table.style.minWidth = `${Math.max(760, cols.length * 128)}px`;
   const thead = document.createElement("thead");
   const headRow = document.createElement("tr");
@@ -372,7 +432,7 @@ function renderTable(target, rows, columns = null) {
   });
   thead.appendChild(headRow);
   const tbody = document.createElement("tbody");
-  if (!normalized.length) {
+  if (!capped.length) {
     const row = document.createElement("tr");
     const td = document.createElement("td");
     td.colSpan = Math.max(cols.length, 1);
@@ -380,7 +440,7 @@ function renderTable(target, rows, columns = null) {
     row.appendChild(td);
     tbody.appendChild(row);
   } else {
-    normalized.forEach(item => {
+    capped.forEach(item => {
       const row = document.createElement("tr");
       cols.forEach(col => {
         const td = document.createElement("td");
@@ -391,6 +451,15 @@ function renderTable(target, rows, columns = null) {
     });
   }
   table.append(thead, tbody);
+  if (wrap) wrap.scrollTop = nearBottom ? wrap.scrollHeight : scrollTop;
+}
+
+function tableLimit(table) {
+  const key = String(table?.id || table?.dataset?.field || "").toLowerCase();
+  if (key.includes("tick")) return 80;
+  if (key.includes("order")) return 50;
+  if (key.includes("log") || key.includes("event")) return 100;
+  return 100;
 }
 
 function renderNetworkHealth(networkHealth) {
@@ -940,8 +1009,134 @@ async function loadMarketCueHistory() {
   $("#cue-history-table")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
+function renderCommandCenter(data = {}) {
+  const connections = data.connections || {};
+  const paperConnected = Boolean(connections.PAPER?.connected);
+  const realConnected = Boolean(connections.LIVE?.connected);
+  const feed = data.feed || {};
+  const session = data.session_summary || {};
+  const activeOrders = (data.active_orders || []).length;
+  const feedStatus = String(feed.feed_status || "stopped").toUpperCase();
+  const marketStatus = feed.market_open === true ? "OPEN" : feed.market_open === false ? "CLOSED" : "UNKNOWN";
+  const dataLag = feed.last_tick_age_ms ?? feed.data_lag_ms ?? feed.backlog ?? "-";
+  const killActive = Boolean(data.kill_switch || data.health?.kill_switch_active || data.recovery_status?.LIVE?.kill_switch_active);
+  const realState = realConnected ? "ARMED" : "LOCKED";
+  const pnl = Number(session.session_pnl || 0);
+  const feedTone = feedStatus.includes("RUN") || feedStatus.includes("HEALTH") ? "success" : feedStatus.includes("STALE") ? "warning" : "muted";
+  setPill("#cmd-market-status", `Market ${marketStatus}`, marketStatus === "OPEN" ? "success" : marketStatus === "CLOSED" ? "warning" : "muted");
+  setPill("#cmd-paper-connection", paperConnected ? "Paper Connected" : "Paper Not Connected", paperConnected ? "success" : "muted");
+  setPill("#cmd-real-connection", realConnected ? "Real Connected" : "Real Not Connected", realConnected ? "success" : "muted");
+  setPill("#cmd-feed-health", `Feed ${humanText(feed.feed_status || "Stopped")}`, feedTone);
+  setPill("#cmd-mode", data.current_mode || "PAPER", data.current_mode === "LIVE" ? "danger" : "info");
+  setPill("#cmd-real-state", `Real ${realState}`, realState === "ARMED" ? "warning" : "muted");
+  setPill("#cmd-kill-switch", killActive ? "Kill ON" : "Kill OFF", killActive ? "danger" : "success");
+  setPill("#cmd-data-lag", `Lag ${dataLag}`, feed.backlog > 0 ? "warning" : "muted");
+  setPill("#cmd-pnl", `PnL ${money(pnl)}`, pnl > 0 ? "success" : pnl < 0 ? "danger" : "muted");
+  setPill("#cmd-active-orders", `Orders ${activeOrders}`, activeOrders ? "warning" : "muted");
+
+  const readiness = [
+    ["Paper Kite connected", paperConnected],
+    ["Real Kite connected", realConnected],
+    ["Access token valid", paperConnected || realConnected],
+    ["Instruments loaded", Boolean(data.health?.instruments_loaded ?? true)],
+    ["Market open", marketStatus === "OPEN"],
+    ["Feed active", feedTone === "success"],
+    ["Real money locked/armed", realConnected ? "ARMED" : "LOCKED"],
+  ];
+  const blockers = readiness.filter(([, ok]) => ok === false).map(([label]) => label);
+  setText("#readiness-summary", blockers.length ? "NOT READY" : "READY");
+  renderMetricList("#readiness-list", readiness.map(([label, value]) => [label, value === true ? "YES" : value === false ? "NO" : value]));
+  renderMetricList("#risk-summary-list", [
+    ["Today P&L", money(pnl)],
+    ["Daily max loss", money(data.settings?.max_daily_loss ?? 0)],
+    ["Daily profit target", money(data.settings?.max_daily_profit ?? 0)],
+    ["Open exposure", money(data.health?.open_exposure ?? 0)],
+    ["Open positions", (data.trades || []).filter(trade => String(trade.status || "").toUpperCase() === "OPEN").length],
+    ["Kill switch", killActive ? "ON" : "OFF"],
+  ]);
+  renderMetricList("#data-health-list", [
+    ["Feed state", humanText(feed.feed_status || "Stopped")],
+    ["Ticks/sec", Math.round(feed.ticks_per_second || 0)],
+    ["Tick backlog", feed.backlog || 0],
+    ["NIFTY tick age", latestTickAge(data.ticks?.NIFTY)],
+    ["Quote fallback", feed.quote_fallback_active ? "YES" : "NO"],
+  ]);
+  renderMetricList("#execution-health-list", [
+    ["Active orders", activeOrders],
+    ["Recent rejected", countOrderStatus(data.order_history, "REJECTED")],
+    ["Partial fills", countPartialOrders(data.order_history)],
+    ["Last order", lastOrderStatus(data.order_history)],
+    ["Reconcile", data.recovery_status?.LIVE?.checked_at || "-"],
+    ["Source", "Polling + reconciliation"],
+  ]);
+  renderMetricList("#broker-update-list", [
+    ["Status source", "Polling + reconciliation"],
+    ["Postback", "Disabled"],
+    ["Local app safe", "Yes"],
+    ["External callback required", "No"],
+    ["Broker state", data.health?.broker_state || "OK"],
+    ["Manual reconciliation", data.health?.manual_reconciliation_required ? "YES" : "NO"],
+  ]);
+  renderMetricList("#app-health-list", [
+    ["Last exception", data.health?.last_exception || "-"],
+    ["API latency", milliseconds(data.network_health?.LIVE?.total_ms || data.network_health?.PAPER?.total_ms)],
+    ["Optimizer", optimizerRunning(data.optimizer_progress) ? "RUNNING" : "IDLE"],
+    ["Replay loaded", data.last_replay ? "YES" : "NO"],
+    ["Status time", new Date().toLocaleTimeString()],
+  ]);
+  const nextAction = blockers.length ? `Next safe action: ${blockers[0]}` : "Next safe action: Monitor dashboard";
+  setText("#command-next-action", nextAction);
+}
+
+function renderMetricList(selector, rows) {
+  const node = $(selector);
+  if (!node || !shouldRender(`metric-list:${selector}`, rows)) return;
+  node.innerHTML = rows.map(([label, value]) => `<div class="metric-row"><span>${escapeHtml(label)}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
+}
+
+function latestTickAge(rows = []) {
+  const last = rows?.[rows.length - 1];
+  if (!last?.time) return "-";
+  const parsed = Date.parse(String(last.time).replace(" ", "T"));
+  if (!Number.isFinite(parsed)) return "-";
+  return `${Math.max(0, Math.round((Date.now() - parsed) / 1000))}s`;
+}
+
+function countOrderStatus(rows = [], status) {
+  return (rows || []).filter(row => String(row.status || row["Order Status"] || "").toUpperCase().includes(status)).length;
+}
+
+function countPartialOrders(rows = []) {
+  return (rows || []).filter(row => Number(row.filled_quantity || row["Filled Quantity"] || 0) > 0 && Number(row.pending_quantity || row["Pending Quantity"] || 0) > 0).length;
+}
+
+function lastOrderStatus(rows = []) {
+  const row = (rows || [])[rows.length - 1] || {};
+  return row.status || row["Order Status"] || "-";
+}
+
+function optimizerRunning(progress = {}) {
+  return Object.values(progress || {}).some(item => item && !item.completed && item.started_at);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, char => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;",
+  }[char]));
+}
+
 async function refreshStatus() {
-  const data = await api("/api/status");
+  if (state.refreshBusy) return;
+  state.refreshBusy = true;
+  const staleWarning = $("#main-ui-stale-warning");
+  try {
+    const data = await api("/api/status");
+    state.lastRefreshOkAt = Date.now();
+    staleWarning?.classList.remove("is-visible");
   state.lastStatus = data;
   $("#status-line").textContent = data.status || "Ready";
   state.redirectUrl = data.urls.redirect || "";
@@ -963,6 +1158,7 @@ async function refreshStatus() {
   $("#dash-order-count").textContent = (data.active_orders?.length || 0) + (data.order_history?.length || 0);
   $("#paper-connection").textContent = connectionText(data.connections.PAPER);
   $("#live-connection").textContent = connectionText(data.connections.LIVE);
+  renderCommandCenter(data);
   renderNetworkHealth(data.network_health || {});
   renderRecoveryStatus(data.recovery_status || {});
   $("#latest-result").textContent = JSON.stringify(data.last_backtest || data.last_replay?.summary || {}, null, 2);
@@ -988,6 +1184,19 @@ async function refreshStatus() {
     });
     renderTable($("table[data-field='orders']", view), data.order_history || []);
   });
+  } catch (error) {
+    if (staleWarning) {
+      staleWarning.textContent = `UI stale - ${error.message}`;
+      staleWarning.classList.add("is-visible");
+    }
+    throw error;
+  } finally {
+    state.refreshBusy = false;
+    if (staleWarning && state.lastRefreshOkAt && Date.now() - state.lastRefreshOkAt > 6000) {
+      staleWarning.textContent = `UI stale - last successful update ${Math.round((Date.now() - state.lastRefreshOkAt) / 1000)}s ago.`;
+      staleWarning.classList.add("is-visible");
+    }
+  }
 }
 
 function connectionText(connection) {

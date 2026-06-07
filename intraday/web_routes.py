@@ -27,6 +27,8 @@ class IntradayWebRoutes:
             return handler.send_json(self.service.defaults())
         if path == "/api/intraday/status":
             return handler.send_json(self.service.status())
+        if path == "/api/intraday/ui-summary":
+            return handler.send_json(self.ui_summary())
         if path == "/api/intraday/account-status":
             return handler.send_json(self.account_status())
         return handler.send_json({"error": "Intraday route not found"}, status=404)
@@ -82,6 +84,39 @@ class IntradayWebRoutes:
                 "zerodha": live_connection,
                 "funds": self.app_state.account_margins.get("LIVE"),
             },
+        }
+
+    def ui_summary(self) -> dict:
+        status = self.service.status()
+        account = self.account_status()
+        settings = status.get("settings") or {}
+        active = status.get("active_trade") or {}
+        pnl = status.get("session_pnl") or {}
+        stocks = []
+        for row in list(status.get("snapshots") or [])[:50]:
+            stocks.append({
+                "symbol": row.get("symbol"),
+                "ltp": row.get("ltp"),
+                "trend": row.get("trend") or row.get("selected_side") or "WAIT",
+                "signal": row.get("signal") or row.get("decision") or row.get("entry_gate") or "NO TRADE",
+                "score": max(float(row.get("final_long_score") or 0), float(row.get("final_short_score") or 0)),
+                "risk": row.get("risk") or row.get("margin_validation_status") or "OK",
+                "position": "Active" if active.get("symbol") == row.get("symbol") else "Flat",
+                "blocker": ((row.get("reason") or {}).get("blockers") or [None])[0],
+            })
+        return {
+            "mode": str(settings.get("mode") or "PAPER").upper(),
+            "session": status.get("status") or "IDLE",
+            "paper_balance": (account.get("paper") or {}).get("funds", {}).get("available"),
+            "real_margin": (account.get("real") or {}).get("funds"),
+            "session_pnl": pnl.get("realized") or pnl.get("total") or 0,
+            "available_margin": status.get("available_margin") or status.get("capital"),
+            "used_margin": status.get("used_margin") or 0,
+            "active_trade": active.get("symbol") or "",
+            "lock_state": "LOCKED" if status.get("settings_locked") else "OPEN",
+            "kill_switch": bool((status.get("kill_switch_report") or {}).get("active")),
+            "last_scan": status.get("last_scan_at") or (status.get("engine") or {}).get("last_cycle") or "",
+            "stocks": stocks,
         }
 
     def _requested_app_mode(self, payload: dict | str | None) -> str:

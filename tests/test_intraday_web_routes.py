@@ -82,6 +82,16 @@ class IntradayWebRoutesTests(unittest.TestCase):
             self.assertIs(routes.service.manager.zerodha_client_provider("REAL"), app.zerodha_clients_by_mode["LIVE"])
             self.assertIs(routes.service.manager.zerodha_client_provider("LIVE"), app.zerodha_clients_by_mode["LIVE"])
 
+    def test_intraday_ui_summary_returns_stock_rows_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            routes = IntradayWebRoutes(DummyApp(), temp_dir)
+
+            result = routes.handle_get(type("Handler", (), {"send_json": lambda self, payload, status=200: payload})(), "/api/intraday/ui-summary", None)
+
+            self.assertIn("mode", result)
+            self.assertIn("stocks", result)
+            self.assertIsInstance(result["stocks"], list)
+
 
 if __name__ == "__main__":
     unittest.main()

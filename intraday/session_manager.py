@@ -112,6 +112,9 @@ class IntradaySessionManager:
             "warnings": [],
             "symbols": [],
         }
+        self.kill_requested = False
+        self._command_results: dict[str, dict[str, Any]] = {}
+        self._last_approve_command_key = ""
 
     def default_settings(self) -> dict[str, Any]:
         sample = IntradaySettings(
@@ -150,6 +153,9 @@ class IntradaySessionManager:
             account = self.paper_account.snapshot()
             settings.paper_starting_balance = float(account["available"])
         self.session_id = datetime.now().strftime("%Y%m%d_%H%M%S_") + uuid.uuid4().hex[:6]
+        self.kill_requested = False
+        self._command_results = {}
+        self._last_approve_command_key = ""
         self.settings = settings
         self.risk = RiskManager(settings)
         self.broker = self._build_broker(settings)
@@ -430,8 +436,21 @@ class IntradaySessionManager:
     def approve_entry(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         self._require_running()
         payload = payload or {}
+        command_key = self._command_key("approve", payload, self.pending_signal)
+        if command_key in self._command_results:
+            return {**self._command_results[command_key], "duplicate": True, "message": "Command already processed; returning original result."}
+        if not self.pending_signal and self._last_approve_command_key and self._last_approve_command_key in self._command_results:
+            return {**self._command_results[self._last_approve_command_key], "duplicate": True, "message": "Command already processed; returning original result."}
         if not self.pending_signal:
             raise ValueError("No pending intraday entry is waiting for approval.")
+        if self.kill_requested:
+            result = self.status_payload()
+            result["ok"] = False
+            result["duplicate"] = False
+            result["message"] = "Kill switch requested; approval is blocked."
+            self._command_results[command_key] = result
+            self._last_approve_command_key = command_key
+            return result
         signal = self.pending_signal
         signal.approved_by_user = True
         signal.final_decision = "APPROVED"
@@ -441,7 +460,13 @@ class IntradaySessionManager:
         self.pending_signal = None
         self.last_signal = signal
         self.database.save_signal(signal.to_dict())
-        return self.status_payload()
+        result = self.status_payload()
+        result["ok"] = True
+        result["duplicate"] = False
+        result["command_id"] = command_key
+        self._command_results[command_key] = result
+        self._last_approve_command_key = command_key
+        return result
 
     def reject_entry(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = payload or {}
@@ -487,6 +512,10 @@ class IntradaySessionManager:
             return
         quantity = signal.score_breakdown.get("user_quantity_override") or None
         quantity = int(quantity) if quantity not in ("", None) else None
+        if self.kill_requested:
+            signal.blockers = _dedupe_signal_blockers(list(signal.blockers) + ["Kill switch requested; entry is blocked immediately before broker send."])
+            signal.final_decision = "BLOCKED"
+            return
         result = self.lifecycle.submit_entry(signal, quantity) if self.lifecycle else {"ok": False, "message": "Order lifecycle unavailable."}
         signal.margin = result.get("margin") or {}
         if not result.get("ok"):
@@ -561,6 +590,7 @@ class IntradaySessionManager:
         return None
 
     def kill_switch(self) -> dict[str, Any]:
+        self.kill_requested = True
         if self.risk:
             self.risk.kill()
         report = self._real_emergency_kill_switch() if self.settings and self.settings.mode == MODE_REAL else {"attempted": False, "mode": getattr(self.settings, "mode", "")}
@@ -726,7 +756,24 @@ class IntradaySessionManager:
             "export_path": self.last_export_path,
             "fii_dii_upload": upload_status(self.uploaded_fii_dii),
             "kill_switch_report": dict(self.last_kill_switch_report),
+            "kill_switch_requested": bool(self.kill_requested),
+            "active_command_count": len(self._command_results),
         }
+
+    def _command_key(self, action: str, payload: dict[str, Any], signal: Signal | None = None) -> str:
+        explicit = str((payload or {}).get("command_id") or "").strip()
+        if explicit:
+            return explicit
+        if signal:
+            return ":".join([
+                "intraday",
+                action,
+                self.session_id or "no-session",
+                str(signal.exchange or "NSE").upper(),
+                str(signal.symbol or "").upper(),
+                str(getattr(signal, "created_at", "") or ""),
+            ])
+        return ":".join(["intraday", action, self.session_id or "no-session"])
 
     def paper_account_status(self) -> dict[str, Any]:
         return self.paper_account.snapshot()

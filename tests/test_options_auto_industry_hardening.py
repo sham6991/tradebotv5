@@ -16,6 +16,10 @@ from options_auto.execution.real_order_lifecycle import (
     PROTECTIVE_EXIT_ACTIVE,
     PROTECTIVE_EXIT_FAILED,
     PROTECTIVE_EXIT_PLACING,
+    FLAT_CONFIRMED,
+    MANUAL_RECONCILIATION_REQUIRED,
+    RECONCILIATION_REQUIRED,
+    EXIT_FILLED_CANCEL_NOT_VERIFIED,
     UNPROTECTED_POSITION,
     RealOrderLifecycleEngine,
 )
@@ -71,13 +75,16 @@ class FakeInstrumentClient:
 
 
 class FakeProtectionAdapter:
-    def __init__(self, fail_sl=False):
+    def __init__(self, fail_sl=False, fail_target=False):
         self.fail_sl = fail_sl
+        self.fail_target = fail_target
         self.target_orders = []
         self.stoploss_orders = []
         self.cancelled = []
+        self.call_order = []
 
     def place_target_sell_limit(self, tradingsymbol, quantity, price, exchange, product, tag):
+        self.call_order.append("target")
         self.target_orders.append({
             "tradingsymbol": tradingsymbol,
             "quantity": quantity,
@@ -86,9 +93,12 @@ class FakeProtectionAdapter:
             "product": product,
             "tag": tag,
         })
+        if self.fail_target:
+            return {"ok": False, "error": "target rejected"}
         return {"ok": True, "value": f"TARGET{len(self.target_orders)}"}
 
     def place_stoploss_sell_sl_limit(self, tradingsymbol, quantity, trigger_price, price, exchange, product, tag):
+        self.call_order.append("stoploss")
         self.stoploss_orders.append({
             "tradingsymbol": tradingsymbol,
             "quantity": quantity,
@@ -195,6 +205,7 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
         self.assertEqual(filled["fill"]["average_price"], 101.25)
         self.assertEqual(adapter.target_orders[0]["quantity"], 65)
         self.assertEqual(adapter.stoploss_orders[0]["quantity"], 65)
+        self.assertEqual(adapter.call_order, ["target", "stoploss"])
         self.assertGreater(adapter.target_orders[0]["price"], filled["fill"]["average_price"])
         self.assertLess(adapter.stoploss_orders[0]["trigger_price"], filled["fill"]["average_price"])
         verified = engine.verify_protection_orders([
@@ -268,6 +279,89 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
 
         self.assertEqual(snapshot["state"], UNPROTECTED_POSITION)
         self.assertEqual(snapshot["protected_state"], PROTECTIVE_EXIT_FAILED)
+        self.assertTrue(snapshot["safe_mode"])
+
+    def test_target_failure_with_stoploss_active_blocks_new_entries_without_false_oco(self):
+        controller = RealExecutionController()
+        engine = RealOrderLifecycleEngine(controller)
+        adapter = FakeProtectionAdapter(fail_target=True)
+        engine.submit_entry(entry_order(), trade_plan(), {})
+        filled = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "COMPLETE",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "average_price": 100.0,
+        }], adapter=adapter)
+
+        verified = engine.verify_protection_orders([
+            {**filled["stoploss_order"], "status": "TRIGGER PENDING"},
+        ])
+
+        self.assertEqual(adapter.call_order, ["target", "stoploss"])
+        self.assertEqual(verified["protected_state"], PROTECTIVE_EXIT_ACTIVE)
+        self.assertNotEqual(verified["state"], OCO_ACTIVE)
+        self.assertTrue(controller.state.stop_new_entries)
+        self.assertIn("Target missing, stoploss active", "; ".join(verified["warnings"]))
+
+    def test_orderbook_unavailable_after_protection_requires_reconciliation(self):
+        controller = RealExecutionController()
+        engine = RealOrderLifecycleEngine(controller)
+        engine.submit_entry(entry_order(), trade_plan(), {})
+        filled = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "COMPLETE",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "average_price": 100.0,
+        }], adapter=FakeProtectionAdapter())
+
+        snapshot = engine.verify_protection_orders(None)
+
+        self.assertEqual(filled["protected_state"], PROTECTIVE_EXIT_PLACING)
+        self.assertEqual(snapshot["protected_state"], RECONCILIATION_REQUIRED)
+        self.assertTrue(snapshot["safe_mode"])
+        self.assertTrue(controller.state.stop_new_entries)
+
+    def test_target_fill_requires_cancel_and_position_verification_before_flat_confirmed(self):
+        engine = RealOrderLifecycleEngine(RealExecutionController())
+        adapter = FakeProtectionAdapter()
+        engine.submit_entry(entry_order(), trade_plan(), {})
+        filled = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "COMPLETE",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "average_price": 100.0,
+        }], adapter=adapter)
+
+        verified = engine.monitor_oco([
+            {**filled["target_order"], "status": "COMPLETE"},
+            {**filled["stoploss_order"], "status": "CANCELLED"},
+        ], adapter=adapter, positions=[{"tradingsymbol": "NIFTY26JUN23500CE", "quantity": 0}])
+
+        self.assertEqual(adapter.cancelled, [filled["stoploss_order"]["order_id"]])
+        self.assertEqual(verified["protected_state"], FLAT_CONFIRMED)
+
+    def test_target_fill_cancel_not_verified_requires_manual_reconciliation(self):
+        engine = RealOrderLifecycleEngine(RealExecutionController())
+        adapter = FakeProtectionAdapter()
+        engine.submit_entry(entry_order(), trade_plan(), {})
+        filled = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "COMPLETE",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "average_price": 100.0,
+        }], adapter=adapter)
+
+        snapshot = engine.monitor_oco([
+            {**filled["target_order"], "status": "COMPLETE"},
+            {**filled["stoploss_order"], "status": "OPEN"},
+        ], adapter=adapter, positions=[{"tradingsymbol": "NIFTY26JUN23500CE", "quantity": 0}])
+
+        self.assertEqual(snapshot["state"], EXIT_FILLED_CANCEL_NOT_VERIFIED)
+        self.assertEqual(snapshot["protected_state"], MANUAL_RECONCILIATION_REQUIRED)
         self.assertTrue(snapshot["safe_mode"])
 
     def test_final_validation_rejects_stale_tick(self):

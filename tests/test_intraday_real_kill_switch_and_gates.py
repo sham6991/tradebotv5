@@ -2,6 +2,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 
+from intraday.models import Signal
 from intraday.session_manager import IntradaySessionManager
 
 
@@ -142,6 +143,24 @@ def market_data():
     return data
 
 
+def pending_signal(session_id="S1", symbol="INFY"):
+    return Signal(
+        session_id=session_id,
+        symbol=symbol,
+        exchange="NSE",
+        side="LONG",
+        setup_name="TEST_SETUP",
+        score=95,
+        score_breakdown={},
+        entry_price=100.0,
+        stoploss=98.0,
+        target=104.0,
+        risk_reward=2.0,
+        confidence=90,
+        explanation="test",
+    )
+
+
 class IntradayRealKillSwitchAndGateTests(unittest.TestCase):
     def test_real_kill_switch_cancels_orders_squares_off_and_verifies_flat(self):
         fake_client = FakeZerodhaClient()
@@ -184,6 +203,48 @@ class IntradayRealKillSwitchAndGateTests(unittest.TestCase):
             status = manager.evaluate({"market_data": market_data(), "market_trend": "Bullish"})
             self.assertIn("Spread", "; ".join(status["last_signal"]["blockers"]))
             self.assertFalse(status["last_signal"]["score_breakdown"]["hard_gates"]["trade_allowed"])
+
+    def test_duplicate_approve_command_id_returns_original_without_second_placement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = IntradaySessionManager(temp_dir)
+            upload_fii_dii(manager)
+            manager.start_session(payload())
+            calls = []
+            manager.pending_signal = pending_signal(manager.session_id)
+            manager._place_entry = lambda signal: calls.append(signal)
+
+            first = manager.approve_entry({"command_id": "approve-1"})
+            second = manager.approve_entry({"command_id": "approve-1"})
+
+            self.assertEqual(len(calls), 1)
+            self.assertFalse(first["duplicate"])
+            self.assertTrue(second["duplicate"])
+            self.assertEqual(second["message"], "Command already processed; returning original result.")
+
+    def test_kill_requested_blocks_pending_approval_before_entry_placement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = IntradaySessionManager(temp_dir)
+            upload_fii_dii(manager)
+            manager.start_session(payload())
+            calls = []
+            manager.pending_signal = pending_signal(manager.session_id)
+            manager._place_entry = lambda signal: calls.append(signal)
+            manager.kill_requested = True
+
+            result = manager.approve_entry({"command_id": "approve-after-kill"})
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(calls, [])
+            self.assertIn("Kill switch requested", result["message"])
+
+    def test_kill_switch_sets_priority_flag_before_real_work(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = IntradaySessionManager(temp_dir)
+
+            result = manager.kill_switch()
+
+            self.assertTrue(manager.kill_requested)
+            self.assertTrue(result["kill_switch_requested"])
 
 
 if __name__ == "__main__":

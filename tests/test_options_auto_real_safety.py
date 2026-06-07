@@ -54,6 +54,15 @@ class FakeFinalValidationEngine:
         return {"allowed": True, "blockers": [], "warnings": [], "entry_limit": 142.45, "reason": "ok"}
 
 
+class FakeEmergencyAdapter:
+    def __init__(self):
+        self.orders = []
+
+    def place_emergency_sell_limit(self, **kwargs):
+        self.orders.append(dict(kwargs))
+        return {"ok": True, "value": f"EMG{len(self.orders)}"}
+
+
 def auto_order(order_id, tradingsymbol="NIFTY26JUN22500CE", transaction_type="BUY", status="OPEN", order_type="LIMIT", quantity=50):
     return {
         "order_id": order_id,
@@ -182,6 +191,26 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertTrue(result["dry_run"])
         self.assertEqual(result["orders_sent"], 0)
         self.assertEqual(result["actions"][0]["transaction_type"], "SELL")
+
+    def test_emergency_flatten_enabled_places_filled_quantity_aggressive_limit_only(self):
+        controller = RealExecutionController()
+        guard = ModeGuard(mode="REAL", real_mode_confirmed=True, real_orders_enabled=True)
+        adapter = FakeEmergencyAdapter()
+
+        result = controller.emergency_exit_plan(
+            guard,
+            [{"tradingsymbol": "NIFTY26JUN22500CE", "exchange": "NFO", "product": "NRML", "quantity": 50, "last_price": 112.4}],
+            {"allow_real_emergency_flatten": True, "emergency_flatten_max_slippage_points": 2.0},
+            confirmed=True,
+            adapter=adapter,
+        )
+
+        self.assertTrue(result["allowed"], result["blockers"])
+        self.assertFalse(result["dry_run"])
+        self.assertEqual(result["orders_sent"], 1)
+        self.assertEqual(adapter.orders[0]["tradingsymbol"], "NIFTY26JUN22500CE")
+        self.assertEqual(adapter.orders[0]["quantity"], 50)
+        self.assertEqual(adapter.orders[0]["price"], 110.4)
 
     def test_stop_new_entries_blocks_otherwise_clean_preflight(self):
         controller = RealExecutionController()

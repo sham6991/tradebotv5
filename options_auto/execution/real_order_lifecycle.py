@@ -36,6 +36,11 @@ PROTECTIVE_EXIT_FAILED = "PROTECTIVE_EXIT_FAILED"
 RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
 FLATTENING = "FLATTENING"
 FLAT = "FLAT"
+FLAT_CONFIRMED = "FLAT_CONFIRMED"
+FLAT_UNVERIFIED = "FLAT_UNVERIFIED"
+BROKER_STATE_UNKNOWN = "BROKER_STATE_UNKNOWN"
+MANUAL_RECONCILIATION_REQUIRED = "MANUAL_RECONCILIATION_REQUIRED"
+EXIT_FILLED_CANCEL_NOT_VERIFIED = "EXIT_FILLED_CANCEL_NOT_VERIFIED"
 
 
 TERMINAL_ENTRY_STATES = {ENTRY_REJECTED, ENTRY_CANCELLED, ENTRY_TIMEOUT}
@@ -162,6 +167,10 @@ class RealOrderLifecycleEngine:
         self._event(PROTECTION_PENDING, quantity=self.fill.get("filled_quantity"), protected_state=self.protected_state)
 
         if adapter:
+            # IMPORTANT USER REQUIREMENT:
+            # Options Auto intentionally submits target before stoploss.
+            # Do not reorder without explicit user approval.
+            # Reliability hardening verifies broker state after this sequence.
             target_response = adapter.place_target_sell_limit(
                 target_request["tradingsymbol"],
                 int(target_request["quantity"]),
@@ -214,6 +223,14 @@ class RealOrderLifecycleEngine:
         return self.verify_protection_orders([self.target_order, self.stoploss_order])
 
     def verify_protection_orders(self, broker_orders: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        if broker_orders is None and (self.target_order.get("order_id") or self.stoploss_order.get("order_id")):
+            self.state = PROTECTION_PENDING
+            self.protected_state = RECONCILIATION_REQUIRED
+            self.safe_mode = True
+            self.controller.enter_safe_mode("OPTIONS_AUTO", "Broker orderbook unavailable; protection cannot be verified.")
+            self.blockers = list(dict.fromkeys(self.blockers + ["Broker orderbook unavailable; protection cannot be verified."]))
+            self._event(RECONCILIATION_REQUIRED, protected_state=self.protected_state)
+            return self.snapshot()
         target = self._find_order(broker_orders, self.target_order.get("order_id"))
         stop = self._find_order(broker_orders, self.stoploss_order.get("order_id"))
         if target:
@@ -229,6 +246,14 @@ class RealOrderLifecycleEngine:
             failed_roles.append("target")
         if stop_status in PROTECTIVE_FAILED_STATUSES:
             failed_roles.append("stoploss")
+        if target_status in PROTECTIVE_FAILED_STATUSES and stop_open and _int(self.fill.get("filled_quantity")) > 0:
+            self.state = PROTECTION_PENDING
+            self.protected_state = PROTECTIVE_EXIT_ACTIVE
+            self.safe_mode = True
+            self.controller.stop_new_entries("OPTIONS_AUTO", "Target missing, stoploss active; manual target reconciliation required.")
+            self.warnings = list(dict.fromkeys(self.warnings + ["Target missing, stoploss active. New entries are blocked until resolved."]))
+            self._event("TARGET_MISSING_STOPLOSS_ACTIVE", protected_state=self.protected_state)
+            return self.snapshot()
         if failed_roles and _int(self.fill.get("filled_quantity")) > 0 and self.protected_state != FLAT:
             return self.mark_unprotected(f"Protective {'/'.join(failed_roles)} order failed in broker orderbook.")
         if target_open and stop_open:
@@ -240,7 +265,7 @@ class RealOrderLifecycleEngine:
             self.protected_state = PROTECTIVE_EXIT_PLACING
         return self.snapshot()
 
-    def monitor_oco(self, broker_orders: list[dict[str, Any]] | None = None, adapter: Any | None = None) -> dict[str, Any]:
+    def monitor_oco(self, broker_orders: list[dict[str, Any]] | None = None, adapter: Any | None = None, positions: list[dict[str, Any]] | dict[str, Any] | None = None) -> dict[str, Any]:
         target = self._find_order(broker_orders, self.target_order.get("order_id"))
         stop = self._find_order(broker_orders, self.stoploss_order.get("order_id"))
         if target:
@@ -251,20 +276,53 @@ class RealOrderLifecycleEngine:
             self.state = TARGET_FILLED
             self.protected_state = FLATTENING
             self.cancel_opposite_exit(adapter, self.stoploss_order.get("order_id"))
+            return self.verify_exit_flatness(broker_orders, positions, opposite_order=self.stoploss_order)
         elif _status(self.stoploss_order) in {"COMPLETE", "FILLED"}:
             self.state = SL_FILLED
             self.protected_state = FLATTENING
             self.cancel_opposite_exit(adapter, self.target_order.get("order_id"))
+            return self.verify_exit_flatness(broker_orders, positions, opposite_order=self.target_order)
         return self.snapshot()
 
     def cancel_opposite_exit(self, adapter: Any | None, order_id: str | None) -> dict[str, Any]:
         if order_id and adapter:
             response = adapter.cancel_order(order_id)
             self._event("OCO_CANCEL_SUBMITTED", order_id=order_id, ok=response.get("ok"))
-        self.state = EXIT_RECONCILED
-        self.protected_state = FLAT
-        self.emergency_flatten_required = False
-        self._event(self.state)
+        return self.snapshot()
+
+    def verify_exit_flatness(
+        self,
+        broker_orders: list[dict[str, Any]] | None = None,
+        positions: list[dict[str, Any]] | dict[str, Any] | None = None,
+        opposite_order: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if broker_orders is None or positions is None:
+            self.protected_state = MANUAL_RECONCILIATION_REQUIRED
+            self.safe_mode = True
+            self.controller.enter_safe_mode("OPTIONS_AUTO", "Exit fill seen but broker orderbook/positions are unavailable for flat verification.")
+            self.blockers = list(dict.fromkeys(self.blockers + ["Exit fill seen but flat state is not broker-verified."]))
+            self._event(MANUAL_RECONCILIATION_REQUIRED, protected_state=self.protected_state)
+            return self.snapshot()
+        if opposite_order:
+            fresh = self._find_order(broker_orders, opposite_order.get("order_id"))
+            if fresh:
+                opposite_order.update(fresh)
+        opposite_status = _status(opposite_order or {})
+        cancel_verified = not (opposite_order or {}).get("order_id") or opposite_status in {"CANCELLED", "REJECTED", "COMPLETE", "FILLED"}
+        flat_verified = self._position_flat(positions)
+        if cancel_verified and flat_verified:
+            self.state = EXIT_RECONCILED
+            self.protected_state = FLAT_CONFIRMED
+            self.emergency_flatten_required = False
+            self.safe_mode = False
+            self._event(FLAT_CONFIRMED, protected_state=self.protected_state)
+            return self.snapshot()
+        self.state = EXIT_FILLED_CANCEL_NOT_VERIFIED
+        self.protected_state = MANUAL_RECONCILIATION_REQUIRED if not cancel_verified else FLAT_UNVERIFIED
+        self.safe_mode = True
+        self.controller.enter_safe_mode("OPTIONS_AUTO", "Exit filled but opposite OCO leg cancellation or flat position is not verified.")
+        self.blockers = list(dict.fromkeys(self.blockers + ["Exit filled but opposite OCO leg cancellation is not verified. Check Kite orderbook manually."]))
+        self._event(self.state, protected_state=self.protected_state, cancel_verified=cancel_verified, flat_verified=flat_verified)
         return self.snapshot()
 
     def reconcile_positions(self, broker_orders: list[dict[str, Any]] | None = None, positions: list[dict[str, Any]] | dict[str, Any] | None = None) -> dict[str, Any]:
@@ -333,6 +391,24 @@ class RealOrderLifecycleEngine:
             or _status(self.target_order) in {"PENDING", "SUBMITTED", *PROTECTIVE_ACTIVE_STATUSES}
             or _status(self.stoploss_order) in {"PENDING", "SUBMITTED", *PROTECTIVE_ACTIVE_STATUSES}
         )
+
+    def _position_flat(self, positions: list[dict[str, Any]] | dict[str, Any] | None) -> bool:
+        rows: list[dict[str, Any]] = []
+        if isinstance(positions, dict):
+            for key in ("net", "day", "positions"):
+                value = positions.get(key)
+                if isinstance(value, list):
+                    rows.extend([dict(item) for item in value if isinstance(item, dict)])
+        elif isinstance(positions, list):
+            rows = [dict(item) for item in positions if isinstance(item, dict)]
+        symbol = str(self.trade_plan.get("tradingsymbol") or self.entry_order.get("tradingsymbol") or "").upper()
+        for row in rows:
+            row_symbol = str(row.get("tradingsymbol") or row.get("symbol") or "").upper()
+            if symbol and row_symbol and row_symbol != symbol:
+                continue
+            if _int(row.get("quantity"), row.get("net_quantity") or 0) != 0:
+                return False
+        return True
 
     def _event(self, event: str, **extra: Any) -> None:
         self.history.append({"timestamp": iso_now(), "event": event, **extra})

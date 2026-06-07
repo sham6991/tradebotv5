@@ -33,13 +33,14 @@ body {
   top: 0;
   z-index: 10;
   display: grid;
-  grid-template-columns: minmax(220px, 0.55fr) minmax(620px, 1.4fr) minmax(170px, 0.28fr);
+  grid-template-columns: minmax(230px, 0.34fr) minmax(0, 1fr) minmax(172px, auto);
   gap: 14px;
   align-items: center;
   padding: 14px 18px;
-  background: rgba(250, 252, 254, 0.98);
-  border-bottom: 1px solid var(--oa-line);
-  box-shadow: 0 8px 22px rgba(26, 39, 52, 0.06);
+  background: #0f1722;
+  color: #eef4fb;
+  border-bottom: 1px solid #243244;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.24);
 }
 
 .oa-brand {
@@ -58,16 +59,17 @@ body {
 
 .oa-brand h1 {
   font-size: 1.3rem;
+  color: #f8fbff;
 }
 
 .oa-brand p {
   margin: 2px 0 0;
-  color: var(--oa-muted);
+  color: #a9bad0;
   font-size: 0.82rem;
 }
 
 .oa-back {
-  color: var(--oa-blue);
+  color: #7cc5ff;
   font-size: 0.82rem;
   font-weight: 800;
   text-decoration: none;
@@ -76,16 +78,19 @@ body {
 
 .oa-status-grid {
   display: grid;
-  grid-template-columns: repeat(9, minmax(94px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
   gap: 8px;
+  min-width: 0;
 }
 
 .oa-status-grid div {
-  min-height: 54px;
+  min-width: 0;
+  min-height: 56px;
   padding: 8px;
-  background: var(--oa-surface-soft);
-  border: 1px solid var(--oa-line-soft);
+  background: #121d2a;
+  border: 1px solid #26364a;
   border-radius: 6px;
+  overflow: hidden;
 }
 
 .oa-status-grid span,
@@ -99,6 +104,10 @@ body {
   text-transform: uppercase;
 }
 
+.oa-topbar .oa-status-grid span {
+  color: #a9bad0;
+}
+
 .oa-status-grid strong,
 .oa-metric-grid strong,
 .oa-summary-grid strong {
@@ -108,6 +117,7 @@ body {
 .oa-emergency-strip {
   display: grid;
   gap: 8px;
+  align-self: stretch;
 }
 
 .oa-tabs-nav {
@@ -176,10 +186,12 @@ body {
 .oa-card {
   min-width: 0;
   background: var(--oa-surface);
+  color: var(--oa-ink);
   border: 1px solid var(--oa-line);
   border-radius: 8px;
   padding: 14px;
   box-shadow: var(--oa-shadow);
+  overflow: hidden;
 }
 
 .oa-card-head {
@@ -192,10 +204,16 @@ body {
 
 .oa-card h2 {
   font-size: 1rem;
+  color: var(--oa-ink);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .oa-card h3 {
   font-size: 0.9rem;
+  color: var(--oa-ink);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
 .oa-card-grid,
@@ -240,7 +258,10 @@ body {
   font-size: 0.72rem;
   font-weight: 900;
   text-transform: uppercase;
-  white-space: nowrap;
+  white-space: normal;
+  text-align: center;
+  line-height: 1.15;
+  overflow-wrap: anywhere;
 }
 
 .oa-badge-green {
@@ -369,11 +390,29 @@ body {
 
 .oa-metric-grid div,
 .oa-summary-grid div {
+  min-width: 0;
   min-height: 58px;
   padding: 10px;
   background: var(--oa-surface-soft);
   border: 1px solid var(--oa-line-soft);
   border-radius: 6px;
+  overflow: hidden;
+}
+
+.oa-metric-grid strong,
+.oa-summary-grid strong,
+.oa-plan-row strong,
+.oa-index-tick-latest strong,
+.oa-index-tick-row strong {
+  color: var(--oa-ink);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.oa-card p,
+.oa-card li,
+.oa-card small {
+  overflow-wrap: anywhere;
 }
 
 .oa-index-tick-panel {
@@ -473,6 +512,7 @@ body {
   gap: 10px;
   padding: 8px 0;
   border-bottom: 1px solid var(--oa-line-soft);
+  min-width: 0;
 }
 
 .oa-plan-row:last-child {
@@ -500,6 +540,7 @@ body {
 .oa-event-list li {
   margin-bottom: 7px;
   color: var(--oa-ink);
+  overflow-wrap: anywhere;
 }
 
 .oa-timeline {
@@ -710,4 +751,82 @@ body {
   .oa-plan-row {
     grid-template-columns: 1fr;
   }
+}
+
+.oa-command-grid,
+.oa-contract-cockpit {
+  margin-bottom: 16px;
+}
+
+.oa-danger-panel {
+  margin-bottom: 12px;
+}
+
+.oa-danger-panel[hidden] {
+  display: none;
+}
+
+.contract-card .oa-summary-grid {
+  margin-top: 12px;
+}
+
+.lifecycle-timeline small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+}
+
+body.app-shell .oa-topbar,
+body.app-shell .oa-tabs-nav,
+body.app-shell .oa-card,
+body.app-shell .oa-tab-panel {
+  border-color: var(--border-subtle);
+}
+
+body.app-shell .oa-card {
+  color: var(--oa-ink);
+}
+
+body.app-shell .oa-card h2,
+body.app-shell .oa-card h3,
+body.app-shell .oa-card strong,
+body.app-shell .oa-card summary {
+  color: var(--oa-ink);
+}
+
+body.app-shell .oa-card span,
+body.app-shell .oa-card label,
+body.app-shell .oa-card small {
+  color: var(--oa-muted);
+}
+
+body.app-shell .oa-card input,
+body.app-shell .oa-card select,
+body.app-shell .oa-card textarea {
+  background: #ffffff;
+  color: var(--oa-ink);
+  border-color: var(--oa-line);
+}
+
+body.app-shell .oa-card input[type="file"] {
+  background: #101820;
+  color: #ffffff;
+}
+
+body.app-shell .oa-card .oa-button {
+  background: #152235;
+  color: #ffffff;
+  border-color: #22344d;
+}
+
+body.app-shell .oa-card .oa-button-primary {
+  background: var(--oa-blue) !important;
+  color: #ffffff !important;
+  border-color: var(--oa-blue) !important;
+}
+
+body.app-shell .oa-card .oa-button-danger {
+  background: var(--oa-red) !important;
+  color: #ffffff !important;
+  border-color: var(--oa-red) !important;
 }

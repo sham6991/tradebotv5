@@ -39,6 +39,17 @@ class FakeOptionsAutoService:
         self.place_payload = None
         self.upload_payload = None
 
+    def status(self):
+        return {
+            "settings": {"mode": "REAL"},
+            "session": {"active_trades": []},
+            "options_live_feed": {"health": {"stale": False}},
+            "contract_lock": {"lock": {"ce": {"tradingsymbol": "NIFTY26JUN23500CE"}, "pe": {"tradingsymbol": "NIFTY26JUN23400PE"}}},
+            "real_order_lifecycle": {"state": "IDLE", "protected_state": "FLAT"},
+            "real_safety": {"safe_mode": False},
+            "paper_account": {},
+        }
+
     def place_real_order(self, payload):
         self.place_payload = dict(payload)
         return {"allowed": False, "real_order_sent": False, "order_stage": "BLOCKED", "blockers": ["test blocker"]}
@@ -100,6 +111,24 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
         self.assertEqual(result["status"], "UPLOADED")
         self.assertEqual(routes.service.upload_payload["file_name"], "flows.csv")
         self.assertIn("account_status", result)
+
+    def test_options_auto_ui_summary_blocks_real_when_locked(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=False), "results")
+        routes.service = FakeOptionsAutoService()
+
+        result = routes.handle_get(FakeHandler(), "/api/options-auto/ui-summary", None)
+
+        self.assertFalse(result["can_trade"])
+        self.assertIn("Real money locked", result["blockers"])
+        self.assertEqual(result["real_money_state"], "LOCKED")
+
+    def test_options_auto_lifecycle_route_is_read_only(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
+        routes.service = FakeOptionsAutoService()
+
+        result = routes.handle_get(FakeHandler(), "/api/options-auto/lifecycle", None)
+
+        self.assertEqual(result["state"], "IDLE")
 
 
 if __name__ == "__main__":

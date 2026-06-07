@@ -1777,7 +1777,7 @@ class OptionsAutoTerminalService:
         adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
         lifecycle = self.real_lifecycle.poll_entry_status(broker_orders, settings=self.settings, adapter=adapter)
         lifecycle = self.real_lifecycle.verify_protection_orders(broker_orders)
-        lifecycle = self.real_lifecycle.monitor_oco(broker_orders, adapter=adapter)
+        lifecycle = self.real_lifecycle.monitor_oco(broker_orders, adapter=adapter, positions=positions)
         if positions is not None:
             lifecycle = self.real_lifecycle.reconcile_positions(broker_orders, positions)
         if lifecycle.get("state") == UNPROTECTED_POSITION:
@@ -1858,7 +1858,8 @@ class OptionsAutoTerminalService:
         positions = payload.get("positions")
         if positions is None:
             positions = self._broker_positions(client, payload)
-        result = self.real_controller.emergency_exit_plan(self.mode_guard, positions, self.settings, confirmed=bool(payload.get("confirmed")))
+        adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
+        result = self.real_controller.emergency_exit_plan(self.mode_guard, positions, self.settings, confirmed=bool(payload.get("confirmed")), adapter=adapter)
         self.session.record_safety_event("Real emergency exit plan generated", {"actions": result["actions"], "blockers": result["blockers"]})
         result["session"] = self.session.to_dict()
         self.logger.log("WARN", "Options Auto real emergency plan generated", actions=len(result["actions"]))

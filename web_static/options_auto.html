@@ -4,11 +4,12 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Options Auto</title>
+    <link rel="stylesheet" href="/static/terminal_design.css">
     <link rel="stylesheet" href="/static/app.css">
     <link rel="stylesheet" href="/static/options_auto.css">
   </head>
-  <body>
-    <div class="oa-shell">
+  <body class="app-shell">
+    <div class="oa-shell app-shell">
       <header class="oa-topbar">
         <div class="oa-brand">
           <a class="oa-back" href="/">TradeBotV5</a>
@@ -25,7 +26,9 @@
           <div><span>Governor</span><strong id="oa-governor" class="oa-status-badge oa-badge-grey">Waiting</strong></div>
           <div><span>Engine</span><strong id="oa-engine" class="oa-status-badge oa-badge-grey">Idle</strong></div>
           <div><span>Position</span><strong id="oa-position" class="oa-status-badge oa-badge-grey">No Position</strong></div>
+          <div><span>Protection</span><strong id="oa-protection" class="oa-status-badge oa-badge-grey">Inactive</strong></div>
           <div><span>OCO</span><strong id="oa-oco" class="oa-status-badge oa-badge-grey">Inactive</strong></div>
+          <div><span>Kill Switch</span><strong id="oa-kill-state" class="oa-status-badge oa-badge-green">OFF</strong></div>
           <div><span>Daily P&amp;L</span><strong id="oa-daily-pnl" class="oa-status-badge oa-badge-grey">₹0</strong></div>
         </div>
         <div class="oa-emergency-strip">
@@ -49,7 +52,37 @@
 
       <main class="oa-main">
         <section id="oa-tab-dashboard" class="oa-tab-panel">
+          <div id="oa-danger-banner" class="risk-banner oa-danger-panel" hidden></div>
           <div id="oa-dashboard-alerts" class="oa-alert-stack"></div>
+          <div id="oa-ui-stale-warning" class="risk-banner ui-stale-warning">UI stale - waiting for Options Auto status.</div>
+
+          <div class="operator-grid oa-command-grid">
+            <article class="oa-card terminal-panel">
+              <div class="oa-card-head">
+                <h2>Can Options Auto Trade Now?</h2>
+                <span id="oa-can-trade-badge" class="oa-status-badge oa-badge-grey">WAITING</span>
+              </div>
+              <div id="oa-can-trade-body" class="oa-summary-grid"></div>
+            </article>
+            <article class="oa-card terminal-panel">
+              <div class="oa-card-head">
+                <h2>Lifecycle Timeline</h2>
+                <span id="oa-lifecycle-stage" class="oa-status-badge oa-badge-grey">WAITING</span>
+              </div>
+              <ol id="oa-lifecycle-timeline" class="lifecycle-timeline"></ol>
+            </article>
+          </div>
+
+          <div class="operator-grid oa-contract-cockpit">
+            <article id="oa-ce-contract-card" class="contract-card">
+              <h2 class="section-title">CE Contract</h2>
+              <div class="oa-summary-grid"></div>
+            </article>
+            <article id="oa-pe-contract-card" class="contract-card">
+              <h2 class="section-title">PE Contract</h2>
+              <div class="oa-summary-grid"></div>
+            </article>
+          </div>
 
           <div class="oa-card-grid oa-dashboard-cockpit">
             <div class="oa-card-grid">
@@ -355,6 +388,13 @@
             <strong id="oa-real-mode-title">Connect Real Money Zerodha in the main app to enable guarded Options Auto real trading.</strong>
             <p id="oa-real-mode-copy">Real orders are guarded by real login, preflight, final validation, execution safety, OCO, and reconciliation.</p>
           </div>
+          <article class="oa-card terminal-panel">
+            <div class="oa-card-head">
+              <h2>Real Trading Workflow</h2>
+              <span id="oa-real-workflow-badge" class="oa-status-badge oa-badge-grey">LOCKED</span>
+            </div>
+            <ol id="oa-real-workflow" class="lifecycle-timeline"></ol>
+          </article>
           <div id="oa-real-alert" class="oa-tab-alert"></div>
 
           <div class="oa-card-grid oa-real-grid">
@@ -387,7 +427,6 @@
               <h2>Preflight</h2>
               <div class="oa-button-row">
                 <button type="button" id="oa-real-preflight" class="oa-button oa-button-primary">Run Real Preflight</button>
-                <button type="button" id="oa-real-place" class="oa-button oa-button-danger">Start Real Engine</button>
                 <button type="button" id="oa-real-reconcile" class="oa-button">Run Reconciliation</button>
                 <button type="button" id="oa-real-dry" class="oa-button">Real Dry Run</button>
               </div>
@@ -395,6 +434,7 @@
             <article class="oa-card">
               <h2>Safety Controls</h2>
               <div class="oa-button-row">
+                <button type="button" id="oa-real-place" class="oa-button oa-button-danger">Start Real Engine</button>
                 <button type="button" id="oa-real-stop" class="oa-button">Stop New Entries</button>
                 <button type="button" id="oa-real-stop-engine" class="oa-button">Stop Engine</button>
                 <button type="button" id="oa-real-safe" class="oa-button">Safe Mode</button>

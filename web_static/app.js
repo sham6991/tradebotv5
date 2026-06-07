@@ -1454,7 +1454,23 @@ function bindForms() {
   });
 
   $all("input[readonly]").forEach(input => input.addEventListener("click", () => input.select()));
+  initNativeDatePickers();
   updateBacktestSourceView();
+}
+
+function initNativeDatePickers() {
+  $all("input[type='date']").forEach(input => {
+    input.classList.add("native-date-input");
+    input.addEventListener("click", () => {
+      if (typeof input.showPicker !== "function" || input.disabled || input.readOnly) return;
+      try { input.showPicker(); } catch {}
+    });
+    input.addEventListener("keydown", event => {
+      if (!["Enter", " "].includes(event.key)) return;
+      if (typeof input.showPicker !== "function" || input.disabled || input.readOnly) return;
+      try { input.showPicker(); } catch {}
+    });
+  });
 }
 
 async function boot() {

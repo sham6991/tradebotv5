@@ -230,6 +230,20 @@ button.danger {
   border-color: rgba(239, 68, 68, 0.7);
 }
 
+.app-shell input[type="date"],
+.app-shell .native-date-input {
+  min-height: 38px;
+  color-scheme: dark;
+  cursor: pointer;
+}
+
+.app-shell input[type="date"]::-webkit-calendar-picker-indicator,
+.app-shell .native-date-input::-webkit-calendar-picker-indicator {
+  cursor: pointer;
+  filter: invert(1);
+  opacity: 0.95;
+}
+
 .debug-panel,
 .oa-debug-panel,
 .debug-panel pre {

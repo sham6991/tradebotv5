@@ -502,11 +502,25 @@ body.app-shell textarea {
 
 body.app-shell table {
   color: var(--text-primary);
+  background: var(--bg-panel);
 }
 
 body.app-shell th {
   background: #0f1722;
   color: #cbd5e1;
+}
+
+body.app-shell td {
+  color: var(--text-primary);
+  border-color: var(--border-subtle);
+}
+
+body.app-shell tbody tr:nth-child(even) {
+  background: var(--bg-panel-soft);
+}
+
+body.app-shell tbody tr:nth-child(odd) {
+  background: var(--bg-panel);
 }
 
 .setup-checklist-card {
@@ -519,14 +533,17 @@ body.app-shell th {
 
 .row-danger td {
   background: rgba(239, 68, 68, 0.12);
+  color: var(--text-primary);
 }
 
 .row-warning td {
   background: rgba(246, 183, 60, 0.10);
+  color: var(--text-primary);
 }
 
 .row-success td {
   background: rgba(20, 184, 122, 0.08);
+  color: var(--text-primary);
 }
 
 .danger-zone p {

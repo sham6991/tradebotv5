@@ -6,15 +6,15 @@
   --oa-muted: #5d6b78;
   --oa-line: #cbd7e2;
   --oa-line-soft: #e4ebf1;
-  --oa-blue: #1d5f99;
+  --oa-blue: #164f82;
   --oa-blue-soft: #e7f1fb;
-  --oa-green: #16794f;
+  --oa-green: #0f6b45;
   --oa-green-soft: #e8f6ef;
-  --oa-red: #b42318;
+  --oa-red: #9f1f17;
   --oa-red-soft: #fdeceb;
-  --oa-yellow: #9a6400;
+  --oa-yellow: #744600;
   --oa-yellow-soft: #fff4dc;
-  --oa-grey: #6c7782;
+  --oa-grey: #4b5563;
   --oa-grey-soft: #eef1f4;
   --oa-shadow: 0 12px 28px rgba(26, 39, 52, 0.08);
 }
@@ -692,6 +692,48 @@ body {
   border-bottom: 0;
 }
 
+.oa-paper-section {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--oa-line-soft);
+}
+
+.oa-paper-section:last-child {
+  border-bottom: 0;
+}
+
+.oa-paper-section h3 {
+  margin: 0;
+  color: var(--oa-ink);
+  font-size: 0.78rem;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.oa-order-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--oa-line-soft);
+}
+
+.oa-order-grid:last-child {
+  border-bottom: 0;
+}
+
+.oa-order-grid > div {
+  min-width: 0;
+  min-height: 54px;
+  padding: 9px;
+  background: var(--oa-surface-soft);
+  border: 1px solid var(--oa-line-soft);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
 #oa-log {
   min-height: 280px;
   max-height: 520px;
@@ -829,4 +871,103 @@ body.app-shell .oa-card .oa-button-danger {
   background: var(--oa-red) !important;
   color: #ffffff !important;
   border-color: var(--oa-red) !important;
+}
+
+body.app-shell .oa-shell,
+body.app-shell .oa-shell .oa-card,
+body.app-shell .oa-shell .oa-tab-panel {
+  color: var(--oa-ink);
+}
+
+body.app-shell .oa-shell .oa-table {
+  background: var(--oa-surface);
+  color: var(--oa-ink);
+}
+
+body.app-shell .oa-shell .oa-table th,
+body.app-shell .oa-shell .oa-table td {
+  color: var(--oa-ink);
+  border-color: var(--oa-line-soft);
+}
+
+body.app-shell .oa-shell .oa-table th {
+  background: #edf4fa;
+  color: #25364a;
+}
+
+body.app-shell .oa-shell .oa-table tbody tr:nth-child(odd),
+body.app-shell .oa-shell .oa-table tbody tr:nth-child(odd) td {
+  background: var(--oa-surface);
+}
+
+body.app-shell .oa-shell .oa-table tbody tr:nth-child(even),
+body.app-shell .oa-shell .oa-table tbody tr:nth-child(even) td {
+  background: var(--oa-surface-soft);
+}
+
+body.app-shell .oa-shell .oa-status-badge {
+  color: var(--oa-ink);
+}
+
+body.app-shell .oa-shell .oa-badge-green {
+  color: var(--oa-green);
+  background: var(--oa-green-soft);
+  border-color: rgba(15, 107, 69, 0.32);
+}
+
+body.app-shell .oa-shell .oa-badge-red {
+  color: var(--oa-red);
+  background: var(--oa-red-soft);
+  border-color: rgba(159, 31, 23, 0.32);
+}
+
+body.app-shell .oa-shell .oa-badge-yellow {
+  color: var(--oa-yellow);
+  background: var(--oa-yellow-soft);
+  border-color: rgba(116, 70, 0, 0.34);
+}
+
+body.app-shell .oa-shell .oa-badge-grey {
+  color: var(--oa-grey);
+  background: var(--oa-grey-soft);
+  border-color: rgba(75, 85, 99, 0.32);
+}
+
+body.app-shell .oa-shell .oa-badge-blue {
+  color: var(--oa-blue);
+  background: var(--oa-blue-soft);
+  border-color: rgba(22, 79, 130, 0.32);
+}
+
+body.app-shell .oa-shell .oa-alert-info,
+body.app-shell .oa-shell .oa-info-banner,
+body.app-shell .oa-shell .oa-data-banner {
+  color: var(--oa-blue);
+}
+
+body.app-shell .oa-shell .oa-alert-success,
+body.app-shell .oa-shell .oa-safe-banner {
+  color: var(--oa-green);
+}
+
+body.app-shell .oa-shell .oa-alert-warning,
+body.app-shell .oa-shell .oa-warning-banner {
+  color: var(--oa-yellow);
+}
+
+body.app-shell .oa-shell .oa-alert-danger,
+body.app-shell .oa-shell .oa-danger-banner,
+body.app-shell .oa-shell .oa-danger-zone {
+  color: var(--oa-red);
+}
+
+body.app-shell .oa-shell input[type="date"],
+body.app-shell .oa-shell .native-date-input {
+  color-scheme: light;
+}
+
+body.app-shell .oa-shell input[type="date"]::-webkit-calendar-picker-indicator,
+body.app-shell .oa-shell .native-date-input::-webkit-calendar-picker-indicator {
+  filter: none;
+  opacity: 0.85;
 }

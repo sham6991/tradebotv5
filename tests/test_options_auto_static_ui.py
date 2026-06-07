@@ -77,6 +77,27 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("interval", body)
         self.assertNotIn("sampleReplayCandles()", body)
 
+    def test_backtest_trade_table_and_date_picker_contracts_are_static(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
+        css = (
+            (ROOT / "web_static" / "options_auto.css").read_text(encoding="utf-8")
+            + (ROOT / "web_static" / "terminal_design.css").read_text(encoding="utf-8")
+        )
+
+        self.assertIn('id="oa-backtest-date" type="date"', html)
+        self.assertIn('id="oa-backtest-expiry" type="date"', html)
+        self.assertIn('id="oa-backtest-trades"', html)
+        self.assertIn("function normalizeBacktestTrades", js)
+        self.assertIn("function deriveBacktestTradesFromDecisions", js)
+        self.assertIn("function backtestSummaryFromStatus", js)
+        self.assertIn("function backtestTradeSide", js)
+        self.assertIn("updateBacktestReportButtons", js)
+        self.assertIn("function initNativeDatePickers", js)
+        self.assertIn("showPicker", js)
+        self.assertIn("::-webkit-calendar-picker-indicator", css)
+        self.assertIn("native-date-input", css)
+
     def test_live_options_data_health_fields_are_visible(self):
         js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
 
@@ -140,6 +161,32 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("function killSwitch", js)
         self.assertIn("/api/options-auto/stop", js)
         self.assertIn("/api/options-auto/kill-switch", js)
+
+    def test_paper_and_real_live_order_boxes_have_render_contracts(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        css = (ROOT / "web_static" / "options_auto.css").read_text(encoding="utf-8")
+
+        for token in (
+            "function paperLifecycleFromState",
+            "function paperOrdersFromState",
+            "function lifecycleTradeFromReal",
+            "function renderTradeDetails",
+            "function renderPaperOrderRows",
+            "function renderClosedPaperTrade",
+            "Active Paper Trades",
+            "Pending Entries",
+            "Recent Paper Orders",
+            "Closed Paper Trades",
+            "Entry Order",
+            "Target Order",
+            "Stoploss Order",
+            "Target Status",
+            "Stoploss Status",
+            "PROTECTIVE_EXIT_ACTIVE",
+        ):
+            self.assertIn(token, js)
+        self.assertIn(".oa-paper-section", css)
+        self.assertIn(".oa-order-grid", css)
 
 
 if __name__ == "__main__":

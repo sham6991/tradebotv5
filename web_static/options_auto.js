@@ -378,12 +378,13 @@ function renderTopStatus() {
   const isReal = mode === "REAL";
   const connected = isReal ? Boolean(account.real?.connected) : Boolean(account.paper?.connected);
   const activeTrades = activeTradesFrom(status);
+  const hasActiveTrades = Boolean(activeTrades.length);
   const protectedOk = !activeTrades.length || activeTrades.every(trade => trade.position_protected);
   const ocoOk = !activeTrades.length || activeTrades.every(trade => trade.oco_active);
   const lifecycle = status.real_order_lifecycle || result.real_order_lifecycle || {};
   const protectedState = String(lifecycle.protected_state || (protectedOk ? "PROTECTED" : "INACTIVE")).toUpperCase();
   const protectionFailed = /FAILED|UNPROTECTED|RECONCILIATION/.test(protectedState) || lifecycle.state === "UNPROTECTED_POSITION";
-  const protectionActive = /PROTECTIVE_EXIT_ACTIVE|PROTECTED/.test(protectedState) || protectedOk;
+  const protectionActive = hasActiveTrades && (/PROTECTIVE_EXIT_ACTIVE|PROTECTED/.test(protectedState) || protectedOk);
   const dataQuality = status.data_quality || result.data_quality || {};
   const dataAllowed = dataQuality.allowed;
   const resultDemo = Boolean(status.demo_data || result.demo_data || dataQuality.blockers?.some(item => String(item).includes("demo/sample")));
@@ -400,7 +401,7 @@ function renderTopStatus() {
   setBadge("#oa-data", dataLabel, dataAllowed ? "green" : resultDemo ? "yellow" : "yellow");
   setBadge("#oa-governor", governorLabel, governor.allowed === true ? "green" : governor.state ? "yellow" : "grey");
   setBadge("#oa-engine", engine, /RUNNING|ACTIVE|READY/.test(String(engine)) ? "green" : /LOCK|ERROR|MANUAL/.test(String(engine)) ? "red" : "grey");
-  setBadge("#oa-position", activeTrades.length ? (protectedOk ? "Protected" : "Unprotected") : "No Position", activeTrades.length ? (protectedOk ? "green" : "red") : "grey");
+  setBadge("#oa-position", hasActiveTrades ? (protectedOk ? "Protected" : "Unprotected") : "No Position", hasActiveTrades ? (protectedOk ? "green" : "red") : "grey");
   setBadge("#oa-protection", protectionFailed ? "Failed" : protectionActive ? "Protected" : "Inactive", protectionFailed ? "red" : protectionActive ? "green" : "grey");
   setBadge("#oa-oco", activeTrades.length ? (ocoOk ? "Active" : "Inactive") : "Inactive", activeTrades.length ? (ocoOk ? "green" : "red") : "grey");
   setBadge("#oa-kill-state", status.real_safety?.safe_mode || status.session?.status === "KILL_SWITCH_ACTIVE" ? "ON" : "OFF", status.real_safety?.safe_mode ? "red" : "green");
@@ -555,8 +556,155 @@ function renderRealWorkflow(canTrade, blockers = []) {
   setHtml("#oa-real-workflow", steps.map(([label, done]) => `<li class="${done ? "is-active" : ""}">${escapeHtml(label)}${!done && blockers[0] ? `<small>${escapeHtml(blockers[0])}</small>` : ""}</li>`).join(""));
 }
 
-function activeTradesFrom(result) {
-  return result.session?.active_trades || result.paper_lifecycle?.active_trades || state.status.session?.active_trades || [];
+function activeTradesFrom(result = {}) {
+  const trades = firstNonEmptyList(
+    result.session?.active_trades,
+    result.paper_lifecycle?.active_trades,
+    state.status.session?.active_trades,
+    state.status.paper_lifecycle?.active_trades,
+  );
+  const realTrade = lifecycleTradeFromReal(result.real_order_lifecycle || state.status.real_order_lifecycle || {});
+  if (!realTrade) return trades;
+  const exists = trades.some(trade => trade.entry_order_id && trade.entry_order_id === realTrade.entry_order_id);
+  return exists ? trades : [...trades, realTrade];
+}
+
+function liveScanFromState(result = {}) {
+  return result.live_scan || state.status.live_scan || {};
+}
+
+function isLiveModeRunning(mode = "", result = {}) {
+  const scan = liveScanFromState(result);
+  const expected = String(mode || "").toUpperCase();
+  const actual = String(scan.mode || "").toUpperCase();
+  return Boolean(scan.running) && (!expected || actual === expected);
+}
+
+function isPaperLifecycleActive(lifecycle = {}) {
+  return Boolean(
+    lifecycle.pending_approval
+    || (Array.isArray(lifecycle.pending_entries) && lifecycle.pending_entries.length)
+    || (Array.isArray(lifecycle.active_trades) && lifecycle.active_trades.length)
+  );
+}
+
+function isRealLifecycleActive(lifecycle = {}) {
+  const lifecycleState = String(lifecycle.state || "").toUpperCase();
+  if (!lifecycleState || /^(IDLE|FLAT|TARGET_FILLED|SL_FILLED|EXIT_RECONCILED|CANCELLED|REJECTED)$/.test(lifecycleState)) return false;
+  return Boolean(
+    lifecycle.entry_order?.order_id
+    || lifecycle.target_order?.order_id
+    || lifecycle.stoploss_order?.order_id
+    || lifecycle.fill?.filled_quantity
+    || lifecycle.trade_plan?.tradingsymbol
+    || lifecycleState
+  );
+}
+
+function isCurrentPaperProcessActive(result = state.lastResult) {
+  return isLiveModeRunning("PAPER", result) || isPaperLifecycleActive(paperLifecycleFromState(result));
+}
+
+function isCurrentRealProcessActive(result = state.lastResult) {
+  return isLiveModeRunning("REAL", result) || isRealLifecycleActive(result.real_order_lifecycle || state.status.real_order_lifecycle || {});
+}
+
+function isAnyCurrentLiveProcessActive(result = state.lastResult) {
+  return isCurrentPaperProcessActive(result) || isCurrentRealProcessActive(result);
+}
+
+function firstNonEmptyList(...lists) {
+  return lists.find(items => Array.isArray(items) && items.length) || [];
+}
+
+function firstNonEmptyObject(...items) {
+  return items.find(item => item && typeof item === "object" && Object.keys(item).length) || {};
+}
+
+function paperLifecycleFromState(result = state.lastResult) {
+  return firstNonEmptyObject(result.paper_lifecycle, state.status.paper_lifecycle);
+}
+
+function paperAccountFromState(result = state.lastResult) {
+  const lifecycle = paperLifecycleFromState(result);
+  return firstNonEmptyObject(result.paper_account, state.status.paper_account, lifecycle.account);
+}
+
+function uniqueByKey(items = [], keyFn) {
+  const seen = new Set();
+  return (items || []).filter(item => {
+    const key = keyFn(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function paperOrdersFromState(result = state.lastResult) {
+  const lifecycle = paperLifecycleFromState(result);
+  const account = paperAccountFromState(result);
+  return uniqueByKey([
+    ...(lifecycle.account?.orders || []),
+    ...(account.orders || []),
+    ...(lifecycle.orders || []),
+  ], order => order.order_id || order.id || stableStringify(order));
+}
+
+function lifecycleTradeFromReal(lifecycle = {}) {
+  const lifecycleState = String(lifecycle.state || "").toUpperCase();
+  const protectedState = String(lifecycle.protected_state || "").toUpperCase();
+  if (!lifecycleState || /^(IDLE|FLAT)$/.test(lifecycleState)) return null;
+  if (/TARGET_FILLED|SL_FILLED|EXIT_RECONCILED|CANCELLED|REJECTED/.test(lifecycleState)) return null;
+  const entry = lifecycle.entry_order || {};
+  const target = lifecycle.target_order || {};
+  const stoploss = lifecycle.stoploss_order || {};
+  const fill = lifecycle.fill || {};
+  const plan = lifecycle.trade_plan || lifecycle.plan || {};
+  const symbol = fill.tradingsymbol || plan.tradingsymbol || entry.tradingsymbol || target.tradingsymbol || stoploss.tradingsymbol || "";
+  const hasOrderState = entry.order_id || target.order_id || stoploss.order_id || fill.filled_quantity || symbol;
+  if (!hasOrderState) return null;
+  const targetOpen = isOpenOrderStatus(target.status);
+  const stoplossOpen = isOpenOrderStatus(stoploss.status);
+  const protectedActive = protectedState === "PROTECTIVE_EXIT_ACTIVE" || (targetOpen && stoplossOpen);
+  return {
+    mode: "REAL",
+    tradingsymbol: symbol,
+    side: plan.side || entry.transaction_type || "-",
+    quantity: fill.filled_quantity || entry.filled_quantity || entry.quantity || plan.quantity || target.quantity || stoploss.quantity || "-",
+    entry_price: fill.average_price || entry.average_price || plan.entry_price || entry.price || "-",
+    average_price: fill.average_price || entry.average_price || "-",
+    last_ltp: fill.last_price || plan.last_ltp || "-",
+    target: plan.target || target.price || target.trigger_price || "-",
+    stoploss: plan.stoploss || stoploss.trigger_price || stoploss.price || "-",
+    entry_order_id: entry.order_id || entry.id || "-",
+    target_order_id: target.order_id || target.id || "-",
+    stoploss_order_id: stoploss.order_id || stoploss.id || "-",
+    entry_status: entry.status || "-",
+    target_status: target.status || "-",
+    stoploss_status: stoploss.status || "-",
+    oco_active: protectedActive,
+    position_protected: protectedActive,
+    status: lifecycle.state || "-",
+    protected_state: lifecycle.protected_state || "-",
+    updated_at: lifecycle.updated_at || latestLifecycleEvent(lifecycle)?.timestamp || latestLifecycleEvent(lifecycle)?.created_at || "-",
+  };
+}
+
+function isOpenOrderStatus(status) {
+  return /OPEN|TRIGGER PENDING|PENDING/.test(String(status || "").toUpperCase());
+}
+
+function orderStatusKind(status) {
+  const label = String(status || "").toUpperCase();
+  if (/COMPLETE|FILLED/.test(label)) return "green";
+  if (/REJECT|CANCEL|FAIL/.test(label)) return "red";
+  if (/OPEN|TRIGGER|PENDING|PARTIAL/.test(label)) return "yellow";
+  return "grey";
+}
+
+function latestLifecycleEvent(source = {}) {
+  const rows = Array.isArray(source) ? source : (source.history || source.events || []);
+  return rows.length ? rows[rows.length - 1] : null;
 }
 
 function realizedPnl() {
@@ -734,6 +882,11 @@ function renderIndustryDiagnostics() {
   const lifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
   const lifecycleState = lifecycle.state || "IDLE";
   const protectedState = lifecycle.protected_state || "-";
+  const entryOrder = lifecycle.entry_order || {};
+  const targetOrder = lifecycle.target_order || {};
+  const stoplossOrder = lifecycle.stoploss_order || {};
+  const fill = lifecycle.fill || {};
+  const lastEvent = latestLifecycleEvent(lifecycle);
   const lifecycleBad = /UNPROTECTED|SAFE|MANUAL|REJECTED|CANCELLED|TIMEOUT/.test(String(lifecycleState)) || /FAILED|RECONCILIATION_REQUIRED/.test(String(protectedState));
   const lifecycleGood = /OCO_ACTIVE|TARGET_FILLED|SL_FILLED|EXIT_RECONCILED/.test(String(lifecycleState)) && !lifecycleBad;
   setBadge("#oa-real-lifecycle-badge", lifecycleState, lifecycleBad ? "red" : lifecycleGood ? "green" : lifecycleState === "IDLE" ? "grey" : "yellow");
@@ -742,12 +895,19 @@ function renderIndustryDiagnostics() {
     metric("Protected State", protectedState),
     metric("Safe Mode", lifecycle.safe_mode ? "YES" : "NO"),
     metric("Emergency Flatten", lifecycle.emergency_flatten_required ? "YES" : "NO"),
-    metric("Entry Order", lifecycle.entry_order?.order_id || "-"),
-    metric("Entry Status", lifecycle.entry_order?.status || "-"),
-    metric("Fill Qty", lifecycle.fill?.filled_quantity || "-"),
-    metric("Avg Fill", lifecycle.fill?.average_price || "-"),
-    metric("Target", lifecycle.target_order?.order_id || lifecycle.target_order?.status || "-"),
-    metric("Stoploss", lifecycle.stoploss_order?.order_id || lifecycle.stoploss_order?.status || "-"),
+    metric("Entry Order", entryOrder.order_id || entryOrder.id || "-"),
+    metric("Entry Status", entryOrder.status || "-"),
+    metric("Entry Qty", entryOrder.quantity || fill.filled_quantity || "-"),
+    metric("Entry Price", entryOrder.price || entryOrder.average_price || "-"),
+    metric("Fill Qty", fill.filled_quantity || "-"),
+    metric("Avg Fill", fill.average_price || "-"),
+    metric("Target Order", targetOrder.order_id || targetOrder.id || "-"),
+    metric("Target Status", targetOrder.status || "-"),
+    metric("Target Price", targetOrder.price || targetOrder.trigger_price || "-"),
+    metric("Stoploss Order", stoplossOrder.order_id || stoplossOrder.id || "-"),
+    metric("Stoploss Status", stoplossOrder.status || "-"),
+    metric("Stoploss Price", stoplossOrder.trigger_price || stoplossOrder.price || "-"),
+    metric("Last Event", lastEvent ? eventText("Real", lastEvent).replace(/^Real - /, "") : "-"),
     metric("Blocker", (lifecycle.blockers || [])[0] || "-"),
   ].join(""));
 
@@ -804,7 +964,7 @@ function renderIndexTickStreams() {
 }
 
 function renderContractLockCards() {
-  const lock = contractLockFromState();
+  const lock = contractLockFromState({ liveOnly: true });
   const hasLock = Boolean(lock && (lock.ce?.tradingsymbol || lock.pe?.tradingsymbol));
   $$("[data-contract-lock-badge]").forEach(node => {
     node.className = `oa-status-badge ${badgeClass(hasLock ? "green" : "grey")}`;
@@ -828,17 +988,20 @@ function renderContractLockCards() {
     row("PE Margin", lock.pe?.margin_required_estimate !== undefined ? money(lock.pe.margin_required_estimate) : "-"),
     row("PE Reason", lock.pe?.hop_reason || "-"),
     row("Reselect In", lock.valid_until ? timeLeftText(lock.valid_until) : "-"),
-  ].join("") : `<p class="oa-empty-state">No locked CE/PE contracts yet.</p>`;
+  ].join("") : `<p class="oa-empty-state">No live contract lock. Start Paper or Real engine to lock fresh CE/PE contracts.</p>`;
   $$("[data-contract-lock-card]").forEach(node => {
     node.innerHTML = body;
   });
 }
 
-function contractLockFromState() {
+function contractLockFromState(options = {}) {
+  const liveOnly = Boolean(options.liveOnly);
+  if (liveOnly && !isAnyCurrentLiveProcessActive()) return {};
   const resultLock = state.lastResult.contract_lock || {};
   if (resultLock.ce || resultLock.pe) return resultLock;
   const statusLock = state.status.contract_lock?.lock || {};
   if (statusLock.ce || statusLock.pe) return statusLock;
+  if (liveOnly) return {};
   const metaLock = state.lastBacktest?.contract_lock || state.lastBacktest?.source_metadata?.contract_lock || {};
   if (metaLock.ce || metaLock.pe) return metaLock;
   return {};
@@ -883,19 +1046,7 @@ function renderActiveTradeCard(trades) {
   }
   const trade = trades[0] || {};
   setBadge("#oa-active-trade-badge", trade.position_protected ? "Protected" : "Unprotected", trade.position_protected ? "green" : "red");
-  setHtml("#oa-active-trade-body", [
-    row("Contract", trade.tradingsymbol || "-"),
-    row("Quantity", trade.quantity || "-"),
-    row("Entry Average", trade.entry_price || trade.average_price || "-"),
-    row("Current LTP", trade.last_ltp || "-"),
-    row("Unrealized P&L", trade.unrealized_pnl !== undefined ? money(trade.unrealized_pnl) : "-"),
-    row("Target", trade.target || "-"),
-    row("Stoploss", trade.stoploss || "-"),
-    row("Trailing", trade.trailing_status || "-"),
-    row("OCO", trade.oco_active ? "Active" : "Inactive"),
-    row("Protected", trade.position_protected ? "YES" : "NO"),
-    row("Last Update", trade.updated_at || trade.opened_at || "-"),
-  ].join(""));
+  setHtml("#oa-active-trade-body", renderTradeDetails(trade));
   const steps = [
     ["Signal accepted", true],
     ["Entry placed", Boolean(trade.entry_order_id)],
@@ -911,6 +1062,8 @@ function renderActiveTradeCard(trades) {
 
 function renderRecentEvents(result) {
   const session = result.session || state.status.session || {};
+  const paperLifecycle = paperLifecycleFromState(result);
+  const realLifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
   const events = [];
   if (result.selection?.selected?.tradingsymbol) {
     events.push(`Candidate found: ${result.selection.selected.tradingsymbol}, score ${text(result.selection.score, "-")}.`);
@@ -918,7 +1071,18 @@ function renderRecentEvents(result) {
   (result.blockers || []).slice(0, 4).forEach(item => events.push(`Trade blocked: ${item}`));
   (session.safety_events || []).slice(-6).forEach(item => events.push(`${item.reason || "Safety event"}.`));
   (session.rejected_log || []).slice(-4).forEach(item => events.push(`Rejected setup: ${item.reason || "-"}`));
+  (paperLifecycle.events || []).slice(-6).forEach(item => events.push(eventText("Paper", item)));
+  (realLifecycle.history || realLifecycle.events || []).slice(-6).forEach(item => events.push(eventText("Real", item)));
   renderList("#oa-events", events.slice(-10).reverse(), "No recent events yet.");
+}
+
+function eventText(prefix, item = {}) {
+  if (typeof item === "string") return `${prefix}: ${item}`;
+  const label = item.event || item.event_type || item.state || item.status || item.reason || "Event";
+  const symbol = item.tradingsymbol || item.contract || item.trade_plan?.tradingsymbol || "";
+  const orderId = item.order_id || item.entry_order_id || item.target_order_id || item.stoploss_order_id || "";
+  const stamp = shortTime(item.timestamp || item.created_at || item.updated_at || item.at || "");
+  return [prefix, label, symbol, orderId, stamp].filter(Boolean).join(" - ");
 }
 
 function renderDashboardAlerts(result) {
@@ -941,6 +1105,8 @@ function renderDashboardAlerts(result) {
 function initBacktestTab() {
   on("#oa-backtest-run", "click", runBacktest);
   on("#oa-backtest-replay", "click", runReplay);
+  on("#oa-backtest-export", "click", showBacktestReportPath);
+  on("#oa-backtest-folder", "click", showBacktestFolderPath);
 }
 
 async function runBacktest() {
@@ -958,8 +1124,9 @@ async function runBacktest() {
 }
 
 function renderBacktestResults(result = state.lastBacktest) {
+  result = Object.keys(result || {}).length ? result : backtestSummaryFromStatus(state.status) || {};
   const metrics = result.metrics || result.summary || {};
-  const trades = result.trades || [];
+  const trades = normalizeBacktestTrades(result);
   const meta = result.source_metadata || {};
   const decisions = result.decisions || [];
   const blockerCounts = decisions.reduce((counts, row) => {
@@ -1005,8 +1172,125 @@ function renderBacktestResults(result = state.lastBacktest) {
     metric("Worst Trade", money(metrics.worst_trade || 0)),
   ].join(""));
   setHtml("#oa-backtest-trades", trades.length
-    ? trades.map(trade => `<tr><td>${escapeHtml(trade.time || trade.datetime || "-")}</td><td>${escapeHtml(trade.side || "-")}</td><td>${escapeHtml(trade.tradingsymbol || "-")}</td><td>${escapeHtml(trade.entry || trade.entry_price || "-")}</td><td>${escapeHtml(trade.exit || trade.exit_price || "-")}</td><td>${escapeHtml(trade.quantity || "-")}</td><td>${escapeHtml(trade.exit_reason || "-")}</td><td>${escapeHtml(money(trade.net_pnl || 0))}</td><td>${escapeHtml(trade.score || "-")}</td></tr>`).join("")
+    ? trades.map(trade => `<tr><td>${escapeHtml(trade.time || trade.datetime || "-")}</td><td>${escapeHtml(backtestTradeSide(trade))}</td><td>${escapeHtml(trade.tradingsymbol || "-")}</td><td>${escapeHtml(trade.entry || trade.entry_price || "-")}</td><td>${escapeHtml(trade.exit || trade.exit_price || "-")}</td><td>${escapeHtml(trade.quantity || "-")}</td><td>${escapeHtml(trade.exit_reason || trade.reason || "-")}</td><td>${escapeHtml(money(trade.net_pnl || 0))}</td><td>${escapeHtml(trade.score || "-")}</td></tr>`).join("")
     : `<tr><td colspan="9">No trades generated by this backtest result.</td></tr>`);
+  updateBacktestReportButtons(result, trades);
+}
+
+function backtestSummaryFromStatus(status = {}) {
+  const summary = status.session?.last_decision?.summary;
+  if (!summary || String(summary.mode || "").toUpperCase() !== "BACKTEST") return null;
+  return {
+    ...summary,
+    session: status.session || summary.session || {},
+    account_status: status.account_status || summary.account_status || {},
+  };
+}
+
+function normalizeBacktestTrades(result = {}) {
+  const decisions = result.decisions || [];
+  if (Array.isArray(result.trades) && result.trades.length) {
+    return result.trades.map(trade => {
+      const entryDecision = findBacktestDecision(decisions, trade.tradingsymbol, trade.entry_index, "ENTRY");
+      const exitDecision = findBacktestDecision(decisions, trade.tradingsymbol, trade.exit_index, "EXIT")
+        || findBacktestDecision(decisions, trade.tradingsymbol, trade.exit_index, "END_OF_DAY_EXIT");
+      return {
+        ...trade,
+        time: trade.time || trade.datetime || trade.entry_time || trade.opened_at || entryDecision?.datetime || indexLabel("Entry", trade.entry_index),
+        exit_time: trade.exit_time || exitDecision?.datetime || indexLabel("Exit", trade.exit_index),
+        exit_reason: trade.exit_reason || trade.reason || trade.close_reason || exitDecision?.reason,
+        side: backtestTradeSide(trade),
+        score: trade.score || entryDecision?.score || entryDecision?.decision_snapshot?.trade_score_breakdown?.score || entryDecision?.decision_snapshot?.selected_contract?.score,
+      };
+    });
+  }
+  return deriveBacktestTradesFromDecisions(decisions);
+}
+
+function findBacktestDecision(decisions = [], symbol = "", rowIndex, decisionName = "") {
+  return (decisions || []).find(row => (
+    String(row.decision || "").toUpperCase() === decisionName
+    && String(row.tradingsymbol || "") === String(symbol || "")
+    && (rowIndex === undefined || rowIndex === null || String(row.row) === String(rowIndex))
+  ));
+}
+
+function deriveBacktestTradesFromDecisions(decisions = []) {
+  const openBySymbol = {};
+  const rows = [];
+  (decisions || []).forEach(row => {
+    const decision = String(row.decision || "").toUpperCase();
+    const symbol = row.tradingsymbol || row.contract || "";
+    if (!symbol) return;
+    if (decision === "ENTRY") {
+      openBySymbol[symbol] = {
+        tradingsymbol: symbol,
+        side: backtestTradeSide(row),
+        time: row.datetime || indexLabel("Entry", row.row),
+        entry_price: row.entry_price || row.entry,
+        quantity: row.quantity,
+        score: row.score || row.decision_snapshot?.trade_score_breakdown?.score || row.decision_snapshot?.selected_contract?.score,
+      };
+      return;
+    }
+    if (decision === "EXIT" || decision === "END_OF_DAY_EXIT") {
+      const entry = openBySymbol[symbol] || { tradingsymbol: symbol, side: backtestTradeSide(row) };
+      rows.push({
+        ...entry,
+        datetime: entry.time || row.datetime || indexLabel("Exit", row.row),
+        exit_price: row.exit_price || row.exit,
+        quantity: entry.quantity || row.quantity,
+        exit_reason: row.exit_reason || row.reason || decision,
+        gross_pnl: row.gross_pnl,
+        charges: row.charges,
+        net_pnl: row.net_pnl,
+      });
+      delete openBySymbol[symbol];
+    }
+  });
+  return rows;
+}
+
+function backtestTradeSide(trade = {}) {
+  const explicit = String(trade.side || trade.option_type || trade.instrument_type || "").toUpperCase();
+  if (explicit === "CE" || explicit === "PE") return explicit;
+  const symbol = String(trade.tradingsymbol || trade.contract || "").toUpperCase();
+  if (symbol.endsWith("CE") || symbol.includes("CE ")) return "CE";
+  if (symbol.endsWith("PE") || symbol.includes("PE ")) return "PE";
+  return "-";
+}
+
+function indexLabel(label, index) {
+  return index === undefined || index === null || index === "" ? "" : `${label} #${index}`;
+}
+
+function updateBacktestReportButtons(result = {}, trades = []) {
+  const report = result.report || {};
+  const exportButton = $("#oa-backtest-export");
+  const folderButton = $("#oa-backtest-folder");
+  if (exportButton) {
+    exportButton.disabled = !report.audit_json;
+    exportButton.dataset.reportPath = report.audit_json || "";
+    exportButton.textContent = report.audit_json ? "Audit JSON Ready" : "Export Excel";
+  }
+  if (folderButton) {
+    folderButton.disabled = !report.folder;
+    folderButton.dataset.reportFolder = report.folder || "";
+    folderButton.textContent = report.folder ? "Result Folder Ready" : "Open Result Folder";
+  }
+  if (trades.length && !report.audit_json) {
+    setTabAlert("backtest", `Backtest complete with ${trades.length} trade(s). Report path was not returned.`, "warning");
+  }
+}
+
+function showBacktestReportPath() {
+  const path = $("#oa-backtest-export")?.dataset.reportPath || state.lastBacktest?.report?.audit_json || "";
+  setTabAlert("backtest", path ? `Backtest audit report: ${path}` : "No backtest audit report path is available yet.", path ? "info" : "warning");
+}
+
+function showBacktestFolderPath() {
+  const path = $("#oa-backtest-folder")?.dataset.reportFolder || state.lastBacktest?.report?.folder || "";
+  setTabAlert("backtest", path ? `Backtest result folder: ${path}` : "No backtest result folder is available yet.", path ? "info" : "warning");
 }
 
 // shadow rendering/actions
@@ -1202,16 +1486,25 @@ function resetPaperBalance() {
 }
 
 function renderPaperAccount() {
-  const account = state.lastResult.paper_account || state.status.paper_account || {};
+  const lifecycle = paperLifecycleFromState(state.lastResult);
+  const account = paperAccountFromState(state.lastResult);
+  const currentPaper = isCurrentPaperProcessActive(state.lastResult);
+  const activeTrades = currentPaper ? activeTradesFrom(state.lastResult).filter(trade => trade.mode !== "REAL") : [];
+  const closedTrades = currentPaper ? (lifecycle.closed_trades || []) : [];
+  const orders = currentPaper ? paperOrdersFromState(state.lastResult) : [];
+  const scan = liveScanFromState(state.lastResult);
   setHtml("#oa-paper-account", [
+    metric("Live Session", currentPaper ? (scan.running ? "RUNNING" : "POSITION/PENDING") : "STOPPED"),
     metric("Starting Balance", money(account.opening_balance || state.defaults.settings?.paper_starting_balance || 20000)),
     metric("Available Balance", money(account.available_balance || 0)),
     metric("Realized P&L", money(account.realized_pnl || 0)),
     metric("Unrealized P&L", money(account.unrealized_pnl || 0)),
     metric("Charges Estimate", money(account.charges || 0)),
-    metric("Trades Today", activeTradesFrom(state.lastResult).length),
+    metric("Trades Today", activeTrades.length + closedTrades.length),
+    metric("Closed Trades", closedTrades.length),
+    metric("Orders", orders.length),
   ].join(""));
-  setHtml("#oa-paper-plan", renderPlanRows(state.lastResult.trade_plan || {}));
+  setHtml("#oa-paper-plan", currentPaper ? renderPlanRows(state.lastResult.trade_plan || {}) : `<p class="oa-empty-state">No current paper live trade plan. Start Paper Engine to scan fresh live data.</p>`);
   renderApprovalCard();
   renderPaperTrades();
 }
@@ -1239,22 +1532,82 @@ function renderApprovalCard() {
 }
 
 function renderPaperTrades() {
-  const trades = activeTradesFrom(state.lastResult);
-  if (!trades.length) {
-    setHtml("#oa-paper-trades", `<p class="oa-empty-state">No active paper trades.</p>`);
+  const lifecycle = paperLifecycleFromState(state.lastResult);
+  if (!isCurrentPaperProcessActive(state.lastResult)) {
+    setHtml("#oa-paper-trades", `<p class="oa-empty-state">No active paper live session. Stored backtest or previous-session trades are shown only in Backtest/Reports.</p>`);
     return;
   }
-  setHtml("#oa-paper-trades", trades.map(trade => `<div class="oa-mini-trade">
+  const trades = activeTradesFrom(state.lastResult).filter(trade => trade.mode !== "REAL");
+  const pendingEntries = lifecycle.pending_entries || [];
+  const orders = paperOrdersFromState(state.lastResult);
+  const closedTrades = lifecycle.closed_trades || [];
+  if (!trades.length && !pendingEntries.length && !orders.length && !closedTrades.length) {
+    setHtml("#oa-paper-trades", `<p class="oa-empty-state">No paper trades or paper orders yet.</p>`);
+    return;
+  }
+  const sections = [];
+  if (trades.length) {
+    sections.push(paperSection("Active Paper Trades", trades.map(renderMiniTrade).join("")));
+  }
+  if (pendingEntries.length) {
+    sections.push(paperSection("Pending Entries", pendingEntries.slice(-6).reverse().map(renderPendingEntry).join("")));
+  }
+  if (orders.length) {
+    sections.push(paperSection("Recent Paper Orders", orders.slice(-10).reverse().map(renderPaperOrderRows).join("")));
+  }
+  if (closedTrades.length) {
+    sections.push(paperSection("Closed Paper Trades", closedTrades.slice(-6).reverse().map(renderClosedPaperTrade).join("")));
+  }
+  setHtml("#oa-paper-trades", sections.join(""));
+}
+
+function paperSection(title, body) {
+  return `<section class="oa-paper-section"><h3>${escapeHtml(title)}</h3>${body}</section>`;
+}
+
+function renderMiniTrade(trade = {}) {
+  return `<div class="oa-mini-trade">${renderTradeDetails(trade)}</div>`;
+}
+
+function renderPendingEntry(entry = {}) {
+  const order = entry.entry_order || entry.order || {};
+  const plan = entry.trade_plan || entry.plan || {};
+  return `<div class="oa-mini-trade">
+    ${row("Approval", entry.approval_id || entry.entry_id || "-")}
+    ${row("Entry Order", order.order_id || entry.entry_order_id || "-")}
+    ${row("Contract", plan.tradingsymbol || entry.tradingsymbol || order.tradingsymbol || "-")}
+    ${row("Qty", plan.quantity || order.quantity || entry.quantity || "-")}
+    ${row("Entry", plan.entry_price || order.price || entry.entry_price || "-")}
+    ${row("Status", entry.status || order.status || "PENDING")}
+    ${row("Created", entry.created_at || order.created_at || "-")}
+  </div>`;
+}
+
+function renderPaperOrderRows(order = {}) {
+  return `<div class="oa-order-grid">
+    ${metric("Order ID", order.order_id || order.id || "-")}
+    ${metric("Status", order.status || "-")}
+    ${metric("Txn", order.transaction_type || order.side || "-")}
+    ${metric("Contract", order.tradingsymbol || "-")}
+    ${metric("Qty", order.quantity || order.filled_quantity || "-")}
+    ${metric("Price", order.average_price || order.price || order.trigger_price || "-")}
+    ${metric("Type", order.order_type || "-")}
+    ${metric("Tag", order.tag || order.reason || "-")}
+  </div>`;
+}
+
+function renderClosedPaperTrade(trade = {}) {
+  return `<div class="oa-mini-trade">
     ${row("Contract", trade.tradingsymbol || "-")}
     ${row("Qty", trade.quantity || "-")}
-    ${row("Entry", trade.entry_price || "-")}
-    ${row("LTP", trade.last_ltp || "-")}
-    ${row("P&L", trade.unrealized_pnl !== undefined ? money(trade.unrealized_pnl) : "-")}
-    ${row("Target", trade.target || "-")}
-    ${row("SL", trade.stoploss || "-")}
-    ${row("OCO", trade.oco_active ? "Active" : "Inactive")}
-    ${row("Protected", trade.position_protected ? "YES" : "NO")}
-  </div>`).join(""));
+    ${row("Entry", trade.entry_price || trade.average_price || "-")}
+    ${row("Exit", trade.exit_price || "-")}
+    ${row("Exit Reason", trade.exit_reason || trade.reason || "-")}
+    ${row("Net P&L", money(trade.pnl_net ?? trade.net_pnl ?? 0))}
+    ${row("Entry Order", trade.entry_order_id || "-")}
+    ${row("Exit Order", trade.exit_order_id || trade.target_order_id || trade.stoploss_order_id || "-")}
+    ${row("Closed", trade.closed_at || trade.updated_at || "-")}
+  </div>`;
 }
 
 // real rendering/actions
@@ -1405,8 +1758,8 @@ function renderRealPreflight(result = state.lastResult) {
     ["Reconciliation clean", null],
   ];
   setHtml("#oa-real-checklist", rows.map(([label, ok]) => checklistRow(label, ok, reasonForCheck(label, result))).join(""));
-  const active = activeTradesFrom(result);
-  setHtml("#oa-real-position", active.length ? active.map(trade => renderPlanRows(trade)).join("") : `<p class="oa-empty-state">No active real position is reported.</p>`);
+  const active = isCurrentRealProcessActive(result) ? activeTradesFrom(result).filter(trade => trade.mode === "REAL") : [];
+  setHtml("#oa-real-position", active.length ? active.map(trade => `<div class="oa-mini-trade">${renderTradeDetails(trade)}</div>`).join("") : `<p class="oa-empty-state">No active real position or current real order lifecycle is reported.</p>`);
 }
 
 function checklistRow(label, ok, reason = "") {
@@ -1436,10 +1789,13 @@ function renderReports() {
     metric("Orders", state.lastBacktest.orders_placed || 0),
     metric("Report", state.lastBacktest.report?.audit_json ? "Available" : "-"),
   ].join(""));
-  const paper = state.status.paper_account || state.lastResult.paper_account || {};
+  const paperLifecycle = paperLifecycleFromState(state.lastResult);
+  const paper = paperAccountFromState(state.lastResult);
+  const paperOrders = paperOrdersFromState(state.lastResult);
   setHtml("#oa-report-paper", [
     metric("Available", money(paper.available_balance || 0)),
-    metric("Orders", paper.orders?.length || 0),
+    metric("Orders", paperOrders.length),
+    metric("Closed Trades", (paperLifecycle.closed_trades || []).length),
     metric("Ledger Rows", paper.ledger?.length || 0),
   ].join(""));
   setHtml("#oa-report-shadow", [
@@ -1661,6 +2017,35 @@ function renderDeveloperRawJson() {
 }
 
 // shared render helpers
+function renderTradeDetails(trade = {}) {
+  const pnl = trade.unrealized_pnl !== undefined
+    ? money(trade.unrealized_pnl)
+    : trade.pnl_net !== undefined || trade.net_pnl !== undefined
+      ? money(trade.pnl_net ?? trade.net_pnl)
+      : "-";
+  return [
+    row("Contract", trade.tradingsymbol || "-"),
+    row("Status", trade.status || "-"),
+    row("Quantity", trade.quantity || "-"),
+    row("Entry Order", trade.entry_order_id || "-"),
+    row("Entry Status", trade.entry_status || "-"),
+    row("Entry Average", trade.entry_price || trade.average_price || "-"),
+    row("Current LTP", trade.last_ltp || "-"),
+    row("P&L", pnl),
+    row("Target", trade.target || "-"),
+    row("Target Order", trade.target_order_id || "-"),
+    row("Target Status", trade.target_status || "-"),
+    row("Stoploss", trade.stoploss || "-"),
+    row("Stoploss Order", trade.stoploss_order_id || "-"),
+    row("Stoploss Status", trade.stoploss_status || "-"),
+    row("Trailing", trade.trailing_status || "-"),
+    row("OCO", trade.oco_active ? "Active" : "Inactive"),
+    row("Protected", trade.position_protected ? "YES" : "NO"),
+    row("Protected State", trade.protected_state || "-"),
+    row("Last Update", trade.updated_at || trade.opened_at || "-"),
+  ].join("");
+}
+
 function renderPlanRows(plan) {
   if (!plan || !Object.keys(plan).length) return `<p class="oa-empty-state">No trade plan available.</p>`;
   return [
@@ -1684,6 +2069,21 @@ function on(selector, event, handler) {
   node.addEventListener(event, handler);
 }
 
+function initNativeDatePickers() {
+  $$("input[type='date']").forEach(input => {
+    input.classList.add("native-date-input");
+    input.addEventListener("click", () => {
+      if (typeof input.showPicker !== "function" || input.disabled || input.readOnly) return;
+      try { input.showPicker(); } catch {}
+    });
+    input.addEventListener("keydown", event => {
+      if (!["Enter", " "].includes(event.key)) return;
+      if (typeof input.showPicker !== "function" || input.disabled || input.readOnly) return;
+      try { input.showPicker(); } catch {}
+    });
+  });
+}
+
 // init
 async function refresh() {
   if (state.refreshBusy) return;
@@ -1694,6 +2094,8 @@ async function refresh() {
     state.lastRefreshOkAt = Date.now();
     staleWarning?.classList.remove("is-visible");
     state.status = payload;
+    const backtestSummary = backtestSummaryFromStatus(payload);
+    if (backtestSummary) state.lastBacktest = backtestSummary;
     if (payload.session?.last_decision && Object.keys(payload.session.last_decision).length) {
       state.lastResult = hydrateStatusDecision(payload);
     }
@@ -1765,6 +2167,7 @@ function initReports() {
 
 document.addEventListener("DOMContentLoaded", () => {
   initTabs();
+  initNativeDatePickers();
   initDashboard();
   initBacktestTab();
   initShadowTab();

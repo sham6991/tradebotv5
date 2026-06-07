@@ -943,6 +943,21 @@ function commandId(prefix) {
   return `${prefix}-${random}`;
 }
 
+function initNativeDatePickers() {
+  $$("input[type='date']").forEach(input => {
+    input.classList.add("native-date-input");
+    input.addEventListener("click", () => {
+      if (typeof input.showPicker !== "function" || input.disabled || input.readOnly) return;
+      try { input.showPicker(); } catch {}
+    });
+    input.addEventListener("keydown", event => {
+      if (!["Enter", " "].includes(event.key)) return;
+      if (typeof input.showPicker !== "function" || input.disabled || input.readOnly) return;
+      try { input.showPicker(); } catch {}
+    });
+  });
+}
+
 async function init() {
   try {
     const defaults = await api("/api/intraday/defaults");
@@ -960,6 +975,7 @@ async function init() {
   }
   $$(".flow-step").forEach((button) => button.addEventListener("click", () => switchStep(button.dataset.step)));
   $$(".paper-workflow-tab").forEach((button) => button.addEventListener("click", () => switchPaperWorkflow(button.dataset.paperWorkflow)));
+  initNativeDatePickers();
   $("#mode").addEventListener("change", updateWorkflowForMode);
   $("#save-setup").addEventListener("click", saveSetup);
   $("#reset-setup").addEventListener("click", resetSetupDefaults);

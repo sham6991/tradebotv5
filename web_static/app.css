@@ -1008,6 +1008,7 @@ body.app-shell .live-account-card strong {
 
 body.app-shell table {
   color: var(--text-primary);
+  background: var(--bg-panel);
 }
 
 body.app-shell th {
@@ -1016,7 +1017,16 @@ body.app-shell th {
 }
 
 body.app-shell td {
+  color: var(--text-primary);
   border-color: var(--border-subtle);
+}
+
+body.app-shell tbody tr:nth-child(even) {
+  background: var(--bg-panel-soft);
+}
+
+body.app-shell tbody tr:nth-child(odd) {
+  background: var(--bg-panel);
 }
 
 .debug-panel summary {

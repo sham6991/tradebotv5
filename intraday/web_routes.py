@@ -87,6 +87,12 @@ class IntradayWebRoutes:
         }
 
     def ui_summary(self) -> dict:
+        if hasattr(self.service, "ui_summary_snapshot"):
+            status = self.service.ui_summary_snapshot()
+            account = self.account_status()
+            status["real_margin"] = (account.get("real") or {}).get("funds")
+            status["account_status"] = account
+            return status
         status = self.service.status()
         account = self.account_status()
         settings = status.get("settings") or {}
@@ -117,6 +123,8 @@ class IntradayWebRoutes:
             "kill_switch": bool((status.get("kill_switch_report") or {}).get("active")),
             "last_scan": status.get("last_scan_at") or (status.get("engine") or {}).get("last_cycle") or "",
             "stocks": stocks,
+            "latency": status.get("latency") or {},
+            "engine": status.get("engine") or {},
         }
 
     def _requested_app_mode(self, payload: dict | str | None) -> str:

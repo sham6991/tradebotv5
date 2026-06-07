@@ -160,6 +160,8 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "event_driven_decisions_enabled": True,
     "event_driven_min_scan_interval_ms": 500,
     "runtime_state_persistence_enabled": True,
+    "options_auto_runtime_persist_min_interval_seconds": 2.0,
+    "options_auto_runtime_persist_async_enabled": False,
     "prewarm_reference_data_on_start": True,
     "incremental_feature_cache_enabled": True,
     "quote_polling_fallback_enabled": True,
@@ -248,6 +250,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "websocket_order_updates_enabled",
         "event_driven_decisions_enabled",
         "runtime_state_persistence_enabled",
+        "options_auto_runtime_persist_async_enabled",
         "prewarm_reference_data_on_start",
         "incremental_feature_cache_enabled",
         "quote_polling_fallback_enabled",
@@ -306,6 +309,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "quote_snapshot_min_interval_seconds",
         "quote_failure_backoff_seconds",
         "websocket_reconnect_backoff_seconds",
+        "options_auto_runtime_persist_min_interval_seconds",
     ):
         settings[key] = _float(settings.get(key), float(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 

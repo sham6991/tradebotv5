@@ -151,7 +151,10 @@ class OptionsAutoWebRoutes:
         return payload
 
     def ui_summary(self) -> dict:
-        status = self._with_account_status(self.service.status())
+        if hasattr(self.service, "ui_summary_snapshot"):
+            status = self._with_account_status(self.service.ui_summary_snapshot())
+        else:
+            status = self._with_account_status(self.service.status())
         settings = status.get("settings") or {}
         account = status.get("account_status") or {}
         lifecycle = status.get("real_order_lifecycle") or {}
@@ -191,6 +194,27 @@ class OptionsAutoWebRoutes:
             "active_instrument": (((session.get("active_trades") or [{}])[0] or {}).get("tradingsymbol") or ""),
             "session_pnl": status.get("paper_account", {}).get("realized_pnl") or 0,
             "last_update": status.get("session", {}).get("updated_at") or "",
+            "settings": settings,
+            "session": session,
+            "paper_account": status.get("paper_account") or {},
+            "paper_lifecycle": status.get("paper_lifecycle") or {},
+            "real_safety": status.get("real_safety") or {},
+            "ready_trade_plan_cache": status.get("ready_trade_plan_cache") or {},
+            "adaptive": status.get("adaptive") or {},
+            "performance": status.get("performance") or {},
+            "latency": status.get("latency") or {},
+            "fii_dii": status.get("fii_dii") or {},
+            "index_ticks": status.get("index_ticks") or [],
+            "live_index_candles": status.get("live_index_candles") or {},
+            "contract_lock": status.get("contract_lock") or {},
+            "live_scan": live_scan,
+            "options_live_feed": feed,
+            "real_order_lifecycle": lifecycle,
+            "runtime_persistence": status.get("runtime_persistence") or {},
+            "reference_cache": status.get("reference_cache") or {},
+            "feature_cache": status.get("feature_cache") or {},
+            "api_budget": status.get("api_budget") or {},
+            "account_status": account,
         }
 
     def _with_profile(self, payload: dict | None) -> dict:

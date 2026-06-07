@@ -58,6 +58,7 @@ from options_auto.intelligence.strategy_drift import StrategyDriftMonitor
 from options_auto.intelligence.strike_selector import StrikeSelector
 from options_auto.shadow_mode import ShadowModeEngine
 from options_auto.telegram_safety import TelegramSafety
+from web_core.latency_tracker import LatencyTracker
 from web_core.path_safety import safe_user_path
 
 
@@ -101,6 +102,7 @@ class OptionsAutoTerminalService:
             final_validation_warning_ms=float(self.settings.get("final_validation_latency_warning_ms") or 200),
             action_warning_ms=float(self.settings.get("action_latency_warning_ms") or 500),
         )
+        self.latency = LatencyTracker()
         self.ready_plan_cache = ReadyTradePlanCache()
         self.low_latency_engine = LowLatencyDecisionEngine(self.performance_monitor)
         self.live_adaptive = LiveAdaptiveEngine(log_path=os.path.join(self.result_root(), "adaptive_action_log.jsonl"))
@@ -135,6 +137,9 @@ class OptionsAutoTerminalService:
         self._feature_cache: dict[str, Any] = {"key": "", "features": {}, "hits": 0, "misses": 0}
         self._runtime_state_loaded_from = ""
         self._runtime_state_last_saved_at = ""
+        self._runtime_state_last_save_epoch = 0.0
+        self._runtime_state_last_hash = ""
+        self._runtime_state_skipped_count = 0
         self._load_runtime_state()
 
     def defaults(self) -> dict[str, Any]:
@@ -148,8 +153,9 @@ class OptionsAutoTerminalService:
         }
 
     def status(self) -> dict[str, Any]:
+        start = time.perf_counter()
         with self._lock:
-            return {
+            payload = {
                 "settings": self.settings,
                 "session": self.session.to_dict(),
                 "paper_account": self.paper_broker.snapshot(),
@@ -180,6 +186,52 @@ class OptionsAutoTerminalService:
                 },
                 "api_budget": self._api_budget_snapshot_locked(),
             }
+            self._record_latency_started("options_auto.status_full", start)
+            payload["latency"] = self.latency_snapshot()
+            return payload
+
+    def latency_snapshot(self) -> dict[str, Any]:
+        return self.latency.snapshot()
+
+    def _record_latency_started(self, name: str, start: float, meta: dict[str, Any] | None = None) -> None:
+        try:
+            self.latency.record(name, (time.perf_counter() - float(start)) * 1000.0, meta)
+        except Exception:
+            return
+
+    def ui_summary_snapshot(self) -> dict[str, Any]:
+        start = time.perf_counter()
+        with self._lock:
+            payload = {
+                "settings": self.settings,
+                "session": self.session.to_dict(),
+                "paper_account": self.paper_broker.snapshot(),
+                "paper_lifecycle": self.paper_lifecycle.snapshot(),
+                "real_safety": self.real_controller.snapshot(),
+                "ready_trade_plan_cache": self.ready_plan_cache.snapshot(),
+                "adaptive": self.live_adaptive.snapshot(),
+                "performance": self.performance_monitor.snapshot(),
+                "fii_dii": self.latest_fii_dii_status(),
+                "index_ticks": self.index_ticks[-80:],
+                "live_index_candles": self.live_index_candles.snapshot(),
+                "contract_lock": self.locked_contract_manager.snapshot(),
+                "live_scan": self._live_scan_state_locked(),
+                "options_live_feed": self.options_live_feed.snapshot(self.settings),
+                "real_order_lifecycle": self.real_lifecycle.snapshot(),
+                "instrument_cache": self.options_instrument_cache.snapshot(),
+                "runtime_persistence": self._runtime_persistence_snapshot_locked(),
+                "reference_cache": dict(self._reference_cache),
+                "feature_cache": {
+                    "key": self._feature_cache.get("key") or "",
+                    "hits": self._feature_cache.get("hits") or 0,
+                    "misses": self._feature_cache.get("misses") or 0,
+                    "enabled": bool(self.settings.get("incremental_feature_cache_enabled", True)),
+                },
+                "api_budget": self._api_budget_snapshot_locked(),
+            }
+            self._record_latency_started("options_auto.ui_summary", start)
+            payload["latency"] = self.latency_snapshot()
+            return payload
 
     def result_root(self) -> str:
         return os.path.join(self.base_result_folder, "options_auto")
@@ -234,31 +286,27 @@ class OptionsAutoTerminalService:
         self._runtime_state_loaded_from = path
 
     def _persist_runtime_state_locked(self, reason: str = "") -> None:
+        start = time.perf_counter()
         if not bool(self.settings.get("runtime_state_persistence_enabled", True)):
             return
         try:
             os.makedirs(self.result_root(), exist_ok=True)
-            payload = {
-                "saved_at": datetime.now().isoformat(timespec="seconds"),
-                "reason": reason,
-                "settings": {
-                    "mode": self.settings.get("mode"),
-                    "underlying": self.settings.get("underlying"),
-                    "expiry": self.settings.get("expiry"),
-                    "number_of_lots": self.settings.get("number_of_lots"),
-                },
-                "session": self.session.to_dict(),
-                "contract_lock": self.locked_contract_manager.snapshot(),
-                "paper_lifecycle": self.paper_lifecycle.snapshot(),
-                "real_order_lifecycle": {**self.real_lifecycle.snapshot(), "trade_plan": dict(self.real_lifecycle.trade_plan or {})},
-                "websocket": self._live_scan_state_locked().get("websocket") or {},
-                "websocket_order_updates": list(self._options_ws_order_updates[-200:]),
-                "real_broker_cache": dict(self._real_broker_cache or {}),
-            }
+            payload = self._runtime_state_payload_locked(reason)
+            snapshot_hash = self._runtime_state_hash(payload)
+            if not self._is_critical_persist_reason(reason):
+                min_interval = max(0.0, float(self.settings.get("options_auto_runtime_persist_min_interval_seconds") or 2.0))
+                elapsed = time.time() - float(self._runtime_state_last_save_epoch or 0.0)
+                if snapshot_hash == self._runtime_state_last_hash and elapsed < min_interval:
+                    self._runtime_state_skipped_count += 1
+                    self._record_latency_started("options_auto.runtime_persist", start, {"reason": reason, "skipped": True})
+                    return
             with open(self._runtime_state_path(), "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2, default=str)
             self._runtime_state_last_saved_at = payload["saved_at"]
-        except OSError as exc:
+            self._runtime_state_last_save_epoch = time.time()
+            self._runtime_state_last_hash = snapshot_hash
+            self._record_latency_started("options_auto.runtime_persist", start, {"reason": reason, "skipped": False})
+        except (OSError, TypeError, ValueError) as exc:
             self.logger.log("WARN", "Options Auto runtime state persistence failed", error=str(exc), reason=reason)
 
     def _runtime_persistence_snapshot_locked(self) -> dict[str, Any]:
@@ -267,7 +315,54 @@ class OptionsAutoTerminalService:
             "path": self._runtime_state_path(),
             "loaded_from": self._runtime_state_loaded_from,
             "last_saved_at": self._runtime_state_last_saved_at,
+            "skipped_noncritical_writes": self._runtime_state_skipped_count,
+            "min_interval_seconds": float(self.settings.get("options_auto_runtime_persist_min_interval_seconds") or 2.0),
         }
+
+    def _runtime_state_payload_locked(self, reason: str = "") -> dict[str, Any]:
+        return {
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "reason": reason,
+            "settings": {
+                "mode": self.settings.get("mode"),
+                "underlying": self.settings.get("underlying"),
+                "expiry": self.settings.get("expiry"),
+                "number_of_lots": self.settings.get("number_of_lots"),
+            },
+            "session": self.session.to_dict(),
+            "contract_lock": self.locked_contract_manager.snapshot(),
+            "paper_lifecycle": self.paper_lifecycle.snapshot(),
+            "real_order_lifecycle": {**self.real_lifecycle.snapshot(), "trade_plan": dict(self.real_lifecycle.trade_plan or {})},
+            "websocket": self._live_scan_state_locked().get("websocket") or {},
+            "websocket_order_updates": list(self._options_ws_order_updates[-200:]),
+            "real_broker_cache": dict(self._real_broker_cache or {}),
+        }
+
+    def _runtime_state_hash(self, payload: dict[str, Any]) -> str:
+        material = dict(payload or {})
+        material.pop("saved_at", None)
+        material.pop("reason", None)
+        try:
+            return json.dumps(material, sort_keys=True, default=str)
+        except (TypeError, ValueError):
+            return str(material)
+
+    def _is_critical_persist_reason(self, reason: str = "") -> bool:
+        reason = str(reason or "").lower()
+        critical_tokens = (
+            "configure",
+            "contracts_locked",
+            "order",
+            "filled",
+            "protection",
+            "safe_mode",
+            "kill_switch",
+            "stop_live_scan",
+            "websocket_order_update",
+            "paper_market_processed",
+            "real_lifecycle_poll",
+        )
+        return any(token in reason for token in critical_tokens)
 
     def _api_budget_snapshot_locked(self) -> dict[str, Any]:
         history = list(self.real_api_manager.health().get("history") or [])
@@ -299,6 +394,7 @@ class OptionsAutoTerminalService:
         payload: dict[str, Any] | None = None,
         kite_profile: dict[str, Any] | None = None,
         preserve_session: bool = False,
+        return_status: bool = True,
     ) -> dict[str, Any]:
         settings = normalize_settings(payload)
         mode = normalize_mode(settings.get("mode"))
@@ -321,18 +417,22 @@ class OptionsAutoTerminalService:
         elif mode == MODE_PAPER:
             self.logger.log("WARN", "Options Auto paper lifecycle preserved during configure", mode=mode)
         self.logger.log("INFO", "Options Auto configured", mode=mode, underlying=settings.get("underlying"))
-        return self.status()
+        return self.status() if return_status else {}
 
     def evaluate(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        start = time.perf_counter()
         with self._lock:
-            return self._evaluate_locked(payload)
+            try:
+                return self._evaluate_locked(payload)
+            finally:
+                self._record_latency_started("options_auto.evaluate_total", start)
 
     def _evaluate_locked(self, payload: dict[str, Any] | None = None, preserve_session: bool = False) -> dict[str, Any]:
         payload = dict(payload or {})
         settings_payload = {**self.settings, **dict(payload.get("settings") or {})}
         mode = normalize_mode(payload.get("mode") or settings_payload.get("mode") or self.settings.get("mode"))
         profile = payload.get("kite_profile") or {}
-        self._configure_locked({**settings_payload, "mode": mode}, kite_profile=profile, preserve_session=preserve_session)
+        self._configure_locked({**settings_payload, "mode": mode}, kite_profile=profile, preserve_session=preserve_session, return_status=False)
         return self._evaluate_current_config_locked(payload, mode)
 
     def _evaluate_current_config_locked(self, payload: dict[str, Any] | None = None, mode: str | None = None) -> dict[str, Any]:
@@ -342,7 +442,9 @@ class OptionsAutoTerminalService:
         quotes = dict(payload.get("quotes") or {})
         settings = dict(self.settings)
         index_history = pd.DataFrame() if mode in {MODE_PAPER, MODE_REAL} else self._frame(payload.get("index_history") or payload.get("index_candles") or payload.get("candles") or [])
+        context_start = time.perf_counter()
         live_data = self._live_options_market_context(mode, settings, payload, index_history)
+        self._record_latency_started("options_auto.live_market_context", context_start, {"mode": mode})
         if live_data.get("blocked"):
             decision = self._blocked_data_decision(mode, settings, live_data)
             self.session.record_decision(decision)
@@ -363,6 +465,7 @@ class OptionsAutoTerminalService:
         precomputed_features = self._cached_index_features(index_history, mode)
         if precomputed_features:
             market_cue_payload = {**market_cue_payload, "precomputed_index_features": precomputed_features}
+        decision_start = time.perf_counter()
         decision = evaluate_options_auto_decision(
             mode=mode,
             settings=settings,
@@ -374,6 +477,7 @@ class OptionsAutoTerminalService:
             account_state=account_state,
             timestamp=payload.get("timestamp") or payload.get("datetime"),
         )
+        self._record_latency_started("options_auto.decision_eval", decision_start, {"mode": mode, "candidate_count": len(instruments)})
         if live_data:
             decision.update(live_data.get("diagnostics") or {})
         self._record_index_tick_locked(decision, mode)
@@ -1103,7 +1207,9 @@ class OptionsAutoTerminalService:
             "kite_profile": dict(self.mode_guard.kite_profile or {}),
             "timestamp": datetime.now().isoformat(timespec="seconds"),
         }
+        eval_start = time.perf_counter()
         result = self._evaluate_current_config_locked(payload, mode)
+        self._record_latency_started("options_auto.evaluate_total", eval_start, {"mode": mode, "source": "live_scan"})
         live_scan_action: dict[str, Any]
         if mode == MODE_PAPER:
             paper_market_update = self._paper_live_monitor_market_locked(result)
@@ -1716,7 +1822,7 @@ class OptionsAutoTerminalService:
         mode = normalize_mode(payload.get("mode") or settings.get("mode") or MODE_REAL)
         client = self.kite_client_provider("LIVE") if mode == MODE_REAL else None
         settings = self._real_capability_settings(settings, mode, client, payload)
-        self._configure_locked({**settings, "mode": mode}, kite_profile=payload.get("kite_profile") or {}, preserve_session=bool(self._live_scan_state_locked().get("running")))
+        self._configure_locked({**settings, "mode": mode}, kite_profile=payload.get("kite_profile") or {}, preserve_session=bool(self._live_scan_state_locked().get("running")), return_status=False)
         self.real_api_manager.client = client
         broker_orders = self._merge_websocket_order_updates(self._broker_orders(client, payload))
         positions = self._broker_positions(client, payload)
@@ -1874,7 +1980,7 @@ class OptionsAutoTerminalService:
             self._prewarm_options_reference_data_locked(MODE_REAL, payload)
             settings = self._real_capability_settings({**self.settings, **dict(payload.get("settings") or {})}, MODE_REAL, client, payload)
             payload["settings"] = settings
-            self._configure_locked(settings, kite_profile=payload.get("kite_profile") or {}, preserve_session=False)
+            self._configure_locked(settings, kite_profile=payload.get("kite_profile") or {}, preserve_session=False, return_status=False)
             self.real_api_manager.client = client
 
             preflight = self.real_preflight_check({
@@ -1912,7 +2018,11 @@ class OptionsAutoTerminalService:
 
             order_submitted_at = datetime.now()
             adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard)
-            controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
+            submit_start = time.perf_counter()
+            try:
+                controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
+            finally:
+                self._record_latency_started("options_auto.real_order_submit", submit_start, {"tradingsymbol": order_request.get("tradingsymbol")})
             broker_ack_at = datetime.now()
             if not controller_result.get("real_order_sent"):
                 blocked = self._blocked_real_order(controller_result.get("blockers") or ["Real entry order failed."], preflight=preflight, decision=decision, final_validation=final_validation, execution=controller_result)
@@ -2225,6 +2335,7 @@ class OptionsAutoTerminalService:
         expiry: Any,
         context: str,
     ) -> list[dict[str, Any]]:
+        start = time.perf_counter()
         try:
             refreshed = self.options_instrument_cache.instruments(client, exchange, refresh=True)
         except Exception as exc:
@@ -2236,6 +2347,7 @@ class OptionsAutoTerminalService:
                 underlying=underlying,
                 expiry=_expiry_text(expiry),
             )
+            self._record_latency_started("options_auto.broker_cache_refresh", start, {"context": context, "ok": False})
             return existing
         if refreshed:
             self.logger.log(
@@ -2247,6 +2359,7 @@ class OptionsAutoTerminalService:
                 expiry=_expiry_text(expiry),
                 rows=len(refreshed),
             )
+            self._record_latency_started("options_auto.broker_cache_refresh", start, {"context": context, "ok": True, "rows": len(refreshed)})
             return refreshed
         self.logger.log(
             "WARN",
@@ -2257,6 +2370,7 @@ class OptionsAutoTerminalService:
             expiry=_expiry_text(expiry),
             existing_rows=len(existing or []),
         )
+        self._record_latency_started("options_auto.broker_cache_refresh", start, {"context": context, "ok": False, "rows": 0})
         return existing
 
     def _backtest_reselection_history(
@@ -3142,6 +3256,7 @@ class OptionsAutoTerminalService:
         return path
 
     def _final_entry_validation(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
+        start = time.perf_counter()
         plan = decision.get("ready_trade_plan") or self.ready_plan_cache.get(self.settings.get("underlying"))
         selected = dict(decision.get("selected_contract") or {})
         quote = self._latest_quote_for_selected(selected, payload)
@@ -3163,7 +3278,10 @@ class OptionsAutoTerminalService:
             "market_cue": decision.get("market_cue"),
             "regime": decision.get("regime"),
         }
-        return self.low_latency_engine.validate_final_entry(plan or {}, quote, self.settings, state)
+        try:
+            return self.low_latency_engine.validate_final_entry(plan or {}, quote, self.settings, state)
+        finally:
+            self._record_latency_started("options_auto.final_validation", start, {"tradingsymbol": selected.get("tradingsymbol")})
 
     def _latest_quote_for_selected(self, selected: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         quotes = dict(payload.get("quotes") or {})

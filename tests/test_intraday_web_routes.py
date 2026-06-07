@@ -1,6 +1,8 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 
+from intraday.constants import SESSION_STATUS_IDLE
 from intraday.web_routes import IntradayWebRoutes
 
 
@@ -21,6 +23,26 @@ class DummyApp:
 
     def auth_label(self, mode):
         return "Real Money" if mode == "LIVE" else "Paper Data"
+
+
+class SummaryOnlyIntradayService:
+    def __init__(self):
+        self.manager = SimpleNamespace(status=SESSION_STATUS_IDLE, settings=None)
+
+    def status(self):
+        raise AssertionError("ui-summary must not call full status when lightweight summary exists")
+
+    def paper_account(self):
+        return {"available": 100000}
+
+    def ui_summary_snapshot(self):
+        return {
+            "mode": "PAPER",
+            "session": "IDLE",
+            "stocks": [],
+            "engine": {"running": False, "interval_seconds": 1.0},
+            "latency": {"intraday.ui_summary": {"count": 1, "p95_ms": 1.0}},
+        }
 
 
 class IntradayWebRoutesTests(unittest.TestCase):
@@ -91,6 +113,17 @@ class IntradayWebRoutesTests(unittest.TestCase):
             self.assertIn("mode", result)
             self.assertIn("stocks", result)
             self.assertIsInstance(result["stocks"], list)
+
+    def test_intraday_ui_summary_uses_lightweight_service_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            routes = IntradayWebRoutes(DummyApp(), temp_dir)
+            routes.service = SummaryOnlyIntradayService()
+
+            result = routes.handle_get(type("Handler", (), {"send_json": lambda self, payload, status=200: payload})(), "/api/intraday/ui-summary", None)
+
+            self.assertEqual(result["mode"], "PAPER")
+            self.assertIn("latency", result)
+            self.assertIn("account_status", result)
 
 
 if __name__ == "__main__":

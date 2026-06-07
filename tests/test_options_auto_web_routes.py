@@ -59,6 +59,23 @@ class FakeOptionsAutoService:
         return {"status": "UPLOADED", "score": 30, "file_name": payload.get("file_name") or "fii.csv"}
 
 
+class SummaryOnlyOptionsAutoService:
+    def status(self):
+        raise AssertionError("ui-summary must not call full status when lightweight summary exists")
+
+    def ui_summary_snapshot(self):
+        return {
+            "settings": {"mode": "REAL"},
+            "session": {"active_trades": [], "last_decision": {}},
+            "options_live_feed": {"health": {"stale": False}},
+            "contract_lock": {"lock": {"ce": {"tradingsymbol": "NIFTY26JUN23500CE"}, "pe": {"tradingsymbol": "NIFTY26JUN23400PE"}}},
+            "real_order_lifecycle": {"state": "IDLE", "protected_state": "FLAT"},
+            "real_safety": {"safe_mode": False},
+            "paper_account": {},
+            "latency": {"options_auto.ui_summary": {"count": 1, "p95_ms": 1.0}},
+        }
+
+
 class OptionsAutoWebRoutesTests(unittest.TestCase):
     def test_options_auto_page_route_uses_static_page(self):
         routes = OptionsAutoWebRoutes(FakeAppState(), "results")
@@ -129,6 +146,16 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
         result = routes.handle_get(FakeHandler(), "/api/options-auto/lifecycle", None)
 
         self.assertEqual(result["state"], "IDLE")
+
+    def test_options_auto_ui_summary_uses_lightweight_service_snapshot(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
+        routes.service = SummaryOnlyOptionsAutoService()
+
+        result = routes.handle_get(FakeHandler(), "/api/options-auto/ui-summary", None)
+
+        self.assertTrue(result["can_trade"])
+        self.assertIn("latency", result)
+        self.assertEqual(result["contract_lock"]["lock"]["ce"]["tradingsymbol"], "NIFTY26JUN23500CE")
 
 
 if __name__ == "__main__":

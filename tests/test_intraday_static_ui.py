@@ -39,6 +39,13 @@ class IntradayStaticUiTests(unittest.TestCase):
             "emergency_exit_order_type",
             "beforeunload",
             "statusPollBusy",
+            "/api/intraday/ui-summary",
+            "renderUiSummary",
+            "scheduleStatusPolling",
+            "AbortController",
+            "Engine Interval",
+            "Last Cycle",
+            "Next Interval Reason",
         ):
             self.assertIn(token, content)
 

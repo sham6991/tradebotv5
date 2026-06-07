@@ -188,6 +188,16 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn(".oa-paper-section", css)
         self.assertIn(".oa-order-grid", css)
 
+    def test_frequent_refresh_uses_ui_summary_not_full_status(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        self.assertIn("/api/options-auto/ui-summary", js)
+        self.assertIn("/api/options-auto/status", js)
+        self.assertIn("scheduleRefresh", js)
+        self.assertIn("state.activeTab === \"debug\"", js)
+        self.assertIn("timeoutMs", js)
+        self.assertIn("AbortController", js)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -218,6 +218,7 @@ class OptionsAutoTerminalService:
         real_state = dict(payload.get("real_order_lifecycle") or {})
         if real_state:
             self.real_lifecycle.state = real_state.get("state") or self.real_lifecycle.state
+            self.real_lifecycle.protected_state = real_state.get("protected_state") or self.real_lifecycle.protected_state
             self.real_lifecycle.entry_order = dict(real_state.get("entry_order") or {})
             self.real_lifecycle.trade_plan = dict(real_state.get("trade_plan") or {})
             self.real_lifecycle.target_order = dict(real_state.get("target_order") or {})
@@ -226,6 +227,7 @@ class OptionsAutoTerminalService:
             self.real_lifecycle.blockers = list(real_state.get("blockers") or [])
             self.real_lifecycle.warnings = list(real_state.get("warnings") or [])
             self.real_lifecycle.safe_mode = bool(real_state.get("safe_mode"))
+            self.real_lifecycle.emergency_flatten_required = bool(real_state.get("emergency_flatten_required"))
             self.real_lifecycle.history = list(real_state.get("history") or [])
         self._options_ws_order_updates = list(payload.get("websocket_order_updates") or [])[-200:]
         self._real_broker_cache = dict(payload.get("real_broker_cache") or self._real_broker_cache)
@@ -1492,6 +1494,15 @@ class OptionsAutoTerminalService:
             self.performance_monitor.record_latency("websocket_order_update_to_lifecycle", self.performance_monitor.elapsed_ms(start), {"order_id": order_id, "status": row.get("status")})
             if self.real_lifecycle.snapshot().get("state") == UNPROTECTED_POSITION:
                 self.session.status = "UNPROTECTED_REAL_POSITION"
+        elif order_id and order_id in {
+            str((self.real_lifecycle.target_order or {}).get("order_id") or ""),
+            str((self.real_lifecycle.stoploss_order or {}).get("order_id") or ""),
+        }:
+            start = self.performance_monitor.now()
+            self.real_lifecycle.handle_exit_order_update(row, adapter=adapter)
+            self.performance_monitor.record_latency("websocket_exit_order_update_to_lifecycle", self.performance_monitor.elapsed_ms(start), {"order_id": order_id, "status": row.get("status")})
+            if self.real_lifecycle.snapshot().get("state") == UNPROTECTED_POSITION:
+                self.session.status = "UNPROTECTED_REAL_POSITION"
         self._persist_runtime_state_locked("websocket_order_update")
 
     def _locked_contract_quote_result(self, client: Any, contracts: list[dict[str, Any]], settings: dict[str, Any], source: str) -> dict[str, Any]:
@@ -1566,8 +1577,35 @@ class OptionsAutoTerminalService:
             order_id = str((update or {}).get("order_id") or (update or {}).get("id") or "")
             if not order_id:
                 continue
-            by_id[order_id] = {**by_id.get(order_id, {}), **dict(update or {}), "source": "zerodha_websocket_order_update"}
+            candidate = {**by_id.get(order_id, {}), **dict(update or {}), "source": "zerodha_websocket_order_update"}
+            existing = by_id.get(order_id)
+            if not existing or self._order_update_is_newer(candidate, existing):
+                by_id[order_id] = candidate
         return list(by_id.values())
+
+    def _order_update_is_newer(self, candidate: dict[str, Any], existing: dict[str, Any]) -> bool:
+        candidate_ts = self._order_update_timestamp(candidate)
+        existing_ts = self._order_update_timestamp(existing)
+        if candidate_ts and existing_ts:
+            return candidate_ts >= existing_ts
+        if candidate_ts and not existing_ts:
+            return True
+        if existing_ts and not candidate_ts:
+            return False
+        return True
+
+    def _order_update_timestamp(self, order: dict[str, Any]) -> datetime | None:
+        for key in ("exchange_update_timestamp", "exchange_timestamp", "order_timestamp", "updated_at", "last_status_seen_at", "received_at", "timestamp"):
+            value = (order or {}).get(key)
+            if not value:
+                continue
+            if isinstance(value, datetime):
+                return value.replace(tzinfo=None) if value.tzinfo else value
+            try:
+                return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+            except ValueError:
+                continue
+        return None
 
     def execute_paper_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.start_paper(payload)
@@ -1680,7 +1718,7 @@ class OptionsAutoTerminalService:
         settings = self._real_capability_settings(settings, mode, client, payload)
         self._configure_locked({**settings, "mode": mode}, kite_profile=payload.get("kite_profile") or {}, preserve_session=bool(self._live_scan_state_locked().get("running")))
         self.real_api_manager.client = client
-        broker_orders = self._broker_orders(client, payload)
+        broker_orders = self._merge_websocket_order_updates(self._broker_orders(client, payload))
         positions = self._broker_positions(client, payload)
         trade_plan = payload.get("trade_plan") or self.session.last_decision.get("trade_plan") or {}
         watchdog = self.watchdog.evaluate({
@@ -1718,7 +1756,7 @@ class OptionsAutoTerminalService:
     def real_reconcile(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         client = self.kite_client_provider("LIVE")
-        broker_orders = self._broker_orders(client, payload)
+        broker_orders = self._merge_websocket_order_updates(self._broker_orders(client, payload))
         positions = self._broker_positions(client, payload)
         trade_plan = payload.get("trade_plan") or self.session.last_decision.get("trade_plan") or {}
         result = self.real_controller.reconcile(self.session.orders, broker_orders, positions, trade_plan)
@@ -1734,7 +1772,7 @@ class OptionsAutoTerminalService:
     def real_lifecycle_poll(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         client = self.kite_client_provider("LIVE")
-        broker_orders = self._broker_orders(client, payload)
+        broker_orders = self._merge_websocket_order_updates(self._broker_orders(client, payload))
         positions = self._broker_positions(client, payload)
         adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
         lifecycle = self.real_lifecycle.poll_entry_status(broker_orders, settings=self.settings, adapter=adapter)
@@ -2967,7 +3005,7 @@ class OptionsAutoTerminalService:
         client = self.kite_client_provider("LIVE")
         if not client:
             return {"synced": False, "reason": "Real Zerodha client is not connected.", "active_trades": 0}
-        broker_orders = self._broker_orders(client, payload)
+        broker_orders = self._merge_websocket_order_updates(self._broker_orders(client, payload))
         positions = self._normalise_positions(self._broker_positions(client, payload))
         option_positions = [position for position in positions if self._is_open_option_position(position)]
         option_orders = [order for order in broker_orders if self._is_option_order(order)]
@@ -3014,9 +3052,13 @@ class OptionsAutoTerminalService:
     def _trade_from_real_position(self, position: dict[str, Any], orders: list[dict[str, Any]]) -> dict[str, Any]:
         symbol = str(position.get("tradingsymbol") or position.get("symbol") or "").upper()
         symbol_orders = [order for order in orders if str(order.get("tradingsymbol") or order.get("symbol") or "").upper() == symbol]
-        sell_orders = [order for order in symbol_orders if str(order.get("transaction_type") or "").upper() == "SELL" and str(order.get("status") or "OPEN").upper() not in {"COMPLETE", "CANCELLED", "REJECTED"}]
+        active_statuses = {"OPEN", "TRIGGER PENDING", "VALIDATION PENDING"}
+        sell_orders = [order for order in symbol_orders if str(order.get("transaction_type") or "").upper() == "SELL" and str(order.get("status") or "OPEN").upper() in active_statuses]
         target = next((order for order in sell_orders if str(order.get("order_type") or "").upper() == "LIMIT"), {})
         stoploss = next((order for order in sell_orders if str(order.get("order_type") or "").upper() in {"SL", "SL-M", "SL-LIMIT", "STOPLOSS", "STOPLOSS_LIMIT"}), {})
+        target_active = str(target.get("status") or "").upper() in active_statuses
+        stoploss_active = str(stoploss.get("status") or "").upper() in active_statuses
+        protected = bool(target_active and stoploss_active)
         quantity = abs(int(_number(position.get("quantity"), position.get("net_quantity"))))
         entry = _number(position.get("average_price"), position.get("buy_price") or 0)
         ltp = _number(position.get("last_price"), position.get("close_price") or entry)
@@ -3036,8 +3078,10 @@ class OptionsAutoTerminalService:
             "stoploss": _number(stoploss.get("trigger_price"), stoploss.get("price")),
             "target_order_id": target.get("order_id") or target.get("id") or "",
             "stoploss_order_id": stoploss.get("order_id") or stoploss.get("id") or "",
-            "oco_active": bool(target and stoploss),
-            "position_protected": bool(target and stoploss),
+            "target_status": target.get("status") or "",
+            "stoploss_status": stoploss.get("status") or "",
+            "oco_active": protected,
+            "position_protected": protected,
             "source": "zerodha_real_positions",
             "updated_at": datetime.now().isoformat(timespec="seconds"),
         }

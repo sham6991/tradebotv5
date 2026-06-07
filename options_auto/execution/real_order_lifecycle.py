@@ -9,6 +9,8 @@ from options_auto.execution.real_execution_controller import RealExecutionContro
 
 
 IDLE = "IDLE"
+ENTRY_REQUESTED = "ENTRY_REQUESTED"
+ENTRY_OPEN = "ENTRY_OPEN"
 ENTRY_ORDER_SENT = "ENTRY_ORDER_SENT"
 ENTRY_ORDER_OPEN = "ENTRY_ORDER_OPEN"
 ENTRY_PARTIAL = "ENTRY_PARTIAL"
@@ -27,8 +29,18 @@ UNPROTECTED_POSITION = "UNPROTECTED_POSITION"
 MANUAL_ATTENTION = "MANUAL_ATTENTION"
 SAFE_MODE = "SAFE_MODE"
 
+ENTRY_FILLED_UNPROTECTED = "ENTRY_FILLED_UNPROTECTED"
+PROTECTIVE_EXIT_PLACING = "PROTECTIVE_EXIT_PLACING"
+PROTECTIVE_EXIT_ACTIVE = "PROTECTIVE_EXIT_ACTIVE"
+PROTECTIVE_EXIT_FAILED = "PROTECTIVE_EXIT_FAILED"
+RECONCILIATION_REQUIRED = "RECONCILIATION_REQUIRED"
+FLATTENING = "FLATTENING"
+FLAT = "FLAT"
+
 
 TERMINAL_ENTRY_STATES = {ENTRY_REJECTED, ENTRY_CANCELLED, ENTRY_TIMEOUT}
+PROTECTIVE_ACTIVE_STATUSES = {"OPEN", "TRIGGER PENDING", "VALIDATION PENDING"}
+PROTECTIVE_FAILED_STATUSES = {"REJECTED", "CANCELLED", "CANCELLED AMO", "EXPIRED", "FAILED"}
 
 
 @dataclass
@@ -44,6 +56,8 @@ class RealOrderLifecycleEngine:
     blockers: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     safe_mode: bool = False
+    protected_state: str = FLAT
+    emergency_flatten_required: bool = False
 
     def submit_entry(self, entry_order: dict[str, Any], trade_plan: dict[str, Any], settings: dict[str, Any] | None = None) -> dict[str, Any]:
         self.entry_order = dict(entry_order or {})
@@ -54,9 +68,11 @@ class RealOrderLifecycleEngine:
         self.blockers = []
         self.warnings = []
         self.state = ENTRY_ORDER_OPEN if self.entry_order.get("order_id") else ENTRY_ORDER_SENT
+        self.protected_state = ENTRY_OPEN if self.entry_order.get("order_id") else ENTRY_REQUESTED
+        self.emergency_flatten_required = False
         self.entry_order.setdefault("submitted_at", iso_now())
         self.entry_order.setdefault("status", "OPEN")
-        self._event(self.state, order_id=self.entry_order.get("order_id"))
+        self._event(self.state, order_id=self.entry_order.get("order_id"), protected_state=self.protected_state)
         return self.snapshot()
 
     def poll_entry_status(self, broker_orders: list[dict[str, Any]] | None = None, now: datetime | None = None, settings: dict[str, Any] | None = None, adapter: Any | None = None) -> dict[str, Any]:
@@ -82,34 +98,50 @@ class RealOrderLifecycleEngine:
             return self.on_entry_partial(update, settings=settings, adapter=adapter)
         if status == "REJECTED":
             self.state = ENTRY_REJECTED
+            self.protected_state = FLAT
             reason = update.get("status_message") or update.get("rejection_reason") or "Broker rejected entry order."
             self.blockers = [str(reason)]
             self._event(self.state, reason=reason)
             return self.snapshot()
         if status == "CANCELLED":
             self.state = ENTRY_CANCELLED
+            self.protected_state = FLAT
             self._event(self.state)
             return self.snapshot()
         if self._entry_timed_out(now, settings):
             self.state = ENTRY_TIMEOUT
+            self.protected_state = FLAT
             self.blockers = ["Entry order timed out before fill."]
             self._event(self.state)
             return self.snapshot()
         self.state = ENTRY_ORDER_OPEN
-        self._event(self.state, broker_status=status)
+        self.protected_state = ENTRY_OPEN
+        self._event(self.state, broker_status=status, protected_state=self.protected_state)
         return self.snapshot()
 
     def on_entry_complete(self, order_update: dict[str, Any], settings: dict[str, Any] | None = None, adapter: Any | None = None) -> dict[str, Any]:
-        self.state = ENTRY_COMPLETE
         self.fill = _fill_from_order(order_update, self.trade_plan)
-        self._event(self.state, average_price=self.fill.get("average_price"), filled_quantity=self.fill.get("filled_quantity"))
+        if self._protection_submission_started():
+            protected_qty = min(_int(self.target_order.get("quantity")), _int(self.stoploss_order.get("quantity")))
+            if protected_qty > 0 and _int(self.fill.get("filled_quantity")) > protected_qty:
+                return self.mark_unprotected("Filled quantity exceeds confirmed protective exit quantity.")
+            return self.snapshot()
+        self.state = ENTRY_COMPLETE
+        self.protected_state = ENTRY_FILLED_UNPROTECTED
+        self._event(self.state, average_price=self.fill.get("average_price"), filled_quantity=self.fill.get("filled_quantity"), protected_state=self.protected_state)
         return self.place_protection_orders(settings=settings, adapter=adapter)
 
     def on_entry_partial(self, order_update: dict[str, Any], settings: dict[str, Any] | None = None, adapter: Any | None = None) -> dict[str, Any]:
         settings = dict(settings or {})
-        self.state = ENTRY_PARTIAL
         self.fill = _fill_from_order(order_update, self.trade_plan)
-        self._event(self.state, filled_quantity=self.fill.get("filled_quantity"))
+        if self._protection_submission_started():
+            protected_qty = min(_int(self.target_order.get("quantity")), _int(self.stoploss_order.get("quantity")))
+            if protected_qty > 0 and _int(self.fill.get("filled_quantity")) > protected_qty:
+                return self.mark_unprotected("Partial fill increased beyond protective exit quantity.")
+            return self.snapshot()
+        self.state = ENTRY_PARTIAL
+        self.protected_state = ENTRY_PARTIAL
+        self._event(self.state, filled_quantity=self.fill.get("filled_quantity"), protected_state=self.protected_state)
         if settings.get("partial_fill_protect_immediately", True):
             return self.place_protection_orders(settings=settings, adapter=adapter)
         return self.snapshot()
@@ -118,14 +150,16 @@ class RealOrderLifecycleEngine:
         settings = dict(settings or {})
         if not self.fill or _int(self.fill.get("filled_quantity")) <= 0:
             self.blockers = ["No broker fill is available; target/SL were not placed."]
+            self.protected_state = RECONCILIATION_REQUIRED
             return self.snapshot()
         self.state = PROTECTION_PENDING
+        self.protected_state = PROTECTIVE_EXIT_PLACING
         protection = self.controller.protection_orders_from_fill(self.trade_plan, self.fill, settings)
         target_request = protection["target_order"]
         stop_request = protection["stoploss_order"]
         self.target_order = {**target_request, "status": "PENDING"}
         self.stoploss_order = {**stop_request, "status": "PENDING"}
-        self._event(PROTECTION_PENDING, quantity=self.fill.get("filled_quantity"))
+        self._event(PROTECTION_PENDING, quantity=self.fill.get("filled_quantity"), protected_state=self.protected_state)
 
         if adapter:
             target_response = adapter.place_target_sell_limit(
@@ -137,11 +171,9 @@ class RealOrderLifecycleEngine:
                 target_request.get("tag") or "OPTIONS_AUTO",
             )
             if target_response.get("ok"):
-                self.target_order.update({"order_id": target_response.get("value") or target_response.get("order_id"), "status": "OPEN", "submitted_at": iso_now()})
-                self.state = TARGET_PLACED
+                self.target_order.update({"order_id": target_response.get("value") or target_response.get("order_id"), "status": "SUBMITTED", "submitted_at": iso_now()})
             else:
                 self.target_order.update({"status": "FAILED", "error": target_response.get("error")})
-                self.state = MANUAL_ATTENTION
                 self.warnings.append("Target placement failed; protective SL must remain supervised.")
 
             sl_response = adapter.place_stoploss_sell_sl_limit(
@@ -154,8 +186,8 @@ class RealOrderLifecycleEngine:
                 stop_request.get("tag") or "OPTIONS_AUTO",
             )
             if sl_response.get("ok"):
-                self.stoploss_order.update({"order_id": sl_response.get("value") or sl_response.get("order_id"), "status": "OPEN", "submitted_at": iso_now()})
-                self.state = OCO_ACTIVE if self.target_order.get("status") == "OPEN" else SL_PLACED
+                self.stoploss_order.update({"order_id": sl_response.get("value") or sl_response.get("order_id"), "status": "SUBMITTED", "submitted_at": iso_now()})
+                self.state = PROTECTION_PENDING
             else:
                 self.stoploss_order.update({"status": "FAILED", "error": sl_response.get("error")})
                 self.mark_unprotected("Stoploss placement failed.")
@@ -165,6 +197,22 @@ class RealOrderLifecycleEngine:
             self.state = PROTECTION_PENDING
         return self.snapshot()
 
+    def handle_exit_order_update(self, order_update: dict[str, Any], adapter: Any | None = None) -> dict[str, Any]:
+        update = dict(order_update or {})
+        order_id = str(update.get("order_id") or update.get("id") or "")
+        role = self._exit_order_role(order_id)
+        if not role:
+            return self.snapshot()
+        target = self.target_order if role == "target" else self.stoploss_order
+        target.update(update)
+        target["last_status_seen_at"] = iso_now()
+        status = _status(target)
+        if status in {"COMPLETE", "FILLED"}:
+            return self.monitor_oco([self.target_order, self.stoploss_order], adapter=adapter)
+        if status in PROTECTIVE_FAILED_STATUSES and self.protected_state != FLAT and _int(self.fill.get("filled_quantity")) > 0:
+            return self.mark_unprotected(f"Protective {role} order {status.lower()} in broker update.")
+        return self.verify_protection_orders([self.target_order, self.stoploss_order])
+
     def verify_protection_orders(self, broker_orders: list[dict[str, Any]] | None = None) -> dict[str, Any]:
         target = self._find_order(broker_orders, self.target_order.get("order_id"))
         stop = self._find_order(broker_orders, self.stoploss_order.get("order_id"))
@@ -172,12 +220,24 @@ class RealOrderLifecycleEngine:
             self.target_order.update(target)
         if stop:
             self.stoploss_order.update(stop)
-        target_open = _status(self.target_order) in {"OPEN", "TRIGGER PENDING", "VALIDATION PENDING"}
-        stop_open = _status(self.stoploss_order) in {"OPEN", "TRIGGER PENDING", "VALIDATION PENDING"}
+        target_status = _status(self.target_order)
+        stop_status = _status(self.stoploss_order)
+        target_open = target_status in PROTECTIVE_ACTIVE_STATUSES
+        stop_open = stop_status in PROTECTIVE_ACTIVE_STATUSES
+        failed_roles = []
+        if target_status in PROTECTIVE_FAILED_STATUSES:
+            failed_roles.append("target")
+        if stop_status in PROTECTIVE_FAILED_STATUSES:
+            failed_roles.append("stoploss")
+        if failed_roles and _int(self.fill.get("filled_quantity")) > 0 and self.protected_state != FLAT:
+            return self.mark_unprotected(f"Protective {'/'.join(failed_roles)} order failed in broker orderbook.")
         if target_open and stop_open:
             self.state = OCO_ACTIVE
-        elif not stop_open and _int(self.fill.get("filled_quantity")) > 0:
-            self.mark_unprotected("Filled real position has no active stoploss order.")
+            self.protected_state = PROTECTIVE_EXIT_ACTIVE
+            self._event(OCO_ACTIVE, protected_state=self.protected_state)
+        elif _int(self.fill.get("filled_quantity")) > 0 and self.protected_state not in {PROTECTIVE_EXIT_FAILED, RECONCILIATION_REQUIRED, FLAT}:
+            self.state = PROTECTION_PENDING
+            self.protected_state = PROTECTIVE_EXIT_PLACING
         return self.snapshot()
 
     def monitor_oco(self, broker_orders: list[dict[str, Any]] | None = None, adapter: Any | None = None) -> dict[str, Any]:
@@ -189,9 +249,11 @@ class RealOrderLifecycleEngine:
             self.stoploss_order.update(stop)
         if _status(self.target_order) in {"COMPLETE", "FILLED"}:
             self.state = TARGET_FILLED
+            self.protected_state = FLATTENING
             self.cancel_opposite_exit(adapter, self.stoploss_order.get("order_id"))
         elif _status(self.stoploss_order) in {"COMPLETE", "FILLED"}:
             self.state = SL_FILLED
+            self.protected_state = FLATTENING
             self.cancel_opposite_exit(adapter, self.target_order.get("order_id"))
         return self.snapshot()
 
@@ -200,21 +262,26 @@ class RealOrderLifecycleEngine:
             response = adapter.cancel_order(order_id)
             self._event("OCO_CANCEL_SUBMITTED", order_id=order_id, ok=response.get("ok"))
         self.state = EXIT_RECONCILED
+        self.protected_state = FLAT
+        self.emergency_flatten_required = False
         self._event(self.state)
         return self.snapshot()
 
     def reconcile_positions(self, broker_orders: list[dict[str, Any]] | None = None, positions: list[dict[str, Any]] | dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.controller.reconcile([self.entry_order, self.target_order, self.stoploss_order], broker_orders, positions, self.trade_plan)
         if result.get("unprotected_positions"):
+            self.protected_state = RECONCILIATION_REQUIRED
             self.mark_unprotected("Unprotected real position detected. New entries stopped. Check broker terminal immediately.")
         return {**self.snapshot(), "reconciliation": result}
 
     def mark_unprotected(self, reason: str) -> dict[str, Any]:
         self.state = UNPROTECTED_POSITION
+        self.protected_state = PROTECTIVE_EXIT_FAILED
         self.safe_mode = True
+        self.emergency_flatten_required = True
         self.blockers = list(dict.fromkeys(self.blockers + [reason]))
         self.controller.enter_safe_mode("OPTIONS_AUTO", reason)
-        self._event(UNPROTECTED_POSITION, reason=reason)
+        self._event(UNPROTECTED_POSITION, reason=reason, protected_state=self.protected_state)
         return self.snapshot()
 
     def snapshot(self) -> dict[str, Any]:
@@ -227,6 +294,8 @@ class RealOrderLifecycleEngine:
             "blockers": list(self.blockers),
             "warnings": list(self.warnings),
             "safe_mode": self.safe_mode,
+            "protected_state": self.protected_state,
+            "emergency_flatten_required": self.emergency_flatten_required,
             "history": list(self.history[-100:]),
         }
 
@@ -244,6 +313,26 @@ class RealOrderLifecycleEngine:
             if str((order or {}).get("order_id") or (order or {}).get("id") or "") == str(order_id):
                 return dict(order or {})
         return {}
+
+    def _exit_order_role(self, order_id: Any) -> str:
+        if not order_id:
+            return ""
+        text = str(order_id)
+        if text == str(self.target_order.get("order_id") or self.target_order.get("id") or ""):
+            return "target"
+        if text == str(self.stoploss_order.get("order_id") or self.stoploss_order.get("id") or ""):
+            return "stoploss"
+        return ""
+
+    def _protection_submission_started(self) -> bool:
+        if self.protected_state in {PROTECTIVE_EXIT_PLACING, PROTECTIVE_EXIT_ACTIVE, PROTECTIVE_EXIT_FAILED, RECONCILIATION_REQUIRED, FLATTENING}:
+            return True
+        return bool(
+            self.target_order.get("order_id")
+            or self.stoploss_order.get("order_id")
+            or _status(self.target_order) in {"PENDING", "SUBMITTED", *PROTECTIVE_ACTIVE_STATUSES}
+            or _status(self.stoploss_order) in {"PENDING", "SUBMITTED", *PROTECTIVE_ACTIVE_STATUSES}
+        )
 
     def _event(self, event: str, **extra: Any) -> None:
         self.history.append({"timestamp": iso_now(), "event": event, **extra})

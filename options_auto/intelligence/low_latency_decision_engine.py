@@ -14,8 +14,8 @@ from options_auto.intelligence.simple_ohlcv_entry import simple_ohlcv_entry_enab
 def fast_entry_limit_formula(plan: dict[str, Any], latest_quote: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
     entry_plan = dict(plan.get("entry_plan") or {})
     planned_entry = _number(entry_plan.get("entry_limit"), _number(entry_plan.get("signal_price")))
-    bid = _number(latest_quote.get("bid"))
-    ask = _number(latest_quote.get("ask"))
+    bid = _quote_bid(latest_quote)
+    ask = _quote_ask(latest_quote)
     ltp = _number(latest_quote.get("ltp"), latest_quote.get("last_price"))
     tick_size = _number(latest_quote.get("tick_size"), entry_plan.get("tick_size") or 0.05)
     raw_entry = min(ask, ltp + _number(settings.get("slippage_buffer_points"), 0.1), planned_entry + _number(settings.get("max_chase_points"), 3.0))
@@ -63,8 +63,8 @@ class LowLatencyDecisionEngine:
         quote_age = _quote_age(latest_quote, now_epoch)
         if quote_age > _number(settings.get("quote_stale_seconds"), 3.0):
             blockers.append("Quote stale.")
-        bid = _number(latest_quote.get("bid"))
-        ask = _number(latest_quote.get("ask"))
+        bid = _quote_bid(latest_quote)
+        ask = _quote_ask(latest_quote)
         if bid <= 0 or ask <= 0 or ask < bid:
             blockers.append("Invalid bid/ask.")
         spread_pct = bid_ask_spread_pct(bid, ask)
@@ -175,6 +175,28 @@ def _quote_age(quote: dict[str, Any], now_epoch: float) -> float:
     if timestamp in ("", None):
         return 0.0
     return max(0.0, now_epoch - _number(timestamp, now_epoch))
+
+
+def _quote_bid(quote: dict[str, Any]) -> float:
+    return _number(
+        quote.get("bid"),
+        _number(quote.get("best_bid"), _depth_price(quote, "buy")),
+    )
+
+
+def _quote_ask(quote: dict[str, Any]) -> float:
+    return _number(
+        quote.get("ask"),
+        _number(quote.get("best_ask"), _depth_price(quote, "sell")),
+    )
+
+
+def _depth_price(quote: dict[str, Any], side: str) -> float:
+    depth = dict((quote or {}).get("depth") or {})
+    rows = list(depth.get(side) or [])
+    if not rows:
+        return 0.0
+    return _number((rows[0] or {}).get("price"))
 
 
 def _number(value: Any, default: float = 0.0) -> float:

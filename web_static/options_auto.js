@@ -553,12 +553,15 @@ function renderIndustryDiagnostics() {
 
   const lifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
   const lifecycleState = lifecycle.state || "IDLE";
-  const lifecycleBad = /UNPROTECTED|SAFE|MANUAL|REJECTED|CANCELLED|TIMEOUT/.test(String(lifecycleState));
-  const lifecycleGood = /OCO_ACTIVE|TARGET_FILLED|SL_FILLED|EXIT_RECONCILED/.test(String(lifecycleState));
+  const protectedState = lifecycle.protected_state || "-";
+  const lifecycleBad = /UNPROTECTED|SAFE|MANUAL|REJECTED|CANCELLED|TIMEOUT/.test(String(lifecycleState)) || /FAILED|RECONCILIATION_REQUIRED/.test(String(protectedState));
+  const lifecycleGood = /OCO_ACTIVE|TARGET_FILLED|SL_FILLED|EXIT_RECONCILED/.test(String(lifecycleState)) && !lifecycleBad;
   setBadge("#oa-real-lifecycle-badge", lifecycleState, lifecycleBad ? "red" : lifecycleGood ? "green" : lifecycleState === "IDLE" ? "grey" : "yellow");
   setHtml("#oa-real-lifecycle-panel", [
     metric("State", lifecycleState),
+    metric("Protected State", protectedState),
     metric("Safe Mode", lifecycle.safe_mode ? "YES" : "NO"),
+    metric("Emergency Flatten", lifecycle.emergency_flatten_required ? "YES" : "NO"),
     metric("Entry Order", lifecycle.entry_order?.order_id || "-"),
     metric("Entry Status", lifecycle.entry_order?.status || "-"),
     metric("Fill Qty", lifecycle.fill?.filled_quantity || "-"),

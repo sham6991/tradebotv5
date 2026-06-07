@@ -12,10 +12,15 @@ from options_auto.execution.real_execution_controller import RealExecutionContro
 from options_auto.execution.real_order_lifecycle import (
     ENTRY_ORDER_OPEN,
     OCO_ACTIVE,
+    PROTECTION_PENDING,
+    PROTECTIVE_EXIT_ACTIVE,
+    PROTECTIVE_EXIT_FAILED,
+    PROTECTIVE_EXIT_PLACING,
     UNPROTECTED_POSITION,
     RealOrderLifecycleEngine,
 )
 from options_auto.intelligence.option_premium_confirmation import confirm_option_premium
+from options_auto.intelligence.low_latency_decision_engine import LowLatencyDecisionEngine
 from web_core.path_safety import safe_user_path
 
 
@@ -128,6 +133,34 @@ def entry_order(**overrides):
     return base
 
 
+def ready_plan(**overrides):
+    base = {
+        "status": "READY",
+        "side": "CE",
+        "last_refreshed_epoch": 1000.0,
+        "entry_plan": {"entry_limit": 100.0, "signal_price": 100.0, "tick_size": 0.05},
+        "premium_context": {"option_atr14": 10.0},
+        "contract": {"tradingsymbol": "NIFTY26JUN23500CE"},
+    }
+    base.update(overrides)
+    return base
+
+
+def fast_settings(**overrides):
+    base = {
+        "strategy_profile": "AGGRESSIVE",
+        "aggressive_uses_simple_ohlcv_entry": True,
+        "max_plan_age_seconds_aggressive": 3.0,
+        "quote_stale_seconds": 3.0,
+        "max_spread_pct": 0.60,
+        "slippage_buffer_points": 5.0,
+        "max_chase_points": 3.0,
+        "max_chase_atr_fraction": 10.0,
+    }
+    base.update(overrides)
+    return base
+
+
 class OptionsAutoIndustryHardeningTests(unittest.TestCase):
     def test_real_lifecycle_waits_for_fill_before_target_and_sl(self):
         engine = RealOrderLifecycleEngine(RealExecutionController())
@@ -157,12 +190,19 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
             "average_price": 101.25,
         }], settings={"min_stoploss_pct": 2.0, "risk_reward_multiplier": 1.5}, adapter=adapter)
 
-        self.assertEqual(filled["state"], OCO_ACTIVE)
+        self.assertEqual(filled["state"], PROTECTION_PENDING)
+        self.assertEqual(filled["protected_state"], PROTECTIVE_EXIT_PLACING)
         self.assertEqual(filled["fill"]["average_price"], 101.25)
         self.assertEqual(adapter.target_orders[0]["quantity"], 65)
         self.assertEqual(adapter.stoploss_orders[0]["quantity"], 65)
         self.assertGreater(adapter.target_orders[0]["price"], filled["fill"]["average_price"])
         self.assertLess(adapter.stoploss_orders[0]["trigger_price"], filled["fill"]["average_price"])
+        verified = engine.verify_protection_orders([
+            {**filled["target_order"], "status": "OPEN"},
+            {**filled["stoploss_order"], "status": "TRIGGER PENDING"},
+        ])
+        self.assertEqual(verified["state"], OCO_ACTIVE)
+        self.assertEqual(verified["protected_state"], PROTECTIVE_EXIT_ACTIVE)
 
     def test_real_lifecycle_protects_partial_fill_quantity(self):
         engine = RealOrderLifecycleEngine(RealExecutionController())
@@ -177,9 +217,16 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
             "average_price": 99.5,
         }], settings={"partial_fill_protect_immediately": True}, adapter=adapter)
 
-        self.assertEqual(snapshot["state"], OCO_ACTIVE)
+        self.assertEqual(snapshot["state"], PROTECTION_PENDING)
+        self.assertEqual(snapshot["protected_state"], PROTECTIVE_EXIT_PLACING)
         self.assertEqual(adapter.target_orders[0]["quantity"], 20)
         self.assertEqual(adapter.stoploss_orders[0]["quantity"], 20)
+        verified = engine.verify_protection_orders([
+            {**snapshot["target_order"], "status": "OPEN"},
+            {**snapshot["stoploss_order"], "status": "TRIGGER PENDING"},
+        ])
+        self.assertEqual(verified["state"], OCO_ACTIVE)
+        self.assertEqual(verified["protected_state"], PROTECTIVE_EXIT_ACTIVE)
 
     def test_sl_failure_enters_unprotected_safe_mode(self):
         controller = RealExecutionController()
@@ -195,9 +242,76 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
         }], adapter=FakeProtectionAdapter(fail_sl=True))
 
         self.assertEqual(snapshot["state"], UNPROTECTED_POSITION)
+        self.assertEqual(snapshot["protected_state"], PROTECTIVE_EXIT_FAILED)
+        self.assertTrue(snapshot["emergency_flatten_required"])
         self.assertTrue(snapshot["safe_mode"])
         self.assertTrue(controller.state.safe_mode)
         self.assertTrue(controller.state.stop_new_entries)
+
+    def test_protective_order_rejection_enters_safe_mode(self):
+        controller = RealExecutionController()
+        engine = RealOrderLifecycleEngine(controller)
+        adapter = FakeProtectionAdapter()
+        engine.submit_entry(entry_order(), trade_plan(), {})
+        filled = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "COMPLETE",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "average_price": 100.0,
+        }], adapter=adapter)
+
+        snapshot = engine.verify_protection_orders([
+            {**filled["target_order"], "status": "OPEN"},
+            {**filled["stoploss_order"], "status": "REJECTED", "status_message": "trigger rejected"},
+        ])
+
+        self.assertEqual(snapshot["state"], UNPROTECTED_POSITION)
+        self.assertEqual(snapshot["protected_state"], PROTECTIVE_EXIT_FAILED)
+        self.assertTrue(snapshot["safe_mode"])
+
+    def test_final_validation_rejects_stale_tick(self):
+        result = LowLatencyDecisionEngine().validate_final_entry(
+            ready_plan(),
+            {"ltp": 100.0, "bid": 99.95, "ask": 100.05, "age_seconds": 5.0},
+            fast_settings(),
+            {"governor_allowed": True},
+            now_epoch=1001.0,
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("Quote stale.", result["blockers"])
+
+    def test_final_validation_rejects_wide_spread(self):
+        result = LowLatencyDecisionEngine().validate_final_entry(
+            ready_plan(),
+            {"ltp": 101.0, "bid": 100.0, "ask": 102.0, "age_seconds": 0.0},
+            fast_settings(max_spread_pct=0.60),
+            {"governor_allowed": True},
+            now_epoch=1001.0,
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("Spread too wide.", result["blockers"])
+
+    def test_buy_limit_uses_depth_ask_when_quote_ask_missing(self):
+        result = LowLatencyDecisionEngine().validate_final_entry(
+            ready_plan(entry_plan={"entry_limit": 100.0, "signal_price": 100.0, "tick_size": 0.05}),
+            {
+                "ltp": 100.20,
+                "depth": {
+                    "buy": [{"price": 100.00, "quantity": 500}],
+                    "sell": [{"price": 100.15, "quantity": 500}],
+                },
+                "age_seconds": 0.0,
+            },
+            fast_settings(),
+            {"governor_allowed": True, "regime": {"side": "CE"}, "market_cue": {"side": "CE"}},
+            now_epoch=1001.0,
+        )
+
+        self.assertTrue(result["allowed"], result["blockers"])
+        self.assertEqual(result["entry_limit"], 100.15)
 
     def test_quote_provider_batches_and_returns_token_lookup(self):
         client = FakeQuoteClient()

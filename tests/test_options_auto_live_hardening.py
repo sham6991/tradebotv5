@@ -202,7 +202,9 @@ class StreamingOptionsZerodha:
 
     def place_stoploss_limit_order(self, **kwargs):
         self.stoploss_orders.append(dict(kwargs))
-        return f"SL-{len(self.stoploss_orders)}"
+        order_id = f"SL-{len(self.stoploss_orders)}"
+        self._orders.append({**kwargs, "order_id": order_id, "status": "TRIGGER PENDING"})
+        return order_id
 
     def _option_instruments(self):
         rows = []
@@ -527,7 +529,8 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
 
             self.assertEqual(lifecycle["fill"]["average_price"], actual_fill)
             self.assertEqual(lifecycle["fill"]["filled_quantity"], entry_order["quantity"])
-            self.assertEqual(lifecycle["state"], "OCO_ACTIVE")
+            self.assertEqual(lifecycle["state"], "PROTECTION_PENDING")
+            self.assertEqual(lifecycle["protected_state"], "PROTECTIVE_EXIT_PLACING")
             self.assertEqual(len(client.limit_orders), 2)
             self.assertEqual(len(client.stoploss_orders), 1)
             target_order = client.limit_orders[-1]
@@ -538,6 +541,9 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
             self.assertEqual(stoploss_order["quantity"], entry_order["quantity"])
             self.assertGreater(target_order["price"], actual_fill)
             self.assertLess(stoploss_order["trigger_price"], actual_fill)
+            confirmed = service.real_lifecycle_poll({"positions": []})["real_order_lifecycle"]
+            self.assertEqual(confirmed["state"], "OCO_ACTIVE")
+            self.assertEqual(confirmed["protected_state"], "PROTECTIVE_EXIT_ACTIVE")
             service.stop_live_scan({"mode": MODE_REAL})
 
     def test_real_live_broker_snapshot_is_reused_for_sync_and_lifecycle(self):
@@ -588,6 +594,63 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
             entry_snapshot = next(order for order in second["broker_orders"] if order.get("order_id") == result["entry_order"]["order_id"])
             self.assertEqual(entry_snapshot["status"], "COMPLETE")
             self.assertEqual(entry_snapshot["source"], "zerodha_websocket_order_update")
+
+    def test_real_live_broker_payload_prefers_newer_websocket_order_update(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            result = service.place_real_order(payload)
+            service._live_scan_stop.set()
+            entry = result["entry_order"]
+            client._orders = [{
+                **entry,
+                "status": "OPEN",
+                "filled_quantity": 0,
+                "exchange_update_timestamp": "2026-06-07T10:00:00",
+            }]
+            client.emit_order_update({
+                **entry,
+                "status": "COMPLETE",
+                "filled_quantity": entry["quantity"],
+                "average_price": entry["price"],
+                "exchange_update_timestamp": "2026-06-07T10:00:05",
+            })
+
+            with service._lock:
+                merged = service._real_live_broker_payload_locked({key: value for key, value in payload.items() if key not in {"broker_orders", "positions"}})
+
+            entry_snapshot = next(order for order in merged["broker_orders"] if order.get("order_id") == entry["order_id"])
+            self.assertEqual(entry_snapshot["status"], "COMPLETE")
+            self.assertEqual(entry_snapshot["source"], "zerodha_websocket_order_update")
+
+    def test_real_live_broker_payload_keeps_newer_polling_order_update(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            result = service.place_real_order(payload)
+            service._live_scan_stop.set()
+            entry = result["entry_order"]
+            client._orders = [{
+                **entry,
+                "status": "OPEN",
+                "filled_quantity": 0,
+                "exchange_update_timestamp": "2026-06-07T10:00:05",
+            }]
+            client.emit_order_update({
+                **entry,
+                "status": "COMPLETE",
+                "filled_quantity": entry["quantity"],
+                "average_price": entry["price"],
+                "exchange_update_timestamp": "2026-06-07T10:00:00",
+            })
+
+            with service._lock:
+                merged = service._real_live_broker_payload_locked({key: value for key, value in payload.items() if key not in {"broker_orders", "positions"}})
+
+            entry_snapshot = next(order for order in merged["broker_orders"] if order.get("order_id") == entry["order_id"])
+            self.assertEqual(entry_snapshot["status"], "OPEN")
 
     def test_kite_api_manager_blocks_bursts_before_zerodha_limit_errors(self):
         api = KiteApiManager(limiter=RateLimiter(max_calls=3, per_seconds=1.0))

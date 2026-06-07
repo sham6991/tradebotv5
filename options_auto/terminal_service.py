@@ -43,6 +43,7 @@ from options_auto.intelligence.adaptive_risk_engine import PositionSizer, RiskEn
 from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
 from options_auto.intelligence.entry_timing_engine import EntryTimingEngine, round_to_tick
 from options_auto.intelligence.exit_manager import ExitManager, build_long_option_trade_plan
+from options_auto.intelligence.feature_builder import build_index_features
 from options_auto.intelligence.live_adaptive_engine import LiveAdaptiveEngine
 from options_auto.intelligence.low_latency_decision_engine import LowLatencyDecisionEngine
 from options_auto.intelligence.master_governor import MasterGovernor
@@ -112,6 +113,7 @@ class OptionsAutoTerminalService:
         self.locked_contract_manager = LockedContractManager()
         self._lock = threading.RLock()
         self._live_scan_stop = threading.Event()
+        self._live_scan_wake = threading.Event()
         self._live_scan_thread: threading.Thread | None = None
         self._live_scan_mode = ""
         self._live_scan_payload: dict[str, Any] = {}
@@ -120,6 +122,20 @@ class OptionsAutoTerminalService:
         self._live_scan_last_cycle = ""
         self._live_scan_last_error = ""
         self._live_scan_cycle_count = 0
+        self._options_ws_mode = ""
+        self._options_ws_client_id = 0
+        self._options_ws_tokens: tuple[int, ...] = ()
+        self._options_ws_roles: dict[int, str] = {}
+        self._options_ws_started_at = ""
+        self._options_ws_last_error = ""
+        self._options_ws_order_updates: list[dict[str, Any]] = []
+        self._real_broker_cache: dict[str, Any] = {"orders": [], "positions": [], "updated_at_epoch": 0.0}
+        self._last_event_scan_epoch = 0.0
+        self._reference_cache: dict[str, Any] = {}
+        self._feature_cache: dict[str, Any] = {"key": "", "features": {}, "hits": 0, "misses": 0}
+        self._runtime_state_loaded_from = ""
+        self._runtime_state_last_saved_at = ""
+        self._load_runtime_state()
 
     def defaults(self) -> dict[str, Any]:
         return {
@@ -154,10 +170,122 @@ class OptionsAutoTerminalService:
                 "real_order_lifecycle": self.real_lifecycle.snapshot(),
                 "blackbox": self.blackbox_recorder.snapshot(),
                 "instrument_cache": self.options_instrument_cache.snapshot(),
+                "runtime_persistence": self._runtime_persistence_snapshot_locked(),
+                "reference_cache": dict(self._reference_cache),
+                "feature_cache": {
+                    "key": self._feature_cache.get("key") or "",
+                    "hits": self._feature_cache.get("hits") or 0,
+                    "misses": self._feature_cache.get("misses") or 0,
+                    "enabled": bool(self.settings.get("incremental_feature_cache_enabled", True)),
+                },
+                "api_budget": self._api_budget_snapshot_locked(),
             }
 
     def result_root(self) -> str:
         return os.path.join(self.base_result_folder, "options_auto")
+
+    def _runtime_state_path(self) -> str:
+        return os.path.join(self.result_root(), "runtime_state.json")
+
+    def _load_runtime_state(self) -> None:
+        path = self._runtime_state_path()
+        if not os.path.exists(path):
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        lock_state = dict(payload.get("contract_lock") or {})
+        if lock_state:
+            self.locked_contract_manager.state = lock_state.get("state") or self.locked_contract_manager.state
+            self.locked_contract_manager.lock = dict(lock_state.get("lock") or {}) or None
+            self.locked_contract_manager.history = list(lock_state.get("history") or [])
+            self.locked_contract_manager.last_reason = lock_state.get("last_reason") or ""
+            self.locked_contract_manager.cooldown_until = lock_state.get("cooldown_until") or ""
+        session_state = dict(payload.get("session") or {})
+        if session_state:
+            self.session.status = session_state.get("status") or self.session.status
+            self.session.last_decision = dict(session_state.get("last_decision") or {})
+            self.session.active_trades = list(session_state.get("active_trades") or [])
+            self.session.orders = list(session_state.get("orders") or [])
+        paper_state = dict(payload.get("paper_lifecycle") or {})
+        if paper_state:
+            self.paper_lifecycle.pending_approval = paper_state.get("pending_approval")
+            self.paper_lifecycle.pending_entries = list(paper_state.get("pending_entries") or [])
+            self.paper_lifecycle.active_trades = list(paper_state.get("active_trades") or [])
+            self.paper_lifecycle.closed_trades = list(paper_state.get("closed_trades") or [])
+        real_state = dict(payload.get("real_order_lifecycle") or {})
+        if real_state:
+            self.real_lifecycle.state = real_state.get("state") or self.real_lifecycle.state
+            self.real_lifecycle.entry_order = dict(real_state.get("entry_order") or {})
+            self.real_lifecycle.trade_plan = dict(real_state.get("trade_plan") or {})
+            self.real_lifecycle.target_order = dict(real_state.get("target_order") or {})
+            self.real_lifecycle.stoploss_order = dict(real_state.get("stoploss_order") or {})
+            self.real_lifecycle.fill = dict(real_state.get("fill") or {})
+            self.real_lifecycle.blockers = list(real_state.get("blockers") or [])
+            self.real_lifecycle.warnings = list(real_state.get("warnings") or [])
+            self.real_lifecycle.safe_mode = bool(real_state.get("safe_mode"))
+            self.real_lifecycle.history = list(real_state.get("history") or [])
+        self._options_ws_order_updates = list(payload.get("websocket_order_updates") or [])[-200:]
+        self._real_broker_cache = dict(payload.get("real_broker_cache") or self._real_broker_cache)
+        self._runtime_state_loaded_from = path
+
+    def _persist_runtime_state_locked(self, reason: str = "") -> None:
+        if not bool(self.settings.get("runtime_state_persistence_enabled", True)):
+            return
+        try:
+            os.makedirs(self.result_root(), exist_ok=True)
+            payload = {
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "reason": reason,
+                "settings": {
+                    "mode": self.settings.get("mode"),
+                    "underlying": self.settings.get("underlying"),
+                    "expiry": self.settings.get("expiry"),
+                    "number_of_lots": self.settings.get("number_of_lots"),
+                },
+                "session": self.session.to_dict(),
+                "contract_lock": self.locked_contract_manager.snapshot(),
+                "paper_lifecycle": self.paper_lifecycle.snapshot(),
+                "real_order_lifecycle": {**self.real_lifecycle.snapshot(), "trade_plan": dict(self.real_lifecycle.trade_plan or {})},
+                "websocket": self._live_scan_state_locked().get("websocket") or {},
+                "websocket_order_updates": list(self._options_ws_order_updates[-200:]),
+                "real_broker_cache": dict(self._real_broker_cache or {}),
+            }
+            with open(self._runtime_state_path(), "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, default=str)
+            self._runtime_state_last_saved_at = payload["saved_at"]
+        except OSError as exc:
+            self.logger.log("WARN", "Options Auto runtime state persistence failed", error=str(exc), reason=reason)
+
+    def _runtime_persistence_snapshot_locked(self) -> dict[str, Any]:
+        return {
+            "enabled": bool(self.settings.get("runtime_state_persistence_enabled", True)),
+            "path": self._runtime_state_path(),
+            "loaded_from": self._runtime_state_loaded_from,
+            "last_saved_at": self._runtime_state_last_saved_at,
+        }
+
+    def _api_budget_snapshot_locked(self) -> dict[str, Any]:
+        history = list(self.real_api_manager.health().get("history") or [])
+        by_name: dict[str, int] = {}
+        failures = 0
+        for item in history:
+            name = str((item or {}).get("name") or "unknown")
+            by_name[name] = by_name.get(name, 0) + 1
+            if not (item or {}).get("ok"):
+                failures += 1
+        return {
+            "real_api_calls_recent": by_name,
+            "real_api_recent_failures": failures,
+            "rate_limiter": self.real_api_manager.health(),
+            "quote_source": ((self.session.last_decision or {}).get("quote_source") or ""),
+            "data_mode": ((self.session.last_decision or {}).get("data_mode") or self.options_live_feed.snapshot(self.settings).get("data_mode")),
+            "websocket_connected": bool(self.options_live_feed.websocket_connected),
+            "quote_polling_fallback": bool(self.options_live_feed.quote_polling_fallback),
+            "real_broker_reconcile_poll_seconds": self.settings.get("real_broker_reconcile_poll_seconds"),
+        }
 
     def configure(self, payload: dict[str, Any] | None = None, kite_profile: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
@@ -230,6 +358,9 @@ class OptionsAutoTerminalService:
             "available_balance": self.paper_broker.available_balance,
         }
         market_cue_payload = self._market_cue_payload(payload)
+        precomputed_features = self._cached_index_features(index_history, mode)
+        if precomputed_features:
+            market_cue_payload = {**market_cue_payload, "precomputed_index_features": precomputed_features}
         decision = evaluate_options_auto_decision(
             mode=mode,
             settings=settings,
@@ -294,8 +425,10 @@ class OptionsAutoTerminalService:
         client_mode = "LIVE" if mode == MODE_REAL else "PAPER"
         client = self.kite_client_provider(client_mode) or self.kite_client_provider(mode)
         underlying = str(settings.get("underlying") or payload.get("underlying") or "NIFTY").upper()
-        spot_provider = OptionsAutoIndexDataProvider(lambda requested_mode: client if str(requested_mode).upper() in {client_mode, mode} else None)
-        spot = spot_provider.get_spot(underlying, mode, payload=payload, index_candles=index_history)
+        spot = self.options_live_feed.index_spot(underlying, mode, settings) if bool(settings.get("options_websocket_primary_enabled", True)) else {}
+        if not spot:
+            spot_provider = OptionsAutoIndexDataProvider(lambda requested_mode: client if str(requested_mode).upper() in {client_mode, mode} else None)
+            spot = spot_provider.get_spot(underlying, mode, payload=payload, index_candles=index_history)
         source = "zerodha_real_data" if mode == MODE_REAL else "zerodha_paper_data"
         base_diagnostics = {
             "data_source": source,
@@ -346,6 +479,52 @@ class OptionsAutoTerminalService:
             source=source,
             base_diagnostics=base_diagnostics,
         )
+
+    def _prewarm_options_reference_data_locked(self, mode: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        if not bool(self.settings.get("prewarm_reference_data_on_start", True)):
+            return {"enabled": False, "warmed": False}
+        payload = dict(payload or {})
+        mode = normalize_mode(mode or self.settings.get("mode"))
+        client_mode = "LIVE" if mode == MODE_REAL else "PAPER"
+        client = self.kite_client_provider(client_mode) or self.kite_client_provider(mode)
+        underlying = str(payload.get("underlying") or self.settings.get("underlying") or "NIFTY").upper()
+        config = SYMBOL_CONFIG.get(underlying) or SYMBOL_CONFIG["NIFTY"]
+        option_exchange = str(config.get("option_exchange") or ("BFO" if underlying in {"SENSEX", "BANKEX"} else "NFO")).upper()
+        index_exchange = str(config.get("index_exchange") or "NSE")
+        result = {
+            "enabled": True,
+            "warmed": False,
+            "mode": mode,
+            "underlying": underlying,
+            "option_exchange": option_exchange,
+            "index_exchange": index_exchange,
+            "index_token": None,
+            "instrument_rows": 0,
+            "expiry": "",
+            "error": "",
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        if not client:
+            result["error"] = f"{client_mode} Zerodha client is not connected."
+            self._reference_cache = result
+            return result
+        try:
+            result["index_token"] = self._index_token(client, underlying, index_exchange)
+        except Exception as exc:
+            result["error"] = f"Index token prewarm failed: {exc}"
+        try:
+            instruments = self.options_instrument_cache.instruments(client, option_exchange)
+            expiry = payload.get("expiry") or payload.get("option_expiry") or self.settings.get("expiry") or self._nearest_option_expiry(instruments, underlying)
+            if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry, "prewarm"):
+                instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry, "prewarm")
+            result["instrument_rows"] = len(instruments or [])
+            result["expiry"] = _expiry_text(expiry)
+            result["warmed"] = bool(result["index_token"] and result["instrument_rows"])
+        except Exception as exc:
+            result["error"] = (result["error"] + "; " if result["error"] else "") + f"Option instrument prewarm failed: {exc}"
+        self._reference_cache = result
+        self.logger.log("INFO" if result["warmed"] else "WARN", "Options Auto reference data prewarm completed", **result)
+        return result
 
     def _locked_option_market_context(
         self,
@@ -448,7 +627,8 @@ class OptionsAutoTerminalService:
             index_token = None
         self.options_live_feed.quote_polling_fallback = bool(settings.get("quote_polling_fallback_enabled", True))
         self.options_live_feed.subscribe_locked_contracts(index_token, contracts[0], contracts[1])
-        quote_result = OptionsQuoteProvider(client, source=source).quote_candidates(contracts, settings)
+        self._ensure_options_websocket_locked(client, mode, underlying, index_token, contracts, settings)
+        quote_result = self._locked_contract_quote_result(client, contracts, settings, source)
         valid_quote_count = int(quote_result.get("valid_quote_count") or 0)
         selected_symbols = [contract.get("tradingsymbol") for contract in contracts if contract.get("tradingsymbol")]
         diagnostics.update({
@@ -603,6 +783,7 @@ class OptionsAutoTerminalService:
             "margin_hop_history": list(ce.get("hop_history") or []) + list(pe.get("hop_history") or []),
         }
         lock = self.locked_contract_manager.lock_contracts(lock)
+        self._persist_runtime_state_locked("contracts_locked")
         self.logger.log(
             "INFO",
             "Options Auto contracts locked",
@@ -772,6 +953,14 @@ class OptionsAutoTerminalService:
         }
 
     def _live_index_candle_context(self, client: Any, underlying: str, mode: str, settings: dict[str, Any], spot: dict[str, Any]) -> dict[str, Any]:
+        if bool(settings.get("options_websocket_primary_enabled", True)):
+            websocket_context = self.options_live_feed.index_candle_context(
+                underlying=underlying,
+                mode=mode,
+                interval=settings.get("chart_interval") or "3minute",
+            )
+            if int(websocket_context.get("candle_count") or 0) >= 3:
+                return websocket_context
         token = None
         warnings: list[str] = []
         try:
@@ -838,6 +1027,7 @@ class OptionsAutoTerminalService:
     def start_paper(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             payload = {**dict(payload or {}), "mode": MODE_PAPER}
+            self._prewarm_options_reference_data_locked(MODE_PAPER, payload)
             result = self._evaluate_locked(payload)
             self.mode_guard.assert_paper_allowed()
             self._sync_paper_lifecycle_to_session_locked()
@@ -849,8 +1039,11 @@ class OptionsAutoTerminalService:
             return result
 
     def _start_live_scan_locked(self, mode: str, payload: dict[str, Any], status: str) -> None:
-        self._stop_live_scan_locked(reason="restart")
+        if self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set():
+            self.logger.log("INFO", "Options Auto live scanner restart requested", mode=self._live_scan_mode)
+        self._live_scan_stop.set()
         self._live_scan_stop = threading.Event()
+        self._live_scan_wake = threading.Event()
         self._live_scan_mode = normalize_mode(mode)
         self._live_scan_payload = self._scan_payload(payload, self._live_scan_mode)
         self._live_scan_interval_seconds = self._live_scan_interval_locked()
@@ -868,10 +1061,17 @@ class OptionsAutoTerminalService:
         if self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set():
             self.logger.log("INFO", "Options Auto live scanner stop requested", mode=self._live_scan_mode, reason=reason)
         self._live_scan_stop.set()
+        self._live_scan_wake.set()
+        self._stop_options_websocket_locked(reason=reason)
         self.live_index_candles.stop()
 
     def _live_scan_loop(self, stop_event: threading.Event) -> None:
-        while not stop_event.wait(max(0.2, float(self._live_scan_interval_seconds or 1.0))):
+        while True:
+            timeout = max(0.2, float(self._live_scan_interval_seconds or 1.0))
+            self._live_scan_wake.wait(timeout)
+            self._live_scan_wake.clear()
+            if stop_event.is_set():
+                break
             with self._lock:
                 if stop_event is not self._live_scan_stop:
                     break
@@ -892,6 +1092,7 @@ class OptionsAutoTerminalService:
                     self.logger.log("ERROR", "Options Auto live scanner cycle failed", mode=self._live_scan_mode, error=str(exc))
 
     def _run_live_scan_cycle_locked(self) -> dict[str, Any]:
+        cycle_start = self.performance_monitor.now()
         mode = self._live_scan_mode
         payload = {
             **dict(self._live_scan_payload or {}),
@@ -920,6 +1121,12 @@ class OptionsAutoTerminalService:
                 self.session.status = "REAL_DRY_RUN_SCANNING" if live_scan_action.get("dry_run") else "REAL_SCANNING"
         result["live_scan_action"] = live_scan_action
         self.session.last_decision = {**dict(self.session.last_decision or {}), "live_scan_action": live_scan_action}
+        self.performance_monitor.record_latency(
+            "live_scan_cycle",
+            self.performance_monitor.elapsed_ms(cycle_start),
+            {"mode": mode, "action": live_scan_action.get("action"), "data_mode": result.get("data_mode"), "quote_source": result.get("quote_source")},
+        )
+        self._persist_runtime_state_locked("live_scan_cycle")
         return result
 
     def _paper_live_monitor_market_locked(self, decision: dict[str, Any]) -> dict[str, Any]:
@@ -1098,14 +1305,269 @@ class OptionsAutoTerminalService:
             "last_cycle": self._live_scan_last_cycle,
             "last_error": self._live_scan_last_error,
             "cycle_count": self._live_scan_cycle_count,
+            "websocket": {
+                "mode": self._options_ws_mode,
+                "tokens": list(self._options_ws_tokens),
+                "connected": self.options_live_feed.websocket_connected,
+                "started_at": self._options_ws_started_at,
+                "last_error": self._options_ws_last_error,
+                "order_update_count": len(self._options_ws_order_updates),
+            },
+        }
+
+    def _ensure_options_websocket_locked(
+        self,
+        client: Any,
+        mode: str,
+        underlying: str,
+        index_token: Any,
+        contracts: list[dict[str, Any]],
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        if not bool(settings.get("options_live_feed_enabled", True)) or not bool(settings.get("options_websocket_primary_enabled", True)):
+            return {"started": False, "reason": "Options Auto websocket primary is disabled."}
+        if not client:
+            return {"started": False, "reason": "Zerodha client is not connected."}
+        tokens = [_token_int(index_token)] + [_token_int(contract) for contract in contracts or []]
+        tokens = tuple(dict.fromkeys(token for token in tokens if token > 0))
+        if not tokens:
+            return {"started": False, "reason": "No websocket tokens are available."}
+        if len(tokens) > 3000:
+            self._options_ws_last_error = "Options Auto websocket token count exceeds Zerodha 3000-instrument limit."
+            self.options_live_feed.health.mark_reconnecting(self._options_ws_last_error)
+            return {"started": False, "reason": self._options_ws_last_error}
+        client_id = id(client)
+        if self._options_ws_mode == mode and self._options_ws_client_id == client_id and self._options_ws_tokens == tokens:
+            return {"started": False, "reason": "Options Auto websocket already subscribed.", "tokens": list(tokens)}
+        self._stop_options_websocket_locked(reason="resubscribe")
+        roles: dict[int, str] = {}
+        if _token_int(index_token) > 0:
+            roles[_token_int(index_token)] = "INDEX"
+        for contract in contracts or []:
+            token = _token_int(contract)
+            if token > 0:
+                symbol = str(contract.get("tradingsymbol") or "").upper()
+                roles[token] = "CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else str(contract.get("instrument_type") or contract.get("option_type") or "").upper()
+        name = f"options_auto_{mode.lower()}"
+
+        def on_ticks(ticks):
+            with self._lock:
+                self._on_options_websocket_ticks_locked(client, mode, underlying, ticks)
+
+        def on_connect(_response=None):
+            with self._lock:
+                self.options_live_feed.mark_websocket_connected(True)
+                self._options_ws_last_error = ""
+
+        def on_close(code=None, reason=None):
+            with self._lock:
+                self.options_live_feed.mark_websocket_connected(False)
+                self._options_ws_last_error = f"Websocket closed: {code or ''} {reason or ''}".strip()
+
+        def on_error(code=None, reason=None):
+            with self._lock:
+                self._options_ws_last_error = f"Websocket error: {code or ''} {reason or ''}".strip()
+                self.options_live_feed.health.mark_reconnecting(self._options_ws_last_error)
+
+        def on_reconnect(attempts_count=None):
+            with self._lock:
+                self._options_ws_last_error = f"Websocket reconnect attempt {attempts_count or ''}".strip()
+                self.options_live_feed.health.mark_reconnecting(self._options_ws_last_error)
+
+        def on_noreconnect():
+            with self._lock:
+                self._options_ws_last_error = "Websocket no reconnect."
+                self.options_live_feed.health.mark_reconnecting(self._options_ws_last_error)
+
+        def on_order_update(order):
+            with self._lock:
+                self._on_options_order_update_locked(order, client)
+
+        try:
+            if hasattr(client, "start_named_ticker"):
+                client.start_named_ticker(
+                    name,
+                    list(tokens),
+                    on_ticks=on_ticks,
+                    on_connect=on_connect,
+                    on_close=on_close,
+                    on_error=on_error,
+                    on_reconnect=on_reconnect,
+                    on_noreconnect=on_noreconnect,
+                    on_order_update=on_order_update if settings.get("websocket_order_updates_enabled", True) else None,
+                )
+            elif hasattr(client, "start_ticker"):
+                client.start_ticker(
+                    list(tokens),
+                    on_ticks=on_ticks,
+                    on_connect=on_connect,
+                    on_close=on_close,
+                    on_error=on_error,
+                    on_reconnect=on_reconnect,
+                    on_noreconnect=on_noreconnect,
+                    on_order_update=on_order_update if settings.get("websocket_order_updates_enabled", True) else None,
+                )
+            else:
+                return {"started": False, "reason": "Connected Zerodha client does not expose ticker startup."}
+        except Exception as exc:
+            self._options_ws_last_error = str(exc)
+            self.options_live_feed.health.mark_reconnecting(str(exc))
+            self.logger.log("WARN", "Options Auto websocket startup failed; quote polling fallback remains active", error=str(exc))
+            return {"started": False, "reason": str(exc), "tokens": list(tokens)}
+        self._options_ws_mode = mode
+        self._options_ws_client_id = client_id
+        self._options_ws_tokens = tokens
+        self._options_ws_roles = roles
+        self._options_ws_started_at = datetime.now().isoformat(timespec="seconds")
+        self._options_ws_last_error = ""
+        self.options_live_feed.mark_websocket_connected(True)
+        self.logger.log("INFO", "Options Auto websocket subscribed", mode=mode, tokens=len(tokens), underlying=underlying)
+        return {"started": True, "tokens": list(tokens)}
+
+    def _stop_options_websocket_locked(self, reason: str = "") -> None:
+        if not self._options_ws_mode and not self._options_ws_tokens:
+            return
+        mode = self._options_ws_mode
+        client = self.kite_client_provider("LIVE" if mode == MODE_REAL else "PAPER") if mode else None
+        name = f"options_auto_{mode.lower()}" if mode else "options_auto"
+        try:
+            if client and hasattr(client, "stop_named_ticker"):
+                client.stop_named_ticker(name)
+            elif client and hasattr(client, "stop_ticker"):
+                client.stop_ticker()
+        except Exception as exc:
+            self.logger.log("WARN", "Options Auto websocket stop failed", mode=mode, reason=reason, error=str(exc))
+        self.options_live_feed.mark_websocket_connected(False)
+        self._options_ws_mode = ""
+        self._options_ws_client_id = 0
+        self._options_ws_tokens = ()
+        self._options_ws_roles = {}
+        self._options_ws_started_at = ""
+
+    def _on_options_websocket_ticks_locked(self, client: Any, mode: str, underlying: str, ticks: Any) -> None:
+        interval = self.settings.get("chart_interval") or "3minute"
+        accepted = False
+        for tick in list(ticks or []):
+            token = _token_int((tick or {}).get("instrument_token") or (tick or {}).get("token"))
+            role = self._options_ws_roles.get(token)
+            if not role:
+                continue
+            result = self.options_live_feed.on_tick(
+                dict(tick or {}),
+                role=role,
+                interval=interval,
+                client=client,
+                underlying=underlying,
+                mode=mode,
+            )
+            accepted = accepted or bool(result)
+        if accepted:
+            self._request_live_scan_wake_locked("websocket_tick")
+
+    def _request_live_scan_wake_locked(self, reason: str = "") -> None:
+        if not bool(self.settings.get("event_driven_decisions_enabled", True)):
+            return
+        if not (self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set()):
+            return
+        now = time.time()
+        min_gap = max(0.05, float(self.settings.get("event_driven_min_scan_interval_ms") or 500) / 1000.0)
+        if now - float(self._last_event_scan_epoch or 0.0) < min_gap:
+            return
+        self._last_event_scan_epoch = now
+        self._live_scan_wake.set()
+        self.performance_monitor.record_latency("event_driven_scan_wake", 0.0, {"reason": reason, "mode": self._live_scan_mode})
+
+    def _on_options_order_update_locked(self, order: Any, client: Any | None = None) -> None:
+        row = dict(order or {})
+        if not row:
+            return
+        row.setdefault("received_at", datetime.now().isoformat(timespec="seconds"))
+        self._options_ws_order_updates.append(row)
+        self._options_ws_order_updates = self._options_ws_order_updates[-200:]
+        order_id = str(row.get("order_id") or row.get("id") or "")
+        adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
+        if order_id and order_id == str((self.real_lifecycle.entry_order or {}).get("order_id") or ""):
+            start = self.performance_monitor.now()
+            self.real_lifecycle.handle_order_update(row, settings=self.settings, adapter=adapter)
+            self.performance_monitor.record_latency("websocket_order_update_to_lifecycle", self.performance_monitor.elapsed_ms(start), {"order_id": order_id, "status": row.get("status")})
+            if self.real_lifecycle.snapshot().get("state") == UNPROTECTED_POSITION:
+                self.session.status = "UNPROTECTED_REAL_POSITION"
+        self._persist_runtime_state_locked("websocket_order_update")
+
+    def _locked_contract_quote_result(self, client: Any, contracts: list[dict[str, Any]], settings: dict[str, Any], source: str) -> dict[str, Any]:
+        websocket_result = self.options_live_feed.quote_candidates(contracts, settings) if bool(settings.get("options_websocket_primary_enabled", True)) else {
+            "quotes": {},
+            "missing_quote_keys": [],
+            "warnings": [],
+            "errors": [],
+            "requested_quote_keys": [],
+            "valid_quote_count": 0,
+            "quote_source": "disabled",
+            "data_mode": "QUOTE_SNAPSHOT_POLLING",
+        }
+        websocket_quotes = dict(websocket_result.get("quotes") or {})
+        missing_contracts = [contract for contract in contracts or [] if not self._quote_for_contract(contract, websocket_quotes)]
+        if not missing_contracts or not bool(settings.get("quote_polling_fallback_enabled", True)):
+            return websocket_result
+        fallback_result = OptionsQuoteProvider(client, source=source).quote_candidates(missing_contracts, settings)
+        merged_quotes = {**websocket_quotes, **dict(fallback_result.get("quotes") or {})}
+        requested = list(dict.fromkeys(list(websocket_result.get("requested_quote_keys") or []) + list(fallback_result.get("requested_quote_keys") or [])))
+        missing = list(dict.fromkeys(list(fallback_result.get("missing_quote_keys") or [])))
+        warnings = list(dict.fromkeys(list(websocket_result.get("warnings") or []) + list(fallback_result.get("warnings") or [])))
+        errors = list(dict.fromkeys(list(websocket_result.get("errors") or []) + list(fallback_result.get("errors") or [])))
+        websocket_count = int(websocket_result.get("valid_quote_count") or 0)
+        return {
+            "quotes": merged_quotes,
+            "missing_quote_keys": missing,
+            "errors": errors,
+            "warnings": warnings,
+            "requested_quote_keys": requested,
+            "valid_quote_count": len({item.get("quote_key") for item in merged_quotes.values() if item.get("quote_key")}),
+            "quote_source": "zerodha_websocket_tick+snapshot_fallback" if websocket_count else fallback_result.get("quote_source"),
+            "data_mode": "WEBSOCKET_TICKS_WITH_SNAPSHOT_FALLBACK" if websocket_count else fallback_result.get("data_mode"),
+            "blocked": bool(errors),
         }
 
     def _real_live_broker_payload_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload or {})
         client = self.kite_client_provider("LIVE")
-        broker_orders = self._broker_orders(client, payload)
-        positions = self._broker_positions(client, payload)
+        if payload.get("broker_orders") is not None and payload.get("positions") is not None:
+            broker_orders = list(payload.get("broker_orders") or [])
+            positions = payload.get("positions") or []
+        else:
+            now = time.time()
+            poll_seconds = max(1.0, float(self.settings.get("real_broker_reconcile_poll_seconds") or 10))
+            cache_age = now - float(self._real_broker_cache.get("updated_at_epoch") or 0.0)
+            cache_fresh = cache_age <= poll_seconds and (
+                self._real_broker_cache.get("orders") is not None
+                and self._real_broker_cache.get("positions") is not None
+            )
+            if cache_fresh:
+                broker_orders = list(self._real_broker_cache.get("orders") or [])
+                positions = self._real_broker_cache.get("positions") or []
+            else:
+                broker_orders = self._broker_orders(client, payload)
+                positions = self._broker_positions(client, payload)
+                self._real_broker_cache = {
+                    "orders": list(broker_orders or []),
+                    "positions": positions or [],
+                    "updated_at_epoch": now,
+                }
+        broker_orders = self._merge_websocket_order_updates(broker_orders)
         return {**payload, "broker_orders": broker_orders, "positions": positions}
+
+    def _merge_websocket_order_updates(self, broker_orders: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        by_id: dict[str, dict[str, Any]] = {}
+        for order in list(broker_orders or []):
+            order_id = str((order or {}).get("order_id") or (order or {}).get("id") or "")
+            if order_id:
+                by_id[order_id] = dict(order or {})
+        for update in self._options_ws_order_updates:
+            order_id = str((update or {}).get("order_id") or (update or {}).get("id") or "")
+            if not order_id:
+                continue
+            by_id[order_id] = {**by_id.get(order_id, {}), **dict(update or {}), "source": "zerodha_websocket_order_update"}
+        return list(by_id.values())
 
     def execute_paper_plan(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.start_paper(payload)
@@ -1191,11 +1653,13 @@ class OptionsAutoTerminalService:
             if trade_closed and bool(self.settings.get("reselect_after_exit_cooldown", True)):
                 self.locked_contract_manager.mark_trade_exited(self.settings.get("cooldown_after_trade_seconds") or 0)
         self.logger.log("INFO", "Options Auto paper market processed", updates=len(result.get("updates") or []))
+        self._persist_runtime_state_locked("paper_market_processed")
         return {**result, "paper_account": self.paper_broker.snapshot(), "session": self.session.to_dict()}
 
     def real_dry_run(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             payload = {**dict(payload or {}), "mode": MODE_REAL}
+            self._prewarm_options_reference_data_locked(MODE_REAL, payload)
             result = self._evaluate_locked(payload)
             result["dry_run"] = True
             result["orders_sent"] = 0
@@ -1280,6 +1744,7 @@ class OptionsAutoTerminalService:
             lifecycle = self.real_lifecycle.reconcile_positions(broker_orders, positions)
         if lifecycle.get("state") == UNPROTECTED_POSITION:
             self.session.status = "UNPROTECTED_REAL_POSITION"
+        self._persist_runtime_state_locked("real_lifecycle_poll")
         return {"real_order_lifecycle": lifecycle, "session": self.session.to_dict(), "real_safety": self.real_controller.snapshot()}
 
     def real_stop_new_entries(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1306,6 +1771,7 @@ class OptionsAutoTerminalService:
                 self.session.status = "IDLE"
             result = {"stopped": True, "mode": mode, "session": self.session.to_dict(), "live_scan": self._live_scan_state_locked()}
             self.logger.log("INFO", "Options Auto live scanner stopped", mode=mode)
+            self._persist_runtime_state_locked("stop_live_scan")
             return result
 
     def kill_switch(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1335,6 +1801,7 @@ class OptionsAutoTerminalService:
             }
             self.session.record_safety_event("Options Auto kill switch activated", event)
             self.logger.log("WARN", "Options Auto kill switch activated", mode=mode)
+            self._persist_runtime_state_locked("kill_switch")
             return {"killed": True, **event, "session": self.session.to_dict(), "live_scan": self._live_scan_state_locked()}
 
     def real_safe_mode(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1365,6 +1832,7 @@ class OptionsAutoTerminalService:
             client = self.kite_client_provider("LIVE")
             if not client:
                 return self._blocked_real_order(["Real Money Zerodha is not connected."])
+            self._prewarm_options_reference_data_locked(MODE_REAL, payload)
             settings = self._real_capability_settings({**self.settings, **dict(payload.get("settings") or {})}, MODE_REAL, client, payload)
             payload["settings"] = settings
             self._configure_locked(settings, kite_profile=payload.get("kite_profile") or {}, preserve_session=False)
@@ -1430,6 +1898,7 @@ class OptionsAutoTerminalService:
             self.session.record_safety_event("Real Options Auto entry order sent", {"order_id": entry_order.get("order_id"), "tradingsymbol": entry_order.get("tradingsymbol")})
             self.logger.log("WARN", "Options Auto real entry order sent", order_id=entry_order.get("order_id"), tradingsymbol=entry_order.get("tradingsymbol"))
             self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+            self._persist_runtime_state_locked("real_entry_order_sent")
             return {
                 "allowed": True,
                 "real_order_sent": True,
@@ -2437,6 +2906,31 @@ class OptionsAutoTerminalService:
             cue_payload["fii_dii_status"] = self.latest_fii_dii_status(phase)
         return cue_payload
 
+    def _cached_index_features(self, index_history: pd.DataFrame, mode: str) -> dict[str, Any]:
+        if index_history is None or index_history.empty or not bool(self.settings.get("incremental_feature_cache_enabled", True)):
+            return {}
+        try:
+            last = index_history.iloc[-1]
+            stamp = str(last.get("datetime") or last.get("timestamp") or last.get("date") or "")
+            close = str(last.get("close") or "")
+            key = f"{mode}:{len(index_history)}:{stamp}:{close}"
+            if key == self._feature_cache.get("key"):
+                self._feature_cache["hits"] = int(self._feature_cache.get("hits") or 0) + 1
+                return dict(self._feature_cache.get("features") or {})
+            start = self.performance_monitor.now()
+            features = build_index_features(index_history)
+            self.performance_monitor.record_latency("index_feature_build", self.performance_monitor.elapsed_ms(start), {"mode": mode, "rows": len(index_history), "cache": "miss"})
+            self._feature_cache = {
+                "key": key,
+                "features": dict(features or {}),
+                "hits": int(self._feature_cache.get("hits") or 0),
+                "misses": int(self._feature_cache.get("misses") or 0) + 1,
+            }
+            return dict(features or {})
+        except Exception as exc:
+            self.logger.log("WARN", "Options Auto index feature cache failed; falling back to pipeline calculation", error=str(exc))
+            return {}
+
     def _available_capital(self, mode: str) -> float:
         if mode == MODE_PAPER:
             return float(self.paper_broker.available_balance or 0)
@@ -2835,6 +3329,15 @@ def _parse_dt_value(value: Any) -> datetime | None:
 def _round_to_step(value: float, step: float) -> float:
     step = float(step or 1)
     return round(float(value) / step) * step
+
+
+def _token_int(value: Any) -> int:
+    if isinstance(value, dict):
+        value = value.get("instrument_token") or value.get("token")
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _is_major_strike(value: Any, major_step: int) -> bool:

@@ -35,4 +35,19 @@ class PerformanceMonitor:
         return event
 
     def snapshot(self) -> dict[str, Any]:
-        return {"events": self.events[-100:]}
+        return {"events": self.events[-100:], "summary": _summary(self.events)}
+
+
+def _summary(events: list[dict[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for event in events or []:
+        name = str((event or {}).get("name") or "")
+        if not name:
+            continue
+        rows = result.setdefault(name, {"count": 0, "latest_ms": 0.0, "avg_ms": 0.0, "max_ms": 0.0})
+        value = float((event or {}).get("latency_ms") or 0.0)
+        rows["count"] += 1
+        rows["latest_ms"] = value
+        rows["max_ms"] = max(float(rows["max_ms"]), value)
+        rows["avg_ms"] = round(((float(rows["avg_ms"]) * (rows["count"] - 1)) + value) / rows["count"], 3)
+    return result

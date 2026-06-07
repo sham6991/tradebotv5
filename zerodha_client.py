@@ -35,6 +35,7 @@ class ZerodhaClient:
         self.access_token = access_token
         self.kite = KiteConnect(api_key=api_key)
         self.ticker = None
+        self._named_tickers = {}
         self._instrument_cache = {}
 
         if access_token:
@@ -436,6 +437,59 @@ class ZerodhaClient:
         on_error=None,
         on_reconnect=None,
         on_noreconnect=None,
+        on_order_update=None,
+    ):
+        self.ticker = self._create_ticker(
+            instrument_tokens,
+            on_ticks,
+            on_connect=on_connect,
+            on_close=on_close,
+            on_error=on_error,
+            on_reconnect=on_reconnect,
+            on_noreconnect=on_noreconnect,
+            on_order_update=on_order_update,
+        )
+        return self.ticker
+
+    def start_named_ticker(
+        self,
+        name,
+        instrument_tokens,
+        on_ticks,
+        on_connect=None,
+        on_close=None,
+        on_error=None,
+        on_reconnect=None,
+        on_noreconnect=None,
+        on_order_update=None,
+    ):
+        name = str(name or "default")
+        self.stop_named_ticker(name)
+        ticker = self._create_ticker(
+            instrument_tokens,
+            on_ticks,
+            on_connect=on_connect,
+            on_close=on_close,
+            on_error=on_error,
+            on_reconnect=on_reconnect,
+            on_noreconnect=on_noreconnect,
+            on_order_update=on_order_update,
+        )
+        if not hasattr(self, "_named_tickers"):
+            self._named_tickers = {}
+        self._named_tickers[name] = ticker
+        return ticker
+
+    def _create_ticker(
+        self,
+        instrument_tokens,
+        on_ticks,
+        on_connect=None,
+        on_close=None,
+        on_error=None,
+        on_reconnect=None,
+        on_noreconnect=None,
+        on_order_update=None,
     ):
         if KiteTicker is None:
             _load_kiteconnect()
@@ -449,7 +503,7 @@ class ZerodhaClient:
             raise ValueError("Access token is required before starting KiteTicker.")
 
         tokens = [int(token) for token in instrument_tokens]
-        self.ticker = KiteTicker(self.api_key, self.access_token)
+        ticker = KiteTicker(self.api_key, self.access_token)
 
         def handle_connect(ws, response):
             ws.subscribe(tokens)
@@ -461,19 +515,49 @@ class ZerodhaClient:
             if on_close:
                 on_close(code, reason)
 
-        self.ticker.on_ticks = lambda ws, ticks: on_ticks(ticks)
-        self.ticker.on_connect = handle_connect
-        self.ticker.on_close = handle_close
-        self.ticker.on_error = lambda ws, code, reason: on_error(code, reason) if on_error else None
-        self.ticker.on_reconnect = lambda ws, attempts_count: on_reconnect(attempts_count) if on_reconnect else None
-        self.ticker.on_noreconnect = lambda ws: on_noreconnect() if on_noreconnect else None
-        self.ticker.connect(threaded=True)
-        return self.ticker
+        def handle_order_update(ws, order):
+            if not on_order_update:
+                return
+            try:
+                on_order_update(order)
+            except TypeError:
+                on_order_update(ws, order)
+
+        ticker.on_ticks = lambda ws, ticks: on_ticks(ticks)
+        ticker.on_connect = handle_connect
+        ticker.on_close = handle_close
+        ticker.on_error = lambda ws, code, reason: on_error(code, reason) if on_error else None
+        ticker.on_reconnect = lambda ws, attempts_count: on_reconnect(attempts_count) if on_reconnect else None
+        ticker.on_noreconnect = lambda ws: on_noreconnect() if on_noreconnect else None
+        if on_order_update:
+            ticker.on_order_update = handle_order_update
+        ticker.connect(threaded=True)
+        return ticker
 
     def stop_ticker(self):
         if self.ticker:
             self.ticker.close()
             self.ticker = None
+
+    def stop_named_ticker(self, name):
+        tickers = getattr(self, "_named_tickers", None)
+        if not tickers:
+            return
+        ticker = tickers.pop(str(name or "default"), None)
+        if ticker:
+            ticker.close()
+
+    def stop_all_tickers(self):
+        self.stop_ticker()
+        tickers = getattr(self, "_named_tickers", None)
+        if not tickers:
+            return
+        for ticker in list(tickers.values()):
+            try:
+                ticker.close()
+            except Exception:
+                pass
+        tickers.clear()
 
     def _transaction_type(self, transaction_type):
         value = str(transaction_type).upper()

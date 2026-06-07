@@ -1064,7 +1064,10 @@ class WebTradeBotApp:
             except Exception:
                 pass
         try:
-            client.stop_ticker()
+            if hasattr(client, "stop_all_tickers"):
+                client.stop_all_tickers()
+            else:
+                client.stop_ticker()
         except Exception:
             pass
 

@@ -55,6 +55,48 @@ class FakeZerodhaDataClient:
         return rows
 
 
+class FakeWebsocketZerodhaDataClient(FakeZerodhaDataClient):
+    def __init__(self, fail=False):
+        super().__init__(fail=fail)
+        self.named_tickers = {}
+        self.stopped_tickers = []
+
+    def start_named_ticker(self, name, instrument_tokens, on_ticks, on_connect=None, on_close=None, on_error=None, **_kwargs):
+        self.named_tickers[name] = {
+            "tokens": list(instrument_tokens),
+            "on_ticks": on_ticks,
+            "on_connect": on_connect,
+            "on_close": on_close,
+            "on_error": on_error,
+        }
+        if on_connect:
+            on_connect({"connected": True})
+        return {"name": name}
+
+    def stop_named_ticker(self, name):
+        self.stopped_tickers.append(name)
+        self.named_tickers.pop(name, None)
+
+    def emit_ticks(self, name="intraday_paper", base=150.0):
+        ticker = self.named_tickers[name]
+        now = datetime.now().isoformat(timespec="seconds")
+        ticks = []
+        for index, symbol in enumerate(SYMBOLS):
+            ltp = float(base + index)
+            ticks.append({
+                "instrument_token": index + 1,
+                "last_price": ltp,
+                "volume_traded": 100000 + index,
+                "timestamp": now,
+                "depth": {
+                    "buy": [{"price": ltp - 0.05, "quantity": 10000}],
+                    "sell": [{"price": ltp + 0.05, "quantity": 10000}],
+                },
+                "ohlc": {"open": ltp - 1, "high": ltp + 1, "low": ltp - 1, "close": ltp},
+            })
+        ticker["on_ticks"](ticks)
+
+
 def upload_fii_dii(manager):
     manager.upload_fii_dii_csv({
         "csv_text": "Date,Category,Buy Value,Sell Value,Net Value\n2026-06-02,FII/FPI,1000,1300,-300\n2026-06-02,DII,1400,900,500\n"
@@ -126,6 +168,32 @@ class IntradayDataSourcePolicyTests(unittest.TestCase):
             self.assertTrue(status["snapshots"])
             self.assertEqual(status["snapshots"][0]["data_source"], IntradayDataSource.ZERODHA_PAPER)
             self.assertEqual(status["snapshots"][0]["data_mode"], "candle_polling")
+
+    def test_paper_session_prefers_websocket_ticks_after_historical_bootstrap(self):
+        client = FakeWebsocketZerodhaDataClient()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            manager = IntradaySessionManager(temp_dir, zerodha_client_provider=lambda mode: client if str(mode).upper() in {"PAPER"} else None)
+            upload_fii_dii(manager)
+            started = manager.start_session(payload())
+
+            self.assertTrue(started["stock_live_feed"]["websocket_connected"])
+            self.assertEqual(started["stock_live_feed"]["subscribed_tokens"], [1, 2, 3, 4, 5])
+
+            client.emit_ticks()
+            status = manager.evaluate({"market_trend": "Bullish"})
+            self.assertEqual(status["data_source_status"]["data_mode"], "websocket_tick_candles")
+            self.assertTrue(status["snapshots"])
+            self.assertEqual(status["snapshots"][0]["data_mode"], "websocket_tick_candles")
+            bootstrap_calls = client.historical_calls
+            self.assertGreater(bootstrap_calls, 0)
+
+            client.emit_ticks(base=160.0)
+            status = manager.evaluate({"market_trend": "Bullish"})
+            self.assertEqual(status["data_source_status"]["data_mode"], "websocket_tick_candles")
+            self.assertEqual(client.historical_calls, bootstrap_calls)
+
+            manager.stop_session()
+            self.assertIn("intraday_paper", client.stopped_tickers)
 
     def test_paper_fetch_error_blocks_when_fallback_disabled(self):
         client = FakeZerodhaDataClient(fail=True)

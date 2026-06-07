@@ -143,6 +143,10 @@ class IntradaySettings:
     forming_candle_min_completion_pct: float = 100.0
     require_live_data_for_paper: bool = True
     allow_simulated_fallback: bool = False
+    websocket_primary_enabled: bool = True
+    historical_bootstrap_on_start: bool = True
+    quote_snapshot_fallback_enabled: bool = True
+    max_tick_age_seconds: float = 3.0
     show_data_source_warning: bool = True
     status_refresh_uses_cached_broker_state: bool = True
     higher_timeframe_confirmation: bool = False
@@ -262,6 +266,10 @@ class IntradaySettings:
             forming_candle_min_completion_pct=_float(payload.get("forming_candle_min_completion_pct"), 100.0),
             require_live_data_for_paper=_bool(payload.get("require_live_data_for_paper"), True),
             allow_simulated_fallback=_bool(payload.get("allow_simulated_fallback"), False),
+            websocket_primary_enabled=_bool(payload.get("websocket_primary_enabled"), True),
+            historical_bootstrap_on_start=_bool(payload.get("historical_bootstrap_on_start"), True),
+            quote_snapshot_fallback_enabled=_bool(payload.get("quote_snapshot_fallback_enabled"), True),
+            max_tick_age_seconds=_float(payload.get("max_tick_age_seconds"), 3.0),
             show_data_source_warning=_bool(payload.get("show_data_source_warning"), True),
             status_refresh_uses_cached_broker_state=_bool(payload.get("status_refresh_uses_cached_broker_state"), True),
             higher_timeframe_confirmation=_bool(payload.get("higher_timeframe_confirmation"), False),
@@ -366,6 +374,8 @@ class IntradaySettings:
             raise ValueError("Paper fill model must be CANDLE_TOUCH_CONSERVATIVE, CANDLE_TOUCH_SIMPLE, or LTP_TOUCH.")
         if self.emergency_exit_order_type not in {"AGGRESSIVE_LIMIT", "MARKET"}:
             raise ValueError("Emergency exit order type must be AGGRESSIVE_LIMIT or MARKET.")
+        if self.max_tick_age_seconds <= 0:
+            raise ValueError("Max tick age seconds must be greater than zero.")
 
     @property
     def market_orders_enabled(self) -> bool:

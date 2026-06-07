@@ -1,8 +1,11 @@
 import json
+import os
 import tempfile
 import time
 import unittest
 from datetime import date, datetime, time as dt_time, timedelta
+
+import pandas as pd
 
 from options_auto.constants import MODE_PAPER, MODE_REAL
 from options_auto.data.live_index_candles import LiveIndexCandleStore
@@ -49,6 +52,8 @@ class StreamingOptionsZerodha:
         self.stoploss_orders = []
         self.orders_calls = 0
         self.positions_calls = 0
+        self.started_tickers = {}
+        self.stopped_tickers = []
         self._orders = []
         self._positions = []
         self.margin = 250000.0
@@ -107,6 +112,66 @@ class StreamingOptionsZerodha:
                     "source": self.label,
                 }
         return rows
+
+    def start_named_ticker(self, name, instrument_tokens, on_ticks, on_connect=None, on_close=None, on_error=None, on_reconnect=None, on_noreconnect=None, on_order_update=None):
+        self.started_tickers[str(name)] = {
+            "tokens": list(instrument_tokens or []),
+            "on_ticks": on_ticks,
+            "on_connect": on_connect,
+            "on_close": on_close,
+            "on_error": on_error,
+            "on_reconnect": on_reconnect,
+            "on_noreconnect": on_noreconnect,
+            "on_order_update": on_order_update,
+        }
+        if on_connect:
+            on_connect({"connected": True})
+        return {"name": name, "tokens": list(instrument_tokens or [])}
+
+    def stop_named_ticker(self, name):
+        self.stopped_tickers.append(str(name))
+        self.started_tickers.pop(str(name), None)
+
+    def emit_options_ticks(self, lock, *, spot=None, ce_price=None, pe_price=None, when=None):
+        ticker = next(iter(self.started_tickers.values()))
+        when = when or datetime.now()
+        ce = dict((lock or {}).get("ce") or {})
+        pe = dict((lock or {}).get("pe") or {})
+        spot_value = float(self.spot if spot is None else spot)
+        ce_value = float(self.ce_price if ce_price is None else ce_price)
+        pe_value = float(self.pe_price if pe_price is None else pe_price)
+        ticks = [
+            {
+                "instrument_token": 256265,
+                "last_price": spot_value,
+                "timestamp": when,
+                "volume_traded": 200000 + self.tick_index * 1000,
+            },
+            self._option_tick(ce, ce_value, when),
+            self._option_tick(pe, pe_value, when),
+        ]
+        ticker["on_ticks"](ticks)
+
+    def emit_order_update(self, order):
+        ticker = next(iter(self.started_tickers.values()))
+        callback = ticker.get("on_order_update")
+        if callback:
+            callback(dict(order or {}))
+
+    def _option_tick(self, contract, price, when):
+        return {
+            "instrument_token": contract.get("instrument_token"),
+            "tradingsymbol": contract.get("tradingsymbol"),
+            "exchange": contract.get("exchange") or "NFO",
+            "last_price": price,
+            "depth": {
+                "buy": [{"price": round(price - 0.05, 2), "quantity": 3200}],
+                "sell": [{"price": round(price + 0.05, 2), "quantity": 3100}],
+            },
+            "volume_traded": 150000 + self.tick_index * 2000,
+            "oi": 900000,
+            "timestamp": when,
+        }
 
     def get_nifty50_token(self):
         return 256265
@@ -309,6 +374,74 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
             self.assertEqual(len(service.paper_lifecycle.active_trades), 0)
             self.assertTrue(service.paper_lifecycle.closed_trades)
 
+    def test_paper_live_scan_prefers_websocket_ticks_over_quote_polling_when_warm(self):
+        client = StreamingOptionsZerodha("PAPER")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            payload = live_payload(MODE_PAPER)
+            started = service.start_paper(payload)
+            service._live_scan_stop.set()
+            self.assertTrue(started["allowed"], started.get("blockers"))
+            self.assertIn("options_auto_paper", client.started_tickers)
+
+            lock = service.locked_contract_manager.lock
+            base_time = datetime.now()
+            for index in range(4):
+                client.emit_options_ticks(
+                    lock,
+                    spot=22548 + index,
+                    ce_price=142.40 + index,
+                    pe_price=118.20 - index,
+                    when=base_time + timedelta(minutes=index * 3),
+                )
+
+            client.quote_calls.clear()
+            with service._lock:
+                result = service._run_live_scan_cycle_locked()
+
+            self.assertEqual(client.quote_calls, [])
+            self.assertIn(result["quote_source"], {"zerodha_websocket_tick", "zerodha_websocket_tick+snapshot_fallback"})
+            self.assertEqual(service.status()["options_live_feed"]["health"]["data_mode"], "WEBSOCKET_TICKS")
+            service.stop_live_scan({"mode": MODE_PAPER})
+
+    def test_event_driven_ticks_persist_runtime_and_expose_budget_status(self):
+        client = StreamingOptionsZerodha("PAPER")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            payload = live_payload(MODE_PAPER)
+            payload["settings"] = {
+                **payload["settings"],
+                "adaptive_scan_seconds_aggressive": 30,
+                "event_driven_min_scan_interval_ms": 1,
+            }
+            started = service.start_paper(payload)
+            self.assertTrue(started["allowed"], started.get("blockers"))
+
+            client.emit_options_ticks(service.locked_contract_manager.lock, when=datetime.now())
+            status = service.status()
+            event_names = [event.get("name") for event in status["performance"]["events"]]
+
+            self.assertIn("event_driven_scan_wake", event_names)
+            self.assertTrue(status["reference_cache"]["warmed"])
+            self.assertTrue(os.path.exists(status["runtime_persistence"]["path"]))
+            self.assertIn("websocket_connected", status["api_budget"])
+            service.stop_live_scan({"mode": MODE_PAPER})
+
+    def test_incremental_index_feature_cache_reuses_same_live_frame(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: None)
+            history = pd.DataFrame(_strong_index_history())
+
+            first = service._cached_index_features(history, MODE_PAPER)
+            second = service._cached_index_features(history, MODE_PAPER)
+            status = service.status()
+
+            self.assertTrue(first)
+            self.assertEqual(first, second)
+            self.assertEqual(status["feature_cache"]["misses"], 1)
+            self.assertEqual(status["feature_cache"]["hits"], 1)
+            self.assertEqual(status["performance"]["summary"]["index_feature_build"]["count"], 1)
+
     def test_live_tick_candle_builder_stays_fast_under_stream_load(self):
         store = LiveIndexCandleStore(max_candles=120)
         started = time.perf_counter()
@@ -373,6 +506,40 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
         self.assertLess(timings["real_order_ms"], 2500)
         print("OPTIONS_AUTO_REAL_HARD_TIMING", json.dumps({key: round(value, 2) for key, value in timings.items()}, sort_keys=True))
 
+    def test_real_websocket_fill_places_target_and_stoploss_from_actual_fill(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            result = service.place_real_order(payload)
+            self.assertTrue(result["real_order_sent"], result.get("blockers"))
+
+            entry_order = result["entry_order"]
+            actual_fill = round(float(entry_order["price"]) + 2.0, 2)
+            fill_update = {
+                **entry_order,
+                "status": "COMPLETE",
+                "filled_quantity": entry_order["quantity"],
+                "average_price": actual_fill,
+            }
+            client.emit_order_update(fill_update)
+            lifecycle = service.real_lifecycle.snapshot()
+
+            self.assertEqual(lifecycle["fill"]["average_price"], actual_fill)
+            self.assertEqual(lifecycle["fill"]["filled_quantity"], entry_order["quantity"])
+            self.assertEqual(lifecycle["state"], "OCO_ACTIVE")
+            self.assertEqual(len(client.limit_orders), 2)
+            self.assertEqual(len(client.stoploss_orders), 1)
+            target_order = client.limit_orders[-1]
+            stoploss_order = client.stoploss_orders[0]
+            self.assertEqual(target_order["transaction_type"], "SELL")
+            self.assertEqual(stoploss_order["transaction_type"], "SELL")
+            self.assertEqual(target_order["quantity"], entry_order["quantity"])
+            self.assertEqual(stoploss_order["quantity"], entry_order["quantity"])
+            self.assertGreater(target_order["price"], actual_fill)
+            self.assertLess(stoploss_order["trigger_price"], actual_fill)
+            service.stop_live_scan({"mode": MODE_REAL})
+
     def test_real_live_broker_snapshot_is_reused_for_sync_and_lifecycle(self):
         client = StreamingOptionsZerodha("REAL")
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -390,6 +557,37 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
 
         self.assertEqual(client.orders_calls, 1)
         self.assertEqual(client.positions_calls, 1)
+
+    def test_real_live_broker_payload_merges_websocket_order_updates_and_throttles_reconciliation(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            result = service.place_real_order(payload)
+            service._live_scan_stop.set()
+            self.assertTrue(result["real_order_sent"], result.get("blockers"))
+
+            client.orders_calls = 0
+            client.positions_calls = 0
+            update = {
+                **result["entry_order"],
+                "status": "COMPLETE",
+                "filled_quantity": result["entry_order"]["quantity"],
+                "average_price": result["entry_order"]["price"],
+            }
+            client.emit_order_update(update)
+            clean_payload = {key: value for key, value in payload.items() if key not in {"broker_orders", "positions"}}
+
+            with service._lock:
+                first = service._real_live_broker_payload_locked(clean_payload)
+                second = service._real_live_broker_payload_locked(clean_payload)
+
+            self.assertEqual(client.orders_calls, 1)
+            self.assertEqual(client.positions_calls, 1)
+            self.assertGreaterEqual(len(first["broker_orders"]), 1)
+            entry_snapshot = next(order for order in second["broker_orders"] if order.get("order_id") == result["entry_order"]["order_id"])
+            self.assertEqual(entry_snapshot["status"], "COMPLETE")
+            self.assertEqual(entry_snapshot["source"], "zerodha_websocket_order_update")
 
     def test_kite_api_manager_blocks_bursts_before_zerodha_limit_errors(self):
         api = KiteApiManager(limiter=RateLimiter(max_calls=3, per_seconds=1.0))

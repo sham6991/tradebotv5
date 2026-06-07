@@ -397,6 +397,12 @@ function renderDataSource(data = {}) {
   const mode = data.settings?.mode || $("#mode")?.value || "";
   const orderExecution = policy.order_execution || (mode === "REAL" ? "Real Zerodha Orders" : "Paper Simulation");
   const warning = (policy.warnings || []).join("; ") || (source === "simulated_fallback" ? "Simulated fallback data is active. This is only for testing." : "");
+  const dataMode = policy.data_mode || first.data_mode || "candle_polling";
+  const wsStatus = liveFeed.websocket_connected
+    ? `CONNECTED (${(liveFeed.subscribed_tokens || []).length || 0} tokens)`
+    : liveFeed.running
+      ? `WAITING (${(liveFeed.subscribed_tokens || []).length || 0} tokens)`
+      : "STOPPED";
   const badge = $("#data-source-badge");
   if (badge) {
     badge.textContent = sourceLabel(source);
@@ -407,12 +413,13 @@ function renderDataSource(data = {}) {
     const fields = [
       ["Market Data", sourceLabel(source)],
       ["Order Execution", orderExecution],
-      ["Data Mode", "Candle Polling"],
+      ["Data Mode", dataModeLabel(dataMode)],
       ["Stock Data Health", stockHealth.status || "WAITING"],
-      ["Live Tick Status", liveFeed.running ? "RUNNING" : "STOPPED"],
+      ["Live Tick Status", wsStatus],
       ["Source Status", status],
       ["Source Error", sourceError || "None"],
       ["Last Candle", first.last_candle_time || ""],
+      ["Last Tick", liveFeed.last_tick_at || first.last_tick_time || ""],
       ["Backfill Status", (stockHealth.warnings || [])[0] || first.reason?.data_source?.backfill_status || "None"],
       ["Profile", data.settings?.strategy_profile || $("#strategy-profile")?.value || "BALANCED"],
       ["Profile Min Score", profile.minimum_entry_score ?? data.settings?.minimum_entry_score ?? "-"],
@@ -459,6 +466,18 @@ function sourceLabel(source) {
     unknown: "Unknown",
   };
   return labels[source] || source || "Data Unavailable";
+}
+
+function dataModeLabel(mode) {
+  const labels = {
+    websocket_tick_candles_preferred: "Websocket tick candles preferred",
+    websocket_tick_candles: "Websocket tick-built candles",
+    websocket_tick_candles_pending: "Websocket tick candles pending",
+    candle_polling_bootstrap_or_fallback: "Historical bootstrap / polling fallback",
+    candle_polling: "Candle polling",
+    provided_market_data: "Provided market data",
+  };
+  return labels[mode] || mode || "Candle polling";
 }
 
 function paperFillLabel(value) {

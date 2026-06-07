@@ -18,6 +18,7 @@ def fetch_zerodha_stock_candles(
     to_time: datetime,
     interval: str = "minute",
     source: str = "zerodha_live_candles",
+    include_live_quote: bool = True,
 ) -> dict[str, Any]:
     if not zerodha_client:
         return {}
@@ -54,7 +55,7 @@ def fetch_zerodha_stock_candles(
             data[symbol] = _error_row(symbol, exchange, source, f"No Zerodha candles returned for {symbol}.", kite_interval, fetched_at, token)
             continue
         ltp = candles[-1]["close"]
-        quote = _live_quote(zerodha_client, exchange, symbol) if "zerodha" in str(source or "").lower() else {}
+        quote = _live_quote(zerodha_client, exchange, symbol) if include_live_quote and "zerodha" in str(source or "").lower() else {}
         quote_data = quote.get("data") or {}
         quote_error = quote.get("error", "")
         live_ltp = _float_or_none(quote_data.get("last_price"))
@@ -80,6 +81,7 @@ def fetch_zerodha_stock_candles(
             "last_tick_time": timestamp,
             "quote_timestamp": timestamp,
             "quote_error": quote_error,
+            "quote_snapshot_used": bool(include_live_quote and "zerodha" in str(source or "").lower()),
             "last_candle_time": candles[-1]["timestamp"],
             "candles_available": len(candles),
             "fetched_at": fetched_at,

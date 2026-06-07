@@ -41,7 +41,8 @@ def evaluate_options_auto_decision(
     timestamp_text = _timestamp_text(timestamp)
     settings["timestamp"] = timestamp_text
 
-    index_features = build_index_features(_frame(index_history))
+    precomputed_features = dict((market_cue_payload or {}).get("precomputed_index_features") or {})
+    index_features = precomputed_features or build_index_features(_frame(index_history))
     if not index_features.get("close"):
         if mode not in {MODE_PAPER, MODE_REAL}:
             index_features = _legacy_features(market_cue_payload)

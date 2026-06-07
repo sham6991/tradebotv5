@@ -31,6 +31,14 @@ class OptionsAutoBacktestEngine:
         active_trade: dict[str, Any] | None = None
         pending_entry: dict[str, Any] | None = None
         slippage = float(settings.get("slippage_buffer_points") or 0.0)
+        starting_margin = float(settings.get("paper_starting_balance") or 0.0)
+        available_margin = starting_margin
+        margin_ledger: list[dict[str, Any]] = [{
+            "row": 0,
+            "event": "START",
+            "available_margin": round(available_margin, 2),
+            "reason": "Backtest starting balance.",
+        }]
 
         for candle_idx, row in index_frame.iterrows():
             index = int(candle_idx)
@@ -43,6 +51,7 @@ class OptionsAutoBacktestEngine:
                     pending_entry = None
                 elif fill.get("filled"):
                     active_trade = fill["trade"]
+                    active_trade["available_margin_at_entry"] = round(available_margin, 2)
                     decisions.append({**fill["decision"], "row": index, "datetime": str(timestamp), "decision": "ENTRY"})
                     pending_entry = None
 
@@ -51,6 +60,18 @@ class OptionsAutoBacktestEngine:
                 if exit_decision.get("closed"):
                     active_trade = {**active_trade, **exit_decision}
                     trades.append(active_trade)
+                    before_margin = available_margin
+                    available_margin = _margin_after_trade(available_margin, float(exit_decision.get("net_pnl") or 0.0))
+                    margin_ledger.append({
+                        "row": index,
+                        "datetime": str(timestamp),
+                        "event": "TRADE_CLOSED",
+                        "tradingsymbol": active_trade.get("tradingsymbol"),
+                        "net_pnl": exit_decision["net_pnl"],
+                        "available_margin_before": round(before_margin, 2),
+                        "available_margin_after": round(available_margin, 2),
+                        "reason": "Loss reduced available margin." if float(exit_decision.get("net_pnl") or 0.0) < 0 else "Profit did not increase next-trade available margin.",
+                    })
                     decisions.append({
                         "row": index,
                         "datetime": str(timestamp),
@@ -93,7 +114,7 @@ class OptionsAutoBacktestEngine:
                     "quote_age_seconds": 0,
                 },
                 risk_state={"trades_today": len(trades), "open_trades": 1 if active_trade else 0},
-                account_state={"available_capital": settings.get("paper_starting_balance")},
+                account_state={"available_capital": available_margin, "starting_margin": starting_margin},
                 timestamp=timestamp,
             )
             if not decision.get("allowed"):
@@ -140,6 +161,7 @@ class OptionsAutoBacktestEngine:
                 base_price = float(fill_row.get("open") if mode == "NEXT_CANDLE_OPEN_PLUS_SLIPPAGE" else fill_row.get("close") or 0)
                 fill_price = round_to_tick(base_price + slippage, float(selected.get("tick_size") or 0.05))
                 active_trade = self._open_trade(decision, frame_index, fill_index, fill_price, settings)
+                active_trade["available_margin_at_entry"] = round(available_margin, 2)
                 decisions.append({
                     "row": fill_index,
                     "datetime": str(fill_row.get("datetime") or timestamp),
@@ -157,6 +179,18 @@ class OptionsAutoBacktestEngine:
             exit_decision = self._check_exit(active_trade, option_frames, len(index_frame) - 1, slippage, is_last=True)
             active_trade = {**active_trade, **exit_decision}
             trades.append(active_trade)
+            before_margin = available_margin
+            available_margin = _margin_after_trade(available_margin, float(exit_decision.get("net_pnl") or 0.0))
+            margin_ledger.append({
+                "row": len(index_frame) - 1,
+                "datetime": str(index_frame.iloc[-1].get("datetime") or ""),
+                "event": "TRADE_CLOSED",
+                "tradingsymbol": active_trade.get("tradingsymbol"),
+                "net_pnl": exit_decision["net_pnl"],
+                "available_margin_before": round(before_margin, 2),
+                "available_margin_after": round(available_margin, 2),
+                "reason": "Loss reduced available margin." if float(exit_decision.get("net_pnl") or 0.0) < 0 else "Profit did not increase next-trade available margin.",
+            })
             decisions.append({
                 "row": len(index_frame) - 1,
                 "datetime": str(index_frame.iloc[-1].get("datetime") or ""),
@@ -168,7 +202,11 @@ class OptionsAutoBacktestEngine:
                 "net_pnl": exit_decision["net_pnl"],
             })
 
-        return self._result(settings, index_frame, option_frames, decisions, trades)
+        result = self._result(settings, index_frame, option_frames, decisions, trades)
+        result["starting_available_margin"] = round(starting_margin, 2)
+        result["ending_available_margin"] = round(available_margin, 2)
+        result["margin_ledger"] = margin_ledger
+        return result
 
     def _candidates_at(self, option_frames: list[pd.DataFrame], index: int) -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]]]:
         candidates: list[dict[str, Any]] = []
@@ -441,6 +479,12 @@ def _zero_trade_reason(decisions: list[dict[str, Any]], blocker_counts: dict[str
         blocker, count = next(iter(blocker_counts.items()))
         return f"No entries passed all gates. Top blocker: {blocker} ({count} rows)."
     return "No entries were triggered before the end of the backtest."
+
+
+def _margin_after_trade(available_margin: float, net_pnl: float) -> float:
+    if net_pnl < 0:
+        return max(0.0, available_margin + net_pnl)
+    return available_margin
 
 
 def _phase_from_timestamp(timestamp: Any) -> str:

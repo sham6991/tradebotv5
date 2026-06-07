@@ -30,6 +30,8 @@ def resolve_intraday_data_source(
     has_market_data = bool(payload.get("market_data"))
     allow_simulated = bool(getattr(settings, "allow_simulated_fallback", False))
     require_live_paper = bool(getattr(settings, "require_live_data_for_paper", True))
+    websocket_primary = bool(getattr(settings, "websocket_primary_enabled", True))
+    live_data_mode = "websocket_tick_candles_preferred" if websocket_primary else "candle_polling"
     manual_context = bool(
         payload.get("allow_provided_market_data")
         or payload.get("debug")
@@ -53,6 +55,7 @@ def resolve_intraday_data_source(
             "Market data supplied in request payload.",
             allow_simulated=False,
             warnings=["Provided market data is for testing/manual evaluation, not live Zerodha data."] if mode in {MODE_PAPER, MODE_REAL} else [],
+            data_mode="provided_market_data",
         )
 
     if mode == MODE_PAPER:
@@ -63,6 +66,7 @@ def resolve_intraday_data_source(
                 "OK",
                 "Using Zerodha Paper Data connection for market data.",
                 requires_fetch=True,
+                data_mode=live_data_mode,
             )
         if require_live_paper and not allow_simulated:
             return _policy(
@@ -97,6 +101,7 @@ def resolve_intraday_data_source(
                 "OK",
                 "Using Zerodha Real Data connection for market data.",
                 requires_fetch=True,
+                data_mode=live_data_mode,
             )
         return _policy(
             IntradayDataSource.UNAVAILABLE,
@@ -124,6 +129,7 @@ def _policy(
     allow_simulated: bool = False,
     blockers: list[str] | None = None,
     warnings: list[str] | None = None,
+    data_mode: str = "candle_polling",
 ) -> dict[str, Any]:
     order_execution = "Real Zerodha Orders" if source == IntradayDataSource.ZERODHA_REAL else "Paper Simulation"
     return {
@@ -136,5 +142,5 @@ def _policy(
         "blockers": list(blockers or []),
         "warnings": list(warnings or []),
         "order_execution": order_execution,
-        "data_mode": "candle_polling",
+        "data_mode": data_mode,
     }

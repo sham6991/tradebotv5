@@ -83,6 +83,31 @@ class LiveIndexCandleStore:
             })
         return {"streams": rows}
 
+    def context(self, *, mode: str, underlying: str, interval: str) -> dict[str, Any]:
+        interval_text = normalize_interval(interval)
+        key = (str(mode or "").upper(), str(underlying or "").upper(), interval_text)
+        state = self._states.get(key) or {}
+        candles = list(state.get("candles") or [])
+        builder = state.get("builder")
+        active = builder.snapshot(key) if builder else {}
+        live_active = [{**active, "complete": False}] if active else []
+        candles = _merge_candles(candles, live_active, self.max_candles)
+        return {
+            "candles": candles,
+            "latest_candle": candles[-1] if candles else {},
+            "interval": interval_text,
+            "interval_minutes": interval_minutes(interval_text),
+            "source": "zerodha_websocket_tick_candles",
+            "backfill": {
+                "attempted": False,
+                "rows": 0,
+                "error": state.get("last_backfill_error") or "",
+            },
+            "candle_count": len(candles),
+            "warnings": ["Live candle warmup incomplete; waiting for more current-session candles."] if len(candles) < 3 else [],
+            "builder_stats": dict(getattr(builder, "stats", {}) or {}),
+        }
+
     def stop(self) -> None:
         for state in self._states.values():
             builder = state.get("builder")

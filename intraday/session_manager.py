@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from .audit_logger import AuditLogger
-from .candle_feed import candle_timestamp, market_open_close, market_slice, max_candle_count
+from .candle_feed import candle_timestamp, depth_from_ltp, market_open_close, market_slice, max_candle_count
 from .constants import (
     MODE_BACKTEST,
     MODE_PAPER,
@@ -92,7 +92,7 @@ class IntradaySessionManager:
             "blockers": [],
             "warnings": [],
             "order_execution": "Paper Simulation",
-            "data_mode": "candle_polling",
+            "data_mode": "websocket_tick_candles_preferred",
         }
         self.last_data_source_status: dict[str, Any] = dict(self.current_data_source_policy)
         self.last_data_fetch_error = ""
@@ -101,6 +101,10 @@ class IntradaySessionManager:
         self.cached_broker_health: dict[str, Any] = {}
         self.last_broker_error = ""
         self.stock_live_feed = StockLiveFeed()
+        self._stock_ws_name = ""
+        self._stock_ws_mode = ""
+        self._stock_ws_tokens: tuple[int, ...] = ()
+        self._stock_ws_last_error = ""
         self.last_stock_data_health: dict[str, Any] = {
             "status": "IDLE",
             "new_entries_allowed": False,
@@ -174,6 +178,8 @@ class IntradaySessionManager:
         selected = [stock.key for stock in settings.stocks]
         if settings.mode in {MODE_PAPER, MODE_REAL}:
             self.stock_live_feed.start([stock.symbol for stock in settings.stocks])
+            self.stock_live_feed.configure_instruments(self._stock_instruments_for_live_feed(settings))
+            self._start_stock_websocket(settings)
         self.database.create_session({
             "session_id": self.session_id,
             "mode": settings.mode,
@@ -568,6 +574,7 @@ class IntradaySessionManager:
             self.audit.log("CRITICAL", "risk", "kill_switch", {"message": "Intraday kill switch activated", "report": report})
         if self.session_id:
             self.database.update_session(self.session_id, {"status": self.status})
+        self._stop_stock_websocket("Kill switch activated.")
         self.stock_live_feed.stop("Kill switch activated.")
         return self.status_payload()
 
@@ -677,6 +684,7 @@ class IntradaySessionManager:
         if self.audit:
             self.audit.log("INFO", "session", "session_stopped", {"export_path": self.last_export_path})
         self.mode_manager.stop()
+        self._stop_stock_websocket("Session stopped.")
         self.stock_live_feed.stop("Session stopped.")
         return self.status_payload()
 
@@ -848,6 +856,119 @@ class IntradaySessionManager:
             return self.zerodha_client_provider(MODE_PAPER) or self.zerodha_client_provider("PAPER")
         return None
 
+    def _stock_instruments_for_live_feed(self, settings: IntradaySettings) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for stock in settings.stocks:
+            row = dict(self.instrument_rows.get(stock.key) or {})
+            if not row:
+                continue
+            row.setdefault("symbol", stock.symbol)
+            row.setdefault("tradingsymbol", stock.symbol)
+            row.setdefault("exchange", stock.exchange)
+            rows.append(row)
+        return rows
+
+    def _start_stock_websocket(self, settings: IntradaySettings) -> None:
+        if settings.mode not in {MODE_PAPER, MODE_REAL} or not bool(getattr(settings, "websocket_primary_enabled", True)):
+            return
+        client = self._client_for_mode(settings.mode)
+        if not client:
+            self.stock_live_feed.mark_websocket_error("Zerodha websocket client is not connected.")
+            return
+        tokens = [
+            int(_float(row.get("instrument_token") or row.get("token") or 0))
+            for row in self._stock_instruments_for_live_feed(settings)
+            if int(_float(row.get("instrument_token") or row.get("token") or 0)) > 0
+        ]
+        tokens = list(dict.fromkeys(tokens))
+        if not tokens:
+            self.stock_live_feed.mark_websocket_error("No selected stock instrument tokens are available for websocket subscription.")
+            return
+        if len(tokens) > 3000:
+            self.stock_live_feed.mark_websocket_error("Intraday stock websocket token count exceeds Zerodha 3000-instrument limit.")
+            return
+        if not hasattr(client, "start_named_ticker") and not hasattr(client, "start_ticker"):
+            self.stock_live_feed.mark_websocket_error("Connected Zerodha client does not expose websocket ticker; candle polling fallback remains active.")
+            return
+
+        name = f"intraday_{settings.mode.lower()}"
+        if self._stock_ws_name == name and self._stock_ws_tokens == tuple(tokens):
+            return
+        self._stop_stock_websocket("resubscribe")
+
+        def on_ticks(ticks):
+            self._on_stock_websocket_ticks(ticks)
+
+        def on_connect(_response=None):
+            self.stock_live_feed.mark_websocket_connected(True)
+            self._stock_ws_last_error = ""
+
+        def on_close(code=None, reason=""):
+            message = f"Stock websocket closed: {code or ''} {reason or ''}".strip()
+            self._stock_ws_last_error = message
+            self.stock_live_feed.mark_websocket_connected(False, message)
+
+        def on_error(code=None, reason=""):
+            message = f"Stock websocket error: {code or ''} {reason or ''}".strip()
+            self._stock_ws_last_error = message
+            self.stock_live_feed.mark_websocket_error(message)
+
+        try:
+            if hasattr(client, "start_named_ticker"):
+                client.start_named_ticker(
+                    name,
+                    tokens,
+                    on_ticks=on_ticks,
+                    on_connect=on_connect,
+                    on_close=on_close,
+                    on_error=on_error,
+                )
+            else:
+                client.start_ticker(
+                    tokens,
+                    on_ticks=on_ticks,
+                    on_connect=on_connect,
+                    on_close=on_close,
+                    on_error=on_error,
+                )
+        except Exception as exc:
+            message = f"Intraday stock websocket startup failed: {exc}"
+            self._stock_ws_last_error = message
+            self.stock_live_feed.mark_websocket_error(message)
+            return
+
+        self._stock_ws_name = name
+        self._stock_ws_mode = settings.mode
+        self._stock_ws_tokens = tuple(tokens)
+        if not self.stock_live_feed.websocket_connected:
+            self.stock_live_feed.mark_websocket_connected(True)
+
+    def _stop_stock_websocket(self, reason: str = "") -> None:
+        if not self._stock_ws_name and not self._stock_ws_tokens:
+            return
+        client = self._client_for_mode(self._stock_ws_mode)
+        try:
+            if client and self._stock_ws_name and hasattr(client, "stop_named_ticker"):
+                client.stop_named_ticker(self._stock_ws_name)
+            elif client and hasattr(client, "stop_ticker"):
+                client.stop_ticker()
+        except Exception as exc:
+            self._stock_ws_last_error = f"Intraday stock websocket stop failed: {exc}"
+        finally:
+            self._stock_ws_name = ""
+            self._stock_ws_mode = ""
+            self._stock_ws_tokens = ()
+            self.stock_live_feed.mark_websocket_connected(False, reason)
+
+    def _on_stock_websocket_ticks(self, ticks: Any) -> None:
+        rows = list(ticks or []) if isinstance(ticks, (list, tuple)) else [ticks]
+        if not rows:
+            return
+        self.stock_live_feed.mark_websocket_connected(True)
+        for tick in rows:
+            if isinstance(tick, dict):
+                self.stock_live_feed.on_tick_by_token(tick)
+
     def _data_policy_for_payload(self, settings: IntradaySettings, payload: dict[str, Any]) -> dict[str, Any]:
         return resolve_intraday_data_source(
             settings.mode,
@@ -882,10 +1003,39 @@ class IntradaySessionManager:
         to_time = min(max(now, from_time), close_time)
         client = self._client_for_mode(settings.mode)
         stocks = [stock.__dict__ for stock in settings.stocks]
+        websocket_data, websocket_warnings = self._stock_websocket_market_data(policy, now)
+        if self._websocket_market_data_complete(websocket_data):
+            status = {
+                **policy,
+                "status": "OK",
+                "data_mode": "websocket_tick_candles",
+                "source_error": "",
+                "warnings": list(dict.fromkeys(list(policy.get("warnings") or []) + websocket_warnings)),
+                "fetched_at": datetime.now().isoformat(timespec="seconds"),
+            }
+            self.last_data_fetch_error = ""
+            self.last_data_source_status = status
+            return self._label_market_data(websocket_data, status)
         if policy.get("requires_fetch"):
             if not client:
                 self.last_data_source_status = {**policy, "status": "ERROR", "source_error": policy.get("reason") or "Zerodha client is not connected."}
                 raise ValueError(policy.get("reason") or "Zerodha client is not connected.")
+            if (
+                bool(getattr(settings, "websocket_primary_enabled", True))
+                and not bool(getattr(settings, "historical_bootstrap_on_start", True))
+                and not self._websocket_market_data_complete(websocket_data)
+            ):
+                error = "; ".join(websocket_warnings) or "Websocket tick candles are not ready and historical bootstrap is disabled."
+                self.last_data_fetch_error = error
+                self.last_data_source_status = {
+                    **policy,
+                    "status": "ERROR",
+                    "data_mode": "websocket_tick_candles_pending",
+                    "source_error": error,
+                    "warnings": list(dict.fromkeys(list(policy.get("warnings") or []) + websocket_warnings)),
+                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                }
+                raise ValueError(error)
             data = fetch_zerodha_stock_candles(
                 client,
                 stocks,
@@ -893,12 +1043,38 @@ class IntradaySessionManager:
                 to_time,
                 interval=settings.candle_interval,
                 source=policy["source"],
+                include_live_quote=self._should_use_quote_snapshot_fallback(websocket_data),
             )
             usable, errors = self._usable_fetch_data(data)
             if usable:
+                self._seed_stock_live_feed_from_fetch(usable)
+                websocket_data, websocket_warnings = self._stock_websocket_market_data(policy, now)
+                if self._websocket_market_data_complete(websocket_data):
+                    status = {
+                        **policy,
+                        "status": "OK",
+                        "data_mode": "websocket_tick_candles",
+                        "source_error": "",
+                        "warnings": list(dict.fromkeys(list(policy.get("warnings") or []) + websocket_warnings)),
+                        "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                    self.last_data_fetch_error = ""
+                    self.last_data_source_status = status
+                    return self._label_market_data(websocket_data, status)
                 status = "WARNING" if errors else "OK"
-                self.last_data_fetch_error = "; ".join(errors)
-                self.last_data_source_status = {**policy, "status": status, "source_error": self.last_data_fetch_error, "fetched_at": datetime.now().isoformat(timespec="seconds")}
+                source_errors = list(errors)
+                if bool(getattr(settings, "websocket_primary_enabled", True)) and websocket_warnings:
+                    source_errors.extend(websocket_warnings)
+                    status = "WARNING"
+                self.last_data_fetch_error = "; ".join(source_errors)
+                self.last_data_source_status = {
+                    **policy,
+                    "status": status,
+                    "data_mode": "candle_polling_bootstrap_or_fallback",
+                    "source_error": self.last_data_fetch_error,
+                    "fetched_at": datetime.now().isoformat(timespec="seconds"),
+                    "warnings": list(dict.fromkeys(list(policy.get("warnings") or []) + websocket_warnings)),
+                }
                 return self._label_market_data(usable, self.last_data_source_status)
             error = "; ".join(errors) or f"Could not fetch Zerodha {'Real' if settings.mode == MODE_REAL else 'Paper'} Data."
             self.last_data_fetch_error = error
@@ -925,6 +1101,107 @@ class IntradaySessionManager:
             self.last_data_source_status = dict(policy)
             return self._simulated_market_data(stocks, now, policy)
         return {}
+
+    def _stock_websocket_market_data(self, policy: dict[str, Any], now: datetime) -> tuple[dict[str, Any], list[str]]:
+        settings = self.settings
+        if not settings or settings.mode not in {MODE_PAPER, MODE_REAL}:
+            return {}, []
+        if not bool(getattr(settings, "websocket_primary_enabled", True)):
+            return {}, []
+        if not self.stock_live_feed.running:
+            return {}, ["Stock websocket feed is not running."]
+        include_current = bool(getattr(settings, "allow_forming_candle_entry", False))
+        max_age = max(0.1, float(getattr(settings, "max_tick_age_seconds", 3.0) or 3.0))
+        rows: dict[str, Any] = {}
+        warnings: list[str] = []
+        now_epoch = now.timestamp()
+        for stock in settings.stocks:
+            symbol = stock.symbol.upper()
+            tick = self.stock_live_feed.latest_tick(symbol)
+            if not tick:
+                warnings.append(f"{symbol} websocket tick is not ready.")
+                continue
+            age = self.stock_live_feed.tick_age_seconds(symbol, now_epoch=now_epoch)
+            if age > max_age:
+                warnings.append(f"{symbol} websocket tick is stale ({age:.1f}s).")
+                continue
+            ltp = _float(tick.get("last_price"), tick.get("ltp") or tick.get("close"))
+            if ltp <= 0:
+                warnings.append(f"{symbol} websocket tick has no valid LTP.")
+                continue
+            candles = self.stock_live_feed.candles(symbol, include_current=include_current)
+            if not candles:
+                warnings.append(f"{symbol} websocket tick is live but completed tick-built candles are not ready.")
+            depth = tick.get("depth") if isinstance(tick.get("depth"), dict) else {}
+            timestamp = str(
+                tick.get("timestamp")
+                or tick.get("exchange_timestamp")
+                or tick.get("last_trade_time")
+                or tick.get("received_at")
+                or now.isoformat(timespec="seconds")
+            )
+            rows[symbol] = {
+                "ltp": ltp,
+                "candles": candles,
+                "full_candles": candles,
+                "future_candles": [],
+                "depth": depth or depth_from_ltp(ltp),
+                "depth_source": "zerodha_websocket_full_tick" if depth else "synthetic_from_websocket_ltp",
+                "source": policy.get("source") or IntradayDataSource.UNAVAILABLE,
+                "source_status": "OK",
+                "source_error": "",
+                "data_mode": "websocket_tick_candles",
+                "interval": settings.candle_interval,
+                "instrument_token": tick.get("instrument_token") or self.stock_live_feed.token_by_symbol.get(symbol),
+                "ohlc": tick.get("ohlc") or {},
+                "lower_circuit_limit": tick.get("lower_circuit_limit"),
+                "upper_circuit_limit": tick.get("upper_circuit_limit"),
+                "last_tick_time": timestamp,
+                "quote_timestamp": timestamp,
+                "quote_error": "",
+                "quote_snapshot_used": False,
+                "last_candle_time": candle_timestamp(candles[-1]) if candles else "",
+                "candles_available": len(candles),
+                "fetched_at": now.isoformat(timespec="seconds"),
+                "exchange": stock.exchange,
+                "symbol": symbol,
+                "age_seconds": age,
+            }
+        return rows, list(dict.fromkeys(warnings))
+
+    def _websocket_market_data_complete(self, market_data: dict[str, Any]) -> bool:
+        settings = self.settings
+        if not settings or settings.mode not in {MODE_PAPER, MODE_REAL}:
+            return False
+        selected = {stock.symbol.upper() for stock in settings.stocks}
+        if not selected or not selected.issubset(set(dict(market_data or {}).keys())):
+            return False
+        for symbol in selected:
+            row = dict((market_data or {}).get(symbol) or {})
+            if str(row.get("source_status") or "").upper() == "ERROR":
+                return False
+            if not row.get("candles"):
+                return False
+        return True
+
+    def _should_use_quote_snapshot_fallback(self, websocket_data: dict[str, Any]) -> bool:
+        settings = self.settings
+        if not settings or not bool(getattr(settings, "quote_snapshot_fallback_enabled", True)):
+            return False
+        if not bool(getattr(settings, "websocket_primary_enabled", True)):
+            return True
+        selected = {stock.symbol.upper() for stock in settings.stocks}
+        if selected and selected.issubset(set(dict(websocket_data or {}).keys())):
+            return False
+        return True
+
+    def _seed_stock_live_feed_from_fetch(self, market_data: dict[str, Any]) -> None:
+        if not self.stock_live_feed.running:
+            return
+        for symbol, row in dict(market_data or {}).items():
+            candles = list((row or {}).get("candles") or [])
+            if candles:
+                self.stock_live_feed.seed_candles(symbol, candles)
 
     def _usable_fetch_data(self, data: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
         usable = {}
@@ -1052,11 +1329,14 @@ def _price_structure(candles: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _float(value: Any) -> float:
+def _float(value: Any, default: Any = 0) -> float:
     try:
         return float(value or 0)
     except (TypeError, ValueError):
-        return 0.0
+        try:
+            return float(default or 0)
+        except (TypeError, ValueError):
+            return 0.0
 
 
 def _is_selected_intraday_order(order: dict[str, Any], selected_symbols: set[str]) -> bool:

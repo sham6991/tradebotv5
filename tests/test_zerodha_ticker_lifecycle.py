@@ -68,6 +68,7 @@ class ZerodhaTickerLifecycleTests(unittest.TestCase):
         client.api_key = "api-key"
         client.access_token = "access-token"
         client.ticker = None
+        client._named_tickers = {}
         return client
 
     def test_close_callback_does_not_stop_reactor(self):
@@ -90,6 +91,25 @@ class ZerodhaTickerLifecycleTests(unittest.TestCase):
         self.assertTrue(FakeTicker.instances[0].closed)
         self.assertFalse(FakeTicker.instances[0].stopped)
         self.assertIsNone(client.ticker)
+
+    def test_named_ticker_does_not_replace_default_ticker(self):
+        client = self.client()
+        client.start_ticker([256265], on_ticks=lambda ticks: None)
+        default = client.ticker
+
+        client.start_named_ticker("options_auto_paper", [111, 222], on_ticks=lambda ticks: None)
+        named = client._named_tickers["options_auto_paper"]
+
+        self.assertIs(client.ticker, default)
+        self.assertIsNot(named, default)
+        self.assertEqual(named.api_key, "api-key")
+        self.assertEqual(named.access_token, "access-token")
+
+        client.stop_named_ticker("options_auto_paper")
+
+        self.assertTrue(named.closed)
+        self.assertFalse(default.closed)
+        self.assertIs(client.ticker, default)
 
 
 if __name__ == "__main__":

@@ -527,6 +527,11 @@ function renderIndustryDiagnostics() {
   const feedHealth = feed.health || {};
   const feedMode = feedHealth.data_mode || feed.data_mode || "UNKNOWN";
   const feedStale = Boolean(feedHealth.feed_stale);
+  const runtime = result.runtime_persistence || state.status.runtime_persistence || {};
+  const referenceCache = result.reference_cache || state.status.reference_cache || {};
+  const featureCache = result.feature_cache || state.status.feature_cache || {};
+  const apiBudget = result.api_budget || state.status.api_budget || {};
+  const recentApiCalls = apiBudget.real_api_calls_recent || {};
   setBadge("#oa-live-feed-badge", feedMode, feedStale ? "red" : feedMode === "WEBSOCKET_TICKS" ? "green" : feedMode === "QUOTE_SNAPSHOT_POLLING" ? "yellow" : "grey");
   setHtml("#oa-live-feed-panel", [
     metric("Data Mode", feedMode),
@@ -539,6 +544,11 @@ function renderIndustryDiagnostics() {
     metric("Stale Labels", (feedHealth.stale_labels || []).join(", ") || "-"),
     metric("Subscribed Tokens", (feed.subscribed_tokens || []).join(", ") || "-"),
     metric("Option Streams", (feed.option_candles?.streams || []).length),
+    metric("Runtime Saved", runtime.last_saved_at || "-"),
+    metric("Reference Warm", referenceCache.warmed ? "YES" : "NO"),
+    metric("Feature Cache", `${featureCache.hits || 0}/${featureCache.misses || 0}`),
+    metric("Recent API Calls", Object.values(recentApiCalls).reduce((sum, value) => sum + Number(value || 0), 0)),
+    metric("Reconcile Poll", apiBudget.real_broker_reconcile_poll_seconds ? `${apiBudget.real_broker_reconcile_poll_seconds}s` : "-"),
   ].join(""));
 
   const lifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
@@ -560,6 +570,8 @@ function renderIndustryDiagnostics() {
 
   const blackbox = result.blackbox || state.status.blackbox || {};
   const report = blackbox.latency_report || {};
+  const performance = result.performance || state.status.performance || {};
+  const perfSummary = performance.summary || {};
   const count = report.count || (blackbox.events || []).length || 0;
   setBadge("#oa-blackbox-badge", count ? `${count} Events` : "No Events", count ? "blue" : "grey");
   setHtml("#oa-blackbox-panel", [
@@ -570,6 +582,9 @@ function renderIndustryDiagnostics() {
     metric("Ack Fill p95", latency(report.ack_to_fill_ms)),
     metric("Protection p95", latency(report.protection_delay_ms)),
     metric("Data Age p95", latency(report.data_age_ms)),
+    metric("Scan Latest", latency({ p95: perfSummary.live_scan_cycle?.latest_ms })),
+    metric("Feature Latest", latency({ p95: perfSummary.index_feature_build?.latest_ms })),
+    metric("Wake Events", perfSummary.event_driven_scan_wake?.count || 0),
   ].join(""));
 }
 
@@ -1507,6 +1522,12 @@ function hydrateStatusDecision(payload) {
     index_ticks: payload.index_ticks || [],
     live_index_candles: payload.live_index_candles || {},
     live_scan: payload.live_scan || {},
+    options_live_feed: payload.options_live_feed || {},
+    runtime_persistence: payload.runtime_persistence || {},
+    reference_cache: payload.reference_cache || {},
+    feature_cache: payload.feature_cache || {},
+    api_budget: payload.api_budget || {},
+    blackbox: payload.blackbox || {},
   };
 }
 

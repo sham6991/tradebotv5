@@ -149,6 +149,13 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "real_protection_retry_delay_seconds": 1,
     "real_order_update_source": "POLLING_OR_POSTBACK",
     "options_live_feed_enabled": True,
+    "options_websocket_primary_enabled": True,
+    "websocket_order_updates_enabled": True,
+    "event_driven_decisions_enabled": True,
+    "event_driven_min_scan_interval_ms": 500,
+    "runtime_state_persistence_enabled": True,
+    "prewarm_reference_data_on_start": True,
+    "incremental_feature_cache_enabled": True,
     "quote_polling_fallback_enabled": True,
     "max_tick_age_seconds": 3,
     "max_quote_age_seconds": 3,
@@ -160,6 +167,7 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "quote_snapshot_min_interval_seconds": 1,
     "quote_failure_backoff_seconds": 5,
     "quote_error_pause_new_entries": True,
+    "real_broker_reconcile_poll_seconds": 10,
 }
 
 
@@ -230,6 +238,12 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "partial_fill_protect_immediately",
         "cancel_unfilled_entry_after_timeout",
         "options_live_feed_enabled",
+        "options_websocket_primary_enabled",
+        "websocket_order_updates_enabled",
+        "event_driven_decisions_enabled",
+        "runtime_state_persistence_enabled",
+        "prewarm_reference_data_on_start",
+        "incremental_feature_cache_enabled",
         "quote_polling_fallback_enabled",
         "pause_entries_on_feed_stale",
         "backtest_reselect_contracts_using_index_candle_close",
@@ -338,6 +352,8 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "max_quote_age_seconds",
         "websocket_reconnect_max_attempts",
         "max_full_quote_batch_size",
+        "real_broker_reconcile_poll_seconds",
+        "event_driven_min_scan_interval_ms",
     ):
         settings[key] = _int(settings.get(key), int(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 

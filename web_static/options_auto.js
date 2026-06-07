@@ -15,6 +15,7 @@ const state = {
   dataSource: "UNKNOWN",
   fiiDiiStatus: {},
   refreshBusy: false,
+  fullRefreshBusy: false,
   lastRefreshOkAt: 0,
 };
 
@@ -53,18 +54,25 @@ async function guardedCommand(key, button, fn) {
 }
 
 // api helper
-async function api(path, payload) {
-  const options = payload === undefined
+async function api(path, payload, requestOptions = {}) {
+  const timeoutMs = Number(requestOptions.timeoutMs || (payload === undefined ? 3000 : 5000));
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const fetchOptions = payload === undefined
     ? {}
     : {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       };
-  const response = await fetch(path, options);
-  const data = await response.json();
-  if (!response.ok || data.error) throw new Error(data.error || response.statusText);
-  return data;
+  try {
+    const response = await fetch(path, { ...fetchOptions, signal: controller.signal });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || response.statusText);
+    return data;
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 async function apiForm(path, form) {
@@ -115,7 +123,7 @@ function percent(input) {
 
 function latency(item) {
   if (!item || typeof item !== "object") return "-";
-  return `${numberValue(item.p95, 0).toFixed(0)} ms`;
+  return `${numberValue(item.p95_ms ?? item.p95 ?? item.latest_ms ?? item.last_ms, 0).toFixed(0)} ms`;
 }
 
 function escapeHtml(input) {
@@ -915,10 +923,15 @@ function renderIndustryDiagnostics() {
   const report = blackbox.latency_report || {};
   const performance = result.performance || state.status.performance || {};
   const perfSummary = performance.summary || {};
+  const latencySummary = result.latency || state.status.latency || {};
   const count = report.count || (blackbox.events || []).length || 0;
   setBadge("#oa-blackbox-badge", count ? `${count} Events` : "No Events", count ? "blue" : "grey");
   setHtml("#oa-blackbox-panel", [
     metric("Events", count),
+    metric("UI Summary p95", latency(latencySummary["options_auto.ui_summary"])),
+    metric("Full Status p95", latency(latencySummary["options_auto.status_full"])),
+    metric("Evaluate p95", latency(latencySummary["options_auto.evaluate_total"])),
+    metric("Persist p95", latency(latencySummary["options_auto.runtime_persist"])),
     metric("Decision p95", latency(report.decision_latency_ms)),
     metric("Validation p95", latency(report.validation_latency_ms)),
     metric("Submit Ack p95", latency(report.submit_to_ack_ms)),
@@ -2085,12 +2098,14 @@ function initNativeDatePickers() {
 }
 
 // init
-async function refresh() {
+async function refresh(options = {}) {
   if (state.refreshBusy) return;
   state.refreshBusy = true;
   const staleWarning = $("#oa-ui-stale-warning");
+  const useFullStatus = Boolean(options.full || state.activeTab === "debug");
+  const endpoint = useFullStatus ? "/api/options-auto/status" : "/api/options-auto/ui-summary";
   try {
-    const payload = await api("/api/options-auto/status");
+    const payload = await api(endpoint, undefined, { timeoutMs: useFullStatus ? 6000 : 3000 });
     state.lastRefreshOkAt = Date.now();
     staleWarning?.classList.remove("is-visible");
     state.status = payload;
@@ -2151,11 +2166,11 @@ async function loadDefaults() {
   if (cue) cue.value = JSON.stringify(sampleMarketCue(), null, 2);
   if (instruments) instruments.value = JSON.stringify(sampleInstruments(), null, 2);
   if (quotes) quotes.value = JSON.stringify(sampleQuotes(), null, 2);
-  await refresh();
+  await refresh({ full: true });
 }
 
 function initDashboard() {
-  on("#oa-top-refresh", "click", refresh);
+  on("#oa-top-refresh", "click", () => refresh({ full: true }));
   on("#oa-stop-engine-top", "click", stopEngine);
   on("#oa-kill-switch-top", "click", killSwitch);
   initFiiDiiUpload();
@@ -2180,7 +2195,18 @@ document.addEventListener("DOMContentLoaded", () => {
   loadDefaults().catch(error => {
     setHtml("#oa-dashboard-alerts", alertHtml(error.message, "danger"));
   });
-  refreshTimer = window.setInterval(() => {
-    if (document.visibilityState === "visible") refresh().catch(() => {});
-  }, 3000);
+  scheduleRefresh();
+  document.addEventListener("visibilitychange", scheduleRefresh);
 });
+
+function refreshDelayMs() {
+  if (state.activeTab === "debug") return 10000;
+  return document.visibilityState === "visible" ? 1000 : 7000;
+}
+
+function scheduleRefresh() {
+  if (refreshTimer) window.clearTimeout(refreshTimer);
+  refreshTimer = window.setTimeout(() => {
+    refresh({ full: state.activeTab === "debug" }).catch(() => {}).finally(scheduleRefresh);
+  }, refreshDelayMs());
+}

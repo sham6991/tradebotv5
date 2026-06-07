@@ -69,13 +69,22 @@ function setStatusPill(selector, label, ok) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
-  });
-  const data = await response.json();
-  if (!response.ok || data.error) throw new Error(data.error || `Request failed ${response.status}`);
-  return data;
+  const timeoutMs = Number(options.timeoutMs || 5000);
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  const { timeoutMs: _timeout, ...fetchOptions } = options;
+  try {
+    const response = await fetch(path, {
+      ...fetchOptions,
+      signal: controller.signal,
+      headers: { "Content-Type": "application/json", ...(fetchOptions.headers || {}) },
+    });
+    const data = await response.json();
+    if (!response.ok || data.error) throw new Error(data.error || `Request failed ${response.status}`);
+    return data;
+  } finally {
+    window.clearTimeout(timer);
+  }
 }
 
 async function apiForm(path, formData) {
@@ -434,7 +443,7 @@ function renderStatus(data) {
     switchStep("terminal");
     startStatusPolling();
     $("#status-message").textContent = engine.running
-      ? `Engine is evaluating continuously every ${Number(engine.interval_seconds || 5).toFixed(0)} seconds.`
+      ? `Engine is evaluating continuously every ${Number(engine.interval_seconds || 1).toFixed(1)} seconds. Last cycle ${Number(engine.last_cycle_duration_ms || 0).toFixed(0)} ms (${engine.adaptive_reason || "ACTIVE"}).`
       : "Session is running; engine heartbeat is not active.";
   } else {
     stopStatusPolling();
@@ -472,6 +481,7 @@ function renderDataSource(data = {}) {
   const stockHealth = data.stock_data_health || {};
   const liveFeed = data.stock_live_feed || {};
   const profile = data.profile_policy || data.settings?.profile_policy || {};
+  const engine = data.engine || state.status?.engine || {};
   const snapshots = data.snapshots || [];
   const first = snapshots[0] || {};
   const source = policy.source || first.data_source || "data_unavailable";
@@ -504,6 +514,9 @@ function renderDataSource(data = {}) {
       ["Last Candle", first.last_candle_time || ""],
       ["Last Tick", liveFeed.last_tick_at || first.last_tick_time || ""],
       ["Backfill Status", (stockHealth.warnings || [])[0] || first.reason?.data_source?.backfill_status || "None"],
+      ["Engine Interval", engine.interval_seconds !== undefined ? `${Number(engine.interval_seconds || 0).toFixed(1)}s` : "-"],
+      ["Last Cycle", engine.last_cycle_duration_ms !== undefined ? `${Number(engine.last_cycle_duration_ms || 0).toFixed(0)} ms` : "-"],
+      ["Next Interval Reason", engine.adaptive_reason || "-"],
       ["Profile", data.settings?.strategy_profile || $("#strategy-profile")?.value || "BALANCED"],
       ["Profile Min Score", profile.minimum_entry_score ?? data.settings?.minimum_entry_score ?? "-"],
       ["Profile RVOL", profile.relative_volume_threshold ?? data.settings?.relative_volume_threshold ?? "-"],
@@ -868,13 +881,99 @@ function orderRowClass(row) {
   return "";
 }
 
+function renderUiSummary(data = {}) {
+  state.lastStatusOkAt = Date.now();
+  $("#intraday-ui-stale-warning")?.classList.remove("is-visible");
+  const previous = state.status || {};
+  const settings = { ...(previous.settings || {}), mode: data.mode || previous.settings?.mode || $("#mode")?.value || "PAPER" };
+  const funds = {
+    ...(previous.funds || {}),
+    available: data.available_margin ?? data.paper_balance ?? previous.funds?.available,
+    used_margin: data.used_margin ?? previous.funds?.used_margin ?? 0,
+  };
+  const pnl = { ...(previous.session_pnl || {}), total: data.session_pnl ?? previous.session_pnl?.total ?? 0 };
+  state.status = {
+    ...previous,
+    status: data.session || previous.status,
+    settings,
+    funds,
+    session_pnl: pnl,
+    engine: data.engine || previous.engine || {},
+    latency: data.latency || previous.latency || {},
+  };
+  $("#session-line").textContent = previous.session_id
+    ? `Session ${previous.session_id} | ${settings.mode} | Engine ${data.engine?.running ? "running" : "stopped"}`
+    : `${data.mode || settings.mode || "PAPER"} summary refresh active.`;
+  $("#mode-banner").textContent = settings.mode ? `${settings.mode} MODE ACTIVE` : "No Session";
+  $("#lock-status").textContent = data.lock_state || (data.engine?.running ? "ENGINE ON" : "OPEN");
+  $("#capital").textContent = money(funds.available);
+  $("#used-margin").textContent = money(funds.used_margin);
+  $("#day-pnl").textContent = money(pnl.total);
+  $("#active-symbol").textContent = data.active_trade || "None";
+  setText("#intraday-kill-state", data.kill_switch ? "ON" : "OFF");
+  setText("#intraday-last-scan", data.last_scan || data.engine?.last_cycle || "-");
+  renderWatch(summaryStocksAsSnapshots(data.stocks || []));
+  const engine = data.engine || {};
+  $("#status-message").textContent = engine.running
+    ? `Engine is evaluating continuously every ${Number(engine.interval_seconds || 1).toFixed(1)} seconds. Last cycle ${Number(engine.last_cycle_duration_ms || 0).toFixed(0)} ms (${engine.adaptive_reason || "ACTIVE"}).`
+    : "Session is running; engine heartbeat is not active.";
+  const journal = {
+    session: data.session,
+    mode: data.mode,
+    stocks: (data.stocks || []).length,
+    engine,
+    latency: data.latency || {},
+  };
+  if (shouldRender("intraday:summary-journal", journal)) {
+    $("#journal-output").textContent = JSON.stringify(journal, null, 2);
+  }
+  applyModeLock();
+}
+
+function summaryStocksAsSnapshots(rows = []) {
+  return rows.slice(0, 50).map((row) => {
+    const ltp = Number(row.ltp || 0);
+    const rowScore = Number(row.score || 0);
+    return {
+      symbol: row.symbol || "",
+      exchange: row.exchange || "NSE",
+      ltp,
+      open: ltp,
+      close: ltp,
+      volume: row.volume || 0,
+      candles_available: row.candles_available || "",
+      last_candle_time: row.last_candle_time || "",
+      data_source: row.data_source || "summary",
+      source_status: row.risk || "OK",
+      relative_volume: row.relative_volume || 0,
+      vwap: row.vwap || 0,
+      ema20: row.ema20 || 0,
+      ema50: row.ema50 || 0,
+      rsi: row.rsi || 0,
+      liquidity_score: row.liquidity_score || 0,
+      trap_warning: "",
+      news_sentiment: "",
+      news_score: 0,
+      final_long_score: rowScore,
+      final_short_score: 0,
+      selected_side: row.trend || "WAIT",
+      reason: {
+        score_breakdown: {
+          primary_trigger: row.signal || "NO TRADE",
+          blockers: row.blocker ? [row.blocker] : [],
+        },
+      },
+    };
+  });
+}
+
 async function refreshAccounts() {
   renderAccountStatus(await api("/api/intraday/account-status"));
 }
 
 async function refreshIntradayStatus() {
   try {
-    renderStatus(await api("/api/intraday/status"));
+    renderStatus(await api("/api/intraday/status", { timeoutMs: 6000 }));
   } catch (error) {
     showIntradayStale(error.message);
     throw error;
@@ -897,23 +996,37 @@ async function updatePaperBalance(reset = true) {
 
 function startStatusPolling() {
   if (state.statusPollTimer) return;
-  state.statusPollTimer = window.setInterval(pollRunningEngine, 3000);
+  scheduleStatusPolling();
 }
 
 function stopStatusPolling() {
   if (!state.statusPollTimer) return;
-  window.clearInterval(state.statusPollTimer);
+  window.clearTimeout(state.statusPollTimer);
   state.statusPollTimer = null;
+}
+
+function intradayPollDelayMs() {
+  return document.visibilityState === "visible" ? 1000 : 7000;
+}
+
+function scheduleStatusPolling() {
+  if (state.statusPollTimer) window.clearTimeout(state.statusPollTimer);
+  state.statusPollTimer = window.setTimeout(async () => {
+    await pollRunningEngine();
+    if (state.status?.status === "RUNNING") scheduleStatusPolling();
+  }, intradayPollDelayMs());
 }
 
 async function pollRunningEngine() {
   if (state.statusPollBusy) return;
   state.statusPollBusy = true;
   try {
-    const data = await api("/api/intraday/status");
-    renderStatus(data);
+    const useFullStatus = state.statusPollCount > 0 && state.statusPollCount % 12 === 0;
+    const data = await api(useFullStatus ? "/api/intraday/status" : "/api/intraday/ui-summary", { timeoutMs: useFullStatus ? 6000 : 3000 });
+    if (useFullStatus) renderStatus(data);
+    else renderUiSummary(data);
     state.statusPollCount += 1;
-    if (state.statusPollCount % 3 === 0) {
+    if (state.statusPollCount % 12 === 0) {
       await refreshAccounts();
     }
   } catch (error) {
@@ -1113,6 +1226,9 @@ async function init() {
   });
 
   window.addEventListener("beforeunload", stopStatusPolling);
+  document.addEventListener("visibilitychange", () => {
+    if (state.statusPollTimer) scheduleStatusPolling();
+  });
   const today = new Date().toISOString().slice(0, 10);
   $("#backtest-date").value = today;
 }

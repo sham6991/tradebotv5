@@ -55,9 +55,18 @@ async function guardedCommand(key, button, fn) {
 
 // api helper
 async function api(path, payload, requestOptions = {}) {
-  const timeoutMs = Number(requestOptions.timeoutMs || (payload === undefined ? 3000 : 5000));
+  const timeoutMs = requestTimeoutMs(path, payload, requestOptions);
+  const timeoutReason = requestTimeoutMessage(path, timeoutMs);
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  let didTimeout = false;
+  const timer = window.setTimeout(() => {
+    didTimeout = true;
+    try {
+      controller.abort(new DOMException(timeoutReason, "TimeoutError"));
+    } catch {
+      controller.abort();
+    }
+  }, timeoutMs);
   const fetchOptions = payload === undefined
     ? {}
     : {
@@ -70,9 +79,33 @@ async function api(path, payload, requestOptions = {}) {
     const data = await response.json();
     if (!response.ok || data.error) throw new Error(data.error || response.statusText);
     return data;
+  } catch (error) {
+    if (didTimeout || error?.name === "AbortError" || error?.name === "TimeoutError" || /aborted without reason/i.test(String(error?.message || ""))) {
+      throw new Error(timeoutReason);
+    }
+    throw error;
   } finally {
     window.clearTimeout(timer);
   }
+}
+
+function requestTimeoutMs(path, payload, requestOptions = {}) {
+  if (requestOptions.timeoutMs !== undefined) return Number(requestOptions.timeoutMs);
+  if (path === "/api/options-auto/backtest/run") return 180000;
+  if (path === "/api/options-auto/paper/start") return 30000;
+  if (path === "/api/options-auto/evaluate" || path === "/api/options-auto/paper/execute-plan" || path === "/api/options-auto/paper/request-approval") return 30000;
+  return Number(payload === undefined ? 3000 : 5000);
+}
+
+function requestTimeoutMessage(path, timeoutMs) {
+  const seconds = Math.max(1, Math.round(Number(timeoutMs || 0) / 1000));
+  if (path === "/api/options-auto/backtest/run") {
+    return `Backtest request timed out after ${seconds}s. The server may still be finishing; refresh Backtest/Reports before running it again.`;
+  }
+  if (path === "/api/options-auto/paper/start") {
+    return `Paper session start timed out after ${seconds}s. Refresh Options Auto before pressing Start Paper Engine again.`;
+  }
+  return `Options Auto request timed out after ${seconds}s. Refresh the page and check the latest session state before retrying.`;
 }
 
 async function apiForm(path, form) {

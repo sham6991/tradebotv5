@@ -198,6 +198,18 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("timeoutMs", js)
         self.assertIn("AbortController", js)
 
+    def test_slow_backtest_and_paper_start_do_not_surface_raw_abort_error(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        self.assertIn("requestTimeoutMs", js)
+        self.assertIn("requestTimeoutMessage", js)
+        self.assertIn("controller.abort(new DOMException(timeoutReason, \"TimeoutError\"))", js)
+        self.assertIn("aborted without reason", js)
+        self.assertIn("Backtest request timed out", js)
+        self.assertIn("Paper session start timed out", js)
+        self.assertIn("if (path === \"/api/options-auto/backtest/run\") return 180000", js)
+        self.assertIn("if (path === \"/api/options-auto/paper/start\") return 30000", js)
+
 
 if __name__ == "__main__":
     unittest.main()

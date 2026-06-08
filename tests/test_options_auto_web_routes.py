@@ -37,6 +37,8 @@ class FakeHandler:
 class FakeOptionsAutoService:
     def __init__(self):
         self.place_payload = None
+        self.start_payload = None
+        self.reset_payload = None
         self.upload_payload = None
 
     def status(self):
@@ -54,19 +56,33 @@ class FakeOptionsAutoService:
         self.place_payload = dict(payload)
         return {"allowed": False, "real_order_sent": False, "order_stage": "BLOCKED", "blockers": ["test blocker"]}
 
+    def start_real_engine(self, payload):
+        self.start_payload = dict(payload)
+        return {"allowed": True, "real_engine_started": True, "real_order_sent": False}
+
+    def reset_paper_account(self, payload):
+        self.reset_payload = dict(payload)
+        return {"reset": True, "paper_account": {"available_balance": payload.get("paper_starting_balance")}}
+
     def upload_fii_dii_csv(self, payload):
         self.upload_payload = dict(payload)
         return {"status": "UPLOADED", "score": 30, "file_name": payload.get("file_name") or "fii.csv"}
 
 
 class SummaryOnlyOptionsAutoService:
+    def __init__(self, mode="REAL", live_scan=None, session=None):
+        self.mode = mode
+        self.live_scan = live_scan or {}
+        self.session = session if session is not None else {"active_trades": [], "last_decision": {}}
+
     def status(self):
         raise AssertionError("ui-summary must not call full status when lightweight summary exists")
 
     def ui_summary_snapshot(self):
         return {
-            "settings": {"mode": "REAL"},
-            "session": {"active_trades": [], "last_decision": {}},
+            "settings": {"mode": self.mode},
+            "session": self.session,
+            "live_scan": self.live_scan,
             "options_live_feed": {"health": {"stale": False}},
             "contract_lock": {"lock": {"ce": {"tradingsymbol": "NIFTY26JUN23500CE"}, "pe": {"tradingsymbol": "NIFTY26JUN23400PE"}}},
             "real_order_lifecycle": {"state": "IDLE", "protected_state": "FLAT"},
@@ -110,6 +126,17 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
         self.assertEqual(routes.service.place_payload["kite_profile"], {"user_id": "REAL1"})
         self.assertTrue(result["account_status"]["real"]["connected"])
 
+    def test_real_start_engine_route_reaches_service_when_live_connected(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
+        routes.service = FakeOptionsAutoService()
+        handler = FakeHandler()
+
+        result = routes.handle_post(handler, "/api/options-auto/real/start-engine", {"mode": "REAL"})
+
+        self.assertTrue(result["real_engine_started"])
+        self.assertEqual(routes.service.start_payload["kite_profile"], {"user_id": "REAL1"})
+        self.assertTrue(result["account_status"]["real"]["connected"])
+
     def test_options_auto_service_provider_maps_real_and_live_to_live_client(self):
         app_state = FakeAppState(paper_connected=False, live_connected=True)
         live_client = app_state.zerodha_clients_by_mode["LIVE"]
@@ -117,6 +144,17 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
 
         self.assertIs(routes.service.kite_client_provider("REAL"), live_client)
         self.assertIs(routes.service.kite_client_provider("LIVE"), live_client)
+
+    def test_paper_reset_account_route_reaches_service(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=True, live_connected=False), "results")
+        routes.service = FakeOptionsAutoService()
+        handler = FakeHandler()
+
+        result = routes.handle_post(handler, "/api/options-auto/paper/reset-account", {"paper_starting_balance": 18000})
+
+        self.assertTrue(result["reset"])
+        self.assertEqual(routes.service.reset_payload["paper_starting_balance"], 18000)
+        self.assertTrue(result["account_status"]["paper"]["connected"])
 
     def test_fii_dii_upload_route_updates_service_status(self):
         routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=False), "results")
@@ -149,13 +187,55 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
 
     def test_options_auto_ui_summary_uses_lightweight_service_snapshot(self):
         routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
-        routes.service = SummaryOnlyOptionsAutoService()
+        routes.service = SummaryOnlyOptionsAutoService(live_scan={"running": True, "mode": "REAL"})
 
         result = routes.handle_get(FakeHandler(), "/api/options-auto/ui-summary", None)
 
         self.assertTrue(result["can_trade"])
+        self.assertTrue(result["session_started"])
+        self.assertEqual(result["session_state"], "RUNNING")
         self.assertIn("latency", result)
         self.assertEqual(result["contract_lock"]["lock"]["ce"]["tradingsymbol"], "NIFTY26JUN23500CE")
+
+    def test_options_auto_ui_summary_connected_but_stopped_is_not_started(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
+        routes.service = SummaryOnlyOptionsAutoService(
+            mode="REAL",
+            session={"active_trades": [{"tradingsymbol": "NIFTY26JUN23500CE"}], "last_decision": {}},
+        )
+
+        result = routes.handle_get(FakeHandler(), "/api/options-auto/ui-summary", None)
+
+        self.assertFalse(result["can_trade"])
+        self.assertFalse(result["session_started"])
+        self.assertEqual(result["session_state"], "SESSION_NOT_STARTED")
+        self.assertIn("Session not started", result["blockers"])
+        self.assertEqual(result["position"], "FLAT")
+        self.assertEqual(result["active_instrument"], "")
+
+    def test_options_auto_ui_summary_preserves_paper_connection_status(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=True, live_connected=False), "results")
+        routes.service = SummaryOnlyOptionsAutoService(mode="PAPER")
+
+        result = routes.handle_get(FakeHandler(), "/api/options-auto/ui-summary", None)
+
+        self.assertEqual(result["settings"]["mode"], "PAPER")
+        self.assertTrue(result["account_status"]["paper"]["connected"])
+        self.assertFalse(result["account_status"]["real"]["connected"])
+        self.assertEqual(result["kite"], "CONNECTED")
+        self.assertNotIn("Paper data Zerodha not connected", result["blockers"])
+
+    def test_options_auto_ui_summary_preserves_real_connection_status(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
+        routes.service = SummaryOnlyOptionsAutoService(mode="REAL")
+
+        result = routes.handle_get(FakeHandler(), "/api/options-auto/ui-summary", None)
+
+        self.assertEqual(result["settings"]["mode"], "REAL")
+        self.assertTrue(result["account_status"]["real"]["connected"])
+        self.assertFalse(result["account_status"]["paper"]["connected"])
+        self.assertEqual(result["kite"], "CONNECTED")
+        self.assertNotIn("Real money locked", result["blockers"])
 
 
 if __name__ == "__main__":

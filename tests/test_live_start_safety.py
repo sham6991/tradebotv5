@@ -92,6 +92,13 @@ class LiveStartSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "recovery check"):
             app.require_real_live_start_safety()
 
+    def test_live_start_in_progress_blocks_repeated_start(self):
+        app = WebTradeBotApp()
+        app.live_start_mode = "LIVE"
+
+        with self.assertRaisesRegex(ValueError, "LIVE live start is already in progress"):
+            app.assert_live_start_allowed_locked("LIVE")
+
     def test_paper_network_health_does_not_run_order_book_static_ip_check(self):
         client = FakeHealthClient(fail_orders=True)
         app = WebTradeBotApp()

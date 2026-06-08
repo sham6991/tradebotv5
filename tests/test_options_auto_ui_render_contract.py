@@ -278,28 +278,25 @@ class OptionsAutoUiRenderContractTests(unittest.TestCase):
               ],
             }};
             state.status = {{
+              settings: {{ mode: "PAPER" }},
               paper_lifecycle: paperLifecycle,
-              account_status: {{ paper: {{ connected: false }}, real: {{ connected: true }} }},
-              real_order_lifecycle: realLifecycle,
+              account_status: {{ paper: {{ connected: true }}, real: {{ connected: false }} }},
+              live_scan: {{ running: true, mode: "PAPER" }},
               session: {{ active_trades: [] }},
             }};
             state.lastResult = {{
+              settings: state.status.settings,
               paper_lifecycle: paperLifecycle,
               account_status: state.status.account_status,
-              real_order_lifecycle: realLifecycle,
+              live_scan: state.status.live_scan,
               session: {{ active_trades: [] }},
             }};
             renderPaperAccount();
-            renderIndustryDiagnostics();
-            renderRealPreflight(state.lastResult);
-            renderActiveTradeCard(activeTradesFrom(state.lastResult));
+            renderActiveTradeCard(activeTradesFrom(state.lastResult, {{ currentOnly: true }}));
             renderRecentEvents(state.lastResult);
 
             const paperHtml = nodes["#oa-paper-trades"].innerHTML;
-            const lifecycleHtml = nodes["#oa-real-lifecycle-panel"].innerHTML;
-            const realPositionHtml = nodes["#oa-real-position"].innerHTML;
-            const activeHtml = nodes["#oa-active-trade-body"].innerHTML;
-            const eventsHtml = nodes["#oa-events"].innerHTML;
+            const paperEventsHtml = nodes["#oa-events"].innerHTML;
             for (const expected of [
               "Active Paper Trades",
               "Pending Entries",
@@ -314,6 +311,33 @@ class OptionsAutoUiRenderContractTests(unittest.TestCase):
             ]) {{
               if (!paperHtml.includes(expected)) throw new Error("Paper lifecycle box missed " + expected + ": " + paperHtml);
             }}
+            if (!paperEventsHtml.includes("ENTRY_PENDING")) {{
+              throw new Error("Recent events did not include paper lifecycle events: " + paperEventsHtml);
+            }}
+
+            state.status = {{
+              settings: {{ mode: "REAL" }},
+              account_status: {{ paper: {{ connected: false }}, real: {{ connected: true }} }},
+              real_order_lifecycle: realLifecycle,
+              live_scan: {{ running: true, mode: "REAL" }},
+              session: {{ active_trades: [] }},
+            }};
+            state.lastResult = {{
+              settings: state.status.settings,
+              account_status: state.status.account_status,
+              real_order_lifecycle: realLifecycle,
+              live_scan: state.status.live_scan,
+              session: {{ active_trades: [] }},
+            }};
+            renderIndustryDiagnostics();
+            renderRealPreflight(state.lastResult);
+            renderActiveTradeCard(activeTradesFrom(state.lastResult, {{ currentOnly: true }}));
+            renderRecentEvents(state.lastResult);
+
+            const lifecycleHtml = nodes["#oa-real-lifecycle-panel"].innerHTML;
+            const realPositionHtml = nodes["#oa-real-position"].innerHTML;
+            const activeHtml = nodes["#oa-active-trade-body"].innerHTML;
+            const realEventsHtml = nodes["#oa-events"].innerHTML;
             for (const expected of ["REAL-ENTRY-1", "REAL-TARGET-1", "REAL-SL-1", "COMPLETE", "OPEN", "TRIGGER PENDING", "OCO_ACTIVE"]) {{
               if (!lifecycleHtml.includes(expected)) throw new Error("Real lifecycle panel missed " + expected + ": " + lifecycleHtml);
             }}
@@ -322,8 +346,8 @@ class OptionsAutoUiRenderContractTests(unittest.TestCase):
                 throw new Error("Real position/dashboard boxes missed " + expected + ": " + realPositionHtml + " | " + activeHtml);
               }}
             }}
-            if (!eventsHtml.includes("ENTRY_PENDING") || !eventsHtml.includes("OCO_ACTIVE")) {{
-              throw new Error("Recent events did not include paper and real lifecycle events: " + eventsHtml);
+            if (!realEventsHtml.includes("OCO_ACTIVE")) {{
+              throw new Error("Recent events did not include real lifecycle events: " + realEventsHtml);
             }}
             """
         )
@@ -452,9 +476,87 @@ class OptionsAutoUiRenderContractTests(unittest.TestCase):
             if (paperHtml.includes("STALE-PAPER-ENTRY") || paperHtml.includes("Closed Paper Trades")) throw new Error("Stopped paper tab rendered stale trade: " + paperHtml);
             if (!paperHtml.includes("No active paper live session")) throw new Error("Stopped paper tab did not explain stopped state: " + paperHtml);
             if (!planHtml.includes("No current paper live trade plan")) throw new Error("Stopped paper plan rendered stale plan: " + planHtml);
-            if (!accountHtml.includes("STOPPED")) throw new Error("Paper account did not show stopped live session: " + accountHtml);
+            if (!accountHtml.includes("SESSION NOT STARTED")) throw new Error("Paper account did not show stopped live session: " + accountHtml);
             if (!realHtml.includes("No active real position")) throw new Error("Real position should be empty when lifecycle is idle: " + realHtml);
             if (nodes["#oa-protection"].textContent !== "Inactive") throw new Error("Protection badge should be inactive without position: " + nodes["#oa-protection"].textContent);
+            """
+        )
+
+        result = self._run_node_script(node, script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_stopped_or_disconnected_real_session_does_not_render_stale_real_orders(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not available")
+
+        source = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        script = textwrap.dedent(
+            f"""
+            const nodes = {{}};
+            function makeNode(tagName = "DIV") {{
+              return {{
+                tagName,
+                innerHTML: "",
+                textContent: "",
+                disabled: false,
+                dataset: {{}},
+                value: "",
+                checked: false,
+                className: "",
+                classList: {{ add() {{}}, remove() {{}}, toggle() {{}} }},
+                addEventListener() {{}},
+              }};
+            }}
+            [
+              "#oa-live-feed-badge",
+              "#oa-live-feed-panel",
+              "#oa-real-lifecycle-badge",
+              "#oa-real-lifecycle-panel",
+              "#oa-blackbox-badge",
+              "#oa-blackbox-panel",
+            ].forEach(id => nodes[id] = makeNode());
+            globalThis.document = {{
+              visibilityState: "visible",
+              querySelector(selector) {{ return nodes[selector] || null; }},
+              querySelectorAll() {{ return []; }},
+              addEventListener() {{}},
+            }};
+            globalThis.window = {{
+              setInterval() {{}},
+              crypto: {{ randomUUID() {{ return "test-id"; }} }},
+            }};
+            {source}
+            const staleLifecycle = {{
+              state: "OCO_ACTIVE",
+              protected_state: "PROTECTIVE_EXIT_ACTIVE",
+              entry_order: {{ order_id: "REAL-OLD-ENTRY", status: "COMPLETE", quantity: 65, average_price: 120.5 }},
+              target_order: {{ order_id: "REAL-OLD-TARGET", status: "OPEN", price: 150 }},
+              stoploss_order: {{ order_id: "REAL-OLD-SL", status: "TRIGGER PENDING", trigger_price: 105 }},
+              fill: {{ filled_quantity: 65, average_price: 120.5 }},
+              history: [{{ event: "OCO_ACTIVE", order_id: "REAL-OLD-TARGET" }}],
+            }};
+
+            state.status = {{
+              settings: {{ mode: "REAL" }},
+              account_status: {{ paper: {{ connected: false }}, real: {{ connected: false }} }},
+              live_scan: {{ running: false, mode: "REAL" }},
+              real_order_lifecycle: staleLifecycle,
+            }};
+            state.lastResult = {{ real_order_lifecycle: staleLifecycle, account_status: state.status.account_status, live_scan: state.status.live_scan }};
+            renderIndustryDiagnostics();
+            let html = nodes["#oa-real-lifecycle-panel"].innerHTML;
+            if (!nodes["#oa-real-lifecycle-badge"].textContent.includes("DISCONNECTED")) throw new Error("Real lifecycle badge should show disconnected: " + nodes["#oa-real-lifecycle-badge"].textContent);
+            if (html.includes("REAL-OLD-ENTRY") || html.includes("REAL-OLD-TARGET") || html.includes("REAL-OLD-SL")) throw new Error("Disconnected real lifecycle rendered stale order ids: " + html);
+
+            state.status.account_status.real.connected = true;
+            state.lastResult.account_status = state.status.account_status;
+            renderIndustryDiagnostics();
+            html = nodes["#oa-real-lifecycle-panel"].innerHTML;
+            if (!nodes["#oa-real-lifecycle-badge"].textContent.includes("SESSION NOT STARTED")) throw new Error("Real lifecycle badge should show session not started: " + nodes["#oa-real-lifecycle-badge"].textContent);
+            if (html.includes("REAL-OLD-ENTRY") || html.includes("REAL-OLD-TARGET") || html.includes("REAL-OLD-SL")) throw new Error("Stopped real lifecycle rendered stale order ids: " + html);
+            if (!html.includes("No current real engine session")) throw new Error("Stopped real lifecycle did not explain current state: " + html);
             """
         )
 

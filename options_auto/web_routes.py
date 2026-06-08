@@ -57,6 +57,8 @@ class OptionsAutoWebRoutes:
             return handler.send_json(self._with_account_status(self.service.start_paper(self._with_profile(payload))))
         if path == "/api/options-auto/paper/stop":
             return handler.send_json(self._with_account_status(self.service.stop_live_scan({**dict(payload or {}), "mode": "PAPER"})))
+        if path == "/api/options-auto/paper/reset-account":
+            return handler.send_json(self._with_account_status(self.service.reset_paper_account(payload)))
         if path == "/api/options-auto/paper/execute-plan":
             blockers = self._mode_blockers("PAPER")
             if blockers:
@@ -80,6 +82,11 @@ class OptionsAutoWebRoutes:
             return handler.send_json(self._with_account_status(self.service.real_dry_run(self._with_profile(payload))))
         if path == "/api/options-auto/real/stop":
             return handler.send_json(self._with_account_status(self.service.stop_live_scan({**dict(payload or {}), "mode": "REAL"})))
+        if path == "/api/options-auto/real/start-engine":
+            blockers = self._mode_blockers("LIVE", require_connection=True)
+            if blockers:
+                raise PermissionError(blockers[0])
+            return handler.send_json(self._with_account_status(self.service.start_real_engine(self._with_profile(payload))))
         if path == "/api/options-auto/real/preflight":
             blockers = self._mode_blockers("LIVE")
             if blockers:
@@ -163,8 +170,13 @@ class OptionsAutoWebRoutes:
         live_scan = status.get("live_scan") or {}
         lock = ((status.get("contract_lock") or {}).get("lock") or {})
         mode = str(settings.get("mode") or "PAPER").upper()
+        trade_mode = "REAL" if mode == "REAL" else "PAPER"
         real_connected = bool((account.get("real") or {}).get("connected"))
         paper_connected = bool((account.get("paper") or {}).get("connected"))
+        selected_connected = real_connected if trade_mode == "REAL" else paper_connected
+        live_scan_mode = str(live_scan.get("mode") or "").upper()
+        session_started = bool(live_scan.get("running")) and live_scan_mode == trade_mode and selected_connected
+        session_state = "RUNNING" if session_started else "DISCONNECTED" if not selected_connected else "SESSION_NOT_STARTED"
         data_health = feed.get("health") or {}
         protection_state = str(lifecycle.get("protected_state") or "FLAT").upper()
         lifecycle_state = str(lifecycle.get("state") or "IDLE").upper()
@@ -173,25 +185,30 @@ class OptionsAutoWebRoutes:
             blockers.append("Real money locked")
         if mode != "REAL" and not paper_connected:
             blockers.append("Paper data Zerodha not connected")
+        if selected_connected and not session_started:
+            blockers.append("Session not started")
         if data_health.get("stale"):
             blockers.append("Options feed is stale")
         if not (lock.get("ce") and lock.get("pe")):
             blockers.append("Contracts are not locked")
-        if "FAILED" in protection_state or "UNPROTECTED" in lifecycle_state or "RECONCILIATION" in protection_state:
+        if session_started and ("FAILED" in protection_state or "UNPROTECTED" in lifecycle_state or "RECONCILIATION" in protection_state):
             blockers.append("Position protection requires manual attention")
         return {
             "mode": mode,
             "real_money_state": "ARMED" if mode == "REAL" and real_connected else "LOCKED",
-            "kite": "CONNECTED" if (real_connected if mode == "REAL" else paper_connected) else "DISCONNECTED",
+            "kite": "CONNECTED" if selected_connected else "DISCONNECTED",
             "data": "STALE" if data_health.get("stale") else "HEALTHY" if data_health else "WAITING",
-            "engine": "RUNNING" if live_scan.get("running") else "IDLE",
-            "position": "OPEN" if (session.get("active_trades") or []) else "FLAT",
-            "protection": "FAILED" if blockers and any("protection" in item.lower() for item in blockers) else "PROTECTED" if protection_state == "PROTECTIVE_EXIT_ACTIVE" else "INACTIVE",
-            "oco": "ACTIVE" if lifecycle_state == "OCO_ACTIVE" else "INACTIVE",
+            "engine": session_state,
+            "session_started": session_started,
+            "session_state": session_state,
+            "selected_mode_connected": selected_connected,
+            "position": "OPEN" if session_started and (session.get("active_trades") or []) else "FLAT",
+            "protection": "FAILED" if blockers and any("protection" in item.lower() for item in blockers) else "PROTECTED" if session_started and protection_state == "PROTECTIVE_EXIT_ACTIVE" else "INACTIVE",
+            "oco": "ACTIVE" if session_started and lifecycle_state == "OCO_ACTIVE" else "INACTIVE",
             "kill_switch": bool((status.get("real_safety") or {}).get("safe_mode")),
             "can_trade": not blockers,
             "blockers": blockers,
-            "active_instrument": (((session.get("active_trades") or [{}])[0] or {}).get("tradingsymbol") or ""),
+            "active_instrument": (((session.get("active_trades") or [{}])[0] or {}).get("tradingsymbol") or "") if session_started else "",
             "session_pnl": status.get("paper_account", {}).get("realized_pnl") or 0,
             "last_update": status.get("session", {}).get("updated_at") or "",
             "settings": settings,

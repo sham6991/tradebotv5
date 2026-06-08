@@ -380,16 +380,16 @@ function initTabs() {
 function renderTopStatus() {
   const status = state.status || {};
   const result = state.lastResult || {};
-  const settings = status.settings || result.settings || state.defaults.settings || {};
-  const mode = text(settings.mode || status.mode || result.mode || "PAPER");
-  const account = status.account_status || result.account_status || {};
-  const isReal = mode === "REAL";
-  const connected = isReal ? Boolean(account.real?.connected) : Boolean(account.paper?.connected);
-  const activeTrades = activeTradesFrom(status);
+  const mode = selectedModeFromState(result);
+  const tradeMode = tradingModeFromState(result);
+  const session = sessionDisplayState(tradeMode, status);
+  const isReal = tradeMode === "REAL";
+  const connected = session.connected;
+  const activeTrades = activeTradesFrom(status, { currentOnly: true });
   const hasActiveTrades = Boolean(activeTrades.length);
   const protectedOk = !activeTrades.length || activeTrades.every(trade => trade.position_protected);
   const ocoOk = !activeTrades.length || activeTrades.every(trade => trade.oco_active);
-  const lifecycle = status.real_order_lifecycle || result.real_order_lifecycle || {};
+  const lifecycle = isCurrentRealProcessActive(status) ? (status.real_order_lifecycle || result.real_order_lifecycle || {}) : {};
   const protectedState = String(lifecycle.protected_state || (protectedOk ? "PROTECTED" : "INACTIVE")).toUpperCase();
   const protectionFailed = /FAILED|UNPROTECTED|RECONCILIATION/.test(protectedState) || lifecycle.state === "UNPROTECTED_POSITION";
   const protectionActive = hasActiveTrades && (/PROTECTIVE_EXIT_ACTIVE|PROTECTED/.test(protectedState) || protectedOk);
@@ -400,7 +400,7 @@ function renderTopStatus() {
   const dataLabel = resultDemo ? "Demo" : dataAllowed ? "Fresh" : dataSource === "LIVE" ? "Stale" : "Waiting";
   const governor = status.governor || result.governor || {};
   const governorLabel = governor.allowed === true ? "Allow" : governor.state ? "Blocked" : "Waiting";
-  const engine = status.session?.status || result.session?.status || "Idle";
+  const engine = session.label;
   const pnl = realizedPnl();
 
   setBadge("#oa-mode", mode, isReal ? "red" : mode === "PAPER" ? "green" : "blue");
@@ -408,7 +408,7 @@ function renderTopStatus() {
   setBadge("#oa-kite", connected ? "Connected" : "Disconnected", connected ? "green" : "red");
   setBadge("#oa-data", dataLabel, dataAllowed ? "green" : resultDemo ? "yellow" : "yellow");
   setBadge("#oa-governor", governorLabel, governor.allowed === true ? "green" : governor.state ? "yellow" : "grey");
-  setBadge("#oa-engine", engine, /RUNNING|ACTIVE|READY/.test(String(engine)) ? "green" : /LOCK|ERROR|MANUAL/.test(String(engine)) ? "red" : "grey");
+  setBadge("#oa-engine", engine, session.running ? "green" : connected ? "yellow" : "red");
   setBadge("#oa-position", hasActiveTrades ? (protectedOk ? "Protected" : "Unprotected") : "No Position", hasActiveTrades ? (protectedOk ? "green" : "red") : "grey");
   setBadge("#oa-protection", protectionFailed ? "Failed" : protectionActive ? "Protected" : "Inactive", protectionFailed ? "red" : protectionActive ? "green" : "grey");
   setBadge("#oa-oco", activeTrades.length ? (ocoOk ? "Active" : "Inactive") : "Inactive", activeTrades.length ? (ocoOk ? "green" : "red") : "grey");
@@ -434,20 +434,22 @@ function renderAll() {
 function renderCockpitSafety(result = state.status || state.lastResult) {
   result = result || {};
   const status = state.status || {};
-  const mode = String(status.settings?.mode || result.mode || settingsPayload().mode || "PAPER").toUpperCase();
-  const account = status.account_status || result.account_status || {};
+  const mode = tradingModeFromState(result);
+  const account = accountStatusFromState(result);
   const isReal = mode === "REAL";
-  const connected = isReal ? Boolean(account.real?.connected) : Boolean(account.paper?.connected);
-  const lifecycle = result.real_order_lifecycle || status.real_order_lifecycle || {};
+  const session = sessionDisplayState(mode, result);
+  const connected = session.connected;
+  const lifecycle = isCurrentRealProcessActive(result) ? (result.real_order_lifecycle || status.real_order_lifecycle || {}) : {};
   const lifecycleState = String(lifecycle.state || "IDLE").toUpperCase();
   const protectedState = String(lifecycle.protected_state || "FLAT").toUpperCase();
-  const lock = contractLockFromState();
+  const lock = contractLockFromState({ liveOnly: true });
   const feed = status.options_live_feed || {};
   const feedHealth = feed.health || {};
   const dataHealthy = !feedHealth.stale && !status.live_scan?.blocked;
   const governor = result.governor || {};
   const blockers = [];
   if (!connected) blockers.push(`${isReal ? "Real" : "Paper"} Kite not connected`);
+  if (connected && !session.running) blockers.push("Session not started");
   if (isReal && !account.real?.connected) blockers.push("Real money is locked");
   if (!dataHealthy) blockers.push("Feed is waiting or stale");
   if (!(lock.ce && lock.pe)) blockers.push("CE/PE contracts are not locked");
@@ -458,6 +460,7 @@ function renderCockpitSafety(result = state.status || state.lastResult) {
   setHtml("#oa-can-trade-body", [
     checklistRow("Kite connected", connected, connected ? "Connected" : "Connect in Main App"),
     checklistRow("Access token valid", connected, connected ? "Token available" : "Login required"),
+    checklistRow("Live session started", session.running, session.running ? "Live scanner is running" : session.message),
     checklistRow("Feed fresh", dataHealthy, dataHealthy ? "Fresh" : "Waiting/stale"),
     checklistRow("Contract locked", Boolean(lock.ce && lock.pe), lock.ce && lock.pe ? "CE and PE locked" : "Start engine to lock contracts"),
     checklistRow("Governor ready", governor.allowed !== false, (governor.blockers || [])[0] || "No blocker"),
@@ -542,8 +545,9 @@ function renderContractCard(selector, contract, label) {
 function renderRealWorkflow(canTrade, blockers = []) {
   const account = state.status.account_status || {};
   const connected = Boolean(account.real?.connected);
-  const lifecycle = state.status.real_order_lifecycle || {};
-  const lock = contractLockFromState();
+  const currentReal = isCurrentRealProcessActive(state.status);
+  const lifecycle = currentReal ? (state.status.real_order_lifecycle || {}) : {};
+  const lock = contractLockFromState({ liveOnly: true });
   const steps = [
     ["Connect real Zerodha in main app", connected],
     ["Verify access token", connected],
@@ -556,7 +560,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
     ["Run real dry run", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
     ["Arm real trading", connected && Boolean($("#oa-confirm-real")?.checked)],
     ["Start real engine", state.status.live_scan?.running && state.status.live_scan?.mode === "REAL"],
-    ["Monitor lifecycle", Boolean(lifecycle.state)],
+    ["Monitor lifecycle", currentReal && Boolean(lifecycle.state)],
     ["Stop new entries if needed", true],
     ["Emergency flatten / kill switch only if needed", !/UNPROTECTED|FAILED/.test(`${lifecycle.state} ${lifecycle.protected_state}`)],
   ];
@@ -564,7 +568,11 @@ function renderRealWorkflow(canTrade, blockers = []) {
   setHtml("#oa-real-workflow", steps.map(([label, done]) => `<li class="${done ? "is-active" : ""}">${escapeHtml(label)}${!done && blockers[0] ? `<small>${escapeHtml(blockers[0])}</small>` : ""}</li>`).join(""));
 }
 
-function activeTradesFrom(result = {}) {
+function activeTradesFrom(result = {}, options = {}) {
+  if (options.currentOnly) {
+    const mode = tradingModeFromState(result);
+    if (!liveSessionStarted(mode, result)) return [];
+  }
   const trades = firstNonEmptyList(
     result.session?.active_trades,
     result.paper_lifecycle?.active_trades,
@@ -586,6 +594,54 @@ function isLiveModeRunning(mode = "", result = {}) {
   const expected = String(mode || "").toUpperCase();
   const actual = String(scan.mode || "").toUpperCase();
   return Boolean(scan.running) && (!expected || actual === expected);
+}
+
+function selectedModeFromState(result = {}) {
+  return String(
+    state.status.settings?.mode
+    || result.settings?.mode
+    || state.status.mode
+    || result.mode
+    || state.defaults.settings?.mode
+    || "PAPER"
+  ).toUpperCase();
+}
+
+function tradingModeFromState(result = {}) {
+  return selectedModeFromState(result) === "REAL" ? "REAL" : "PAPER";
+}
+
+function accountStatusFromState(result = {}) {
+  return result.account_status || state.status.account_status || {};
+}
+
+function modeConnected(mode = "PAPER", result = {}) {
+  const account = accountStatusFromState(result);
+  return String(mode || "").toUpperCase() === "REAL"
+    ? Boolean(account.real?.connected)
+    : Boolean(account.paper?.connected);
+}
+
+function liveSessionStarted(mode = "PAPER", result = {}) {
+  const normalized = String(mode || "").toUpperCase() === "REAL" ? "REAL" : "PAPER";
+  return modeConnected(normalized, result) && isLiveModeRunning(normalized, result);
+}
+
+function sessionDisplayState(mode = "PAPER", result = {}) {
+  const normalized = String(mode || "").toUpperCase() === "REAL" ? "REAL" : "PAPER";
+  const connected = modeConnected(normalized, result);
+  const running = liveSessionStarted(normalized, result);
+  const modeLabel = normalized === "REAL" ? "Real Money" : "Paper";
+  return {
+    mode: normalized,
+    modeLabel,
+    connected,
+    running,
+    label: !connected ? "DISCONNECTED" : running ? "RUNNING" : "SESSION NOT STARTED",
+    message: !connected
+      ? `${modeLabel} is not connected. Connect it in Main App.`
+      : `${modeLabel} connected. Start ${modeLabel} Engine to begin live scanning.`,
+  };
 }
 
 function isPaperLifecycleActive(lifecycle = {}) {
@@ -610,11 +666,11 @@ function isRealLifecycleActive(lifecycle = {}) {
 }
 
 function isCurrentPaperProcessActive(result = state.lastResult) {
-  return isLiveModeRunning("PAPER", result) || isPaperLifecycleActive(paperLifecycleFromState(result));
+  return liveSessionStarted("PAPER", result);
 }
 
 function isCurrentRealProcessActive(result = state.lastResult) {
-  return isLiveModeRunning("REAL", result) || isRealLifecycleActive(result.real_order_lifecycle || state.status.real_order_lifecycle || {});
+  return liveSessionStarted("REAL", result);
 }
 
 function isAnyCurrentLiveProcessActive(result = state.lastResult) {
@@ -726,6 +782,11 @@ function realizedPnl() {
 // dashboard rendering
 function renderDashboard() {
   const result = state.lastResult || {};
+  const session = sessionDisplayState(tradingModeFromState(result), result);
+  if (!session.running) {
+    renderDashboardIdle(session, result);
+    return;
+  }
   const cue = result.market_cue || {};
   const regime = result.regime || {};
   const selection = result.selection || {};
@@ -792,10 +853,53 @@ function renderDashboard() {
   ].join(""));
 
   renderList("#oa-blockers-list", readableBlockers(result), "No blockers. Waiting for a valid setup.");
-  renderActiveTradeCard(activeTradesFrom(result));
+  renderActiveTradeCard(activeTradesFrom(result, { currentOnly: true }));
   renderDataSourcePanel(result);
   renderRecentEvents(result);
   renderDashboardAlerts(result);
+}
+
+function renderDashboardIdle(session, result = {}) {
+  const message = session.message || "Start the matching engine to begin live scanning.";
+  setBadge("#oa-dashboard-cue-badge", session.label, session.connected ? "yellow" : "red");
+  setText("#oa-cue", "-");
+  setText("#oa-cue-score", "-");
+  setText("#oa-cue-confidence", "-");
+  setText("#oa-cue-updated", "-");
+  setText("#oa-cue-reason", message);
+  renderFiiDiiStatus(state.fiiDiiStatus || state.status.fii_dii || {});
+
+  setBadge("#oa-regime-side", "WAIT", "grey");
+  setText("#oa-regime", "-");
+  setText("#oa-regime-confidence", "-");
+  setText("#oa-regime-aggression", "-");
+  setText("#oa-regime-block", message);
+
+  setBadge("#oa-health-badge", session.label, session.connected ? "yellow" : "red");
+  setText("#oa-session-health", "-");
+  setText("#oa-bot-health", "-");
+  setText("#oa-readiness-score", "-");
+  setBadge("#oa-new-entries", "NO", session.connected ? "yellow" : "red");
+  setText("#oa-cooldown", "Cooldown: 0 sec");
+
+  setBadge("#oa-decision-badge", session.label, session.connected ? "yellow" : "red");
+  setHtml("#oa-plan-body", [
+    row("Session", session.label),
+    row("Mode", session.modeLabel),
+    row("Decision", "WAIT"),
+    row("Next Step", message),
+  ].join(""));
+  renderList("#oa-blockers-list", [message], "No current live session.");
+  renderActiveTradeCard([]);
+  renderDataSourcePanel({
+    data_source: state.status.data_source || result.data_source || "UNKNOWN",
+    live_scan: state.status.live_scan || {},
+    options_data_health: state.status.options_live_feed?.health || {},
+    allowed: false,
+    next_action: message,
+  });
+  renderList("#oa-events", [], "No current live session events.");
+  setHtml("#oa-dashboard-alerts", alertHtml(message, session.connected ? "warning" : "danger"));
 }
 
 function renderFiiDiiStatus(status = {}) {
@@ -887,37 +991,63 @@ function renderIndustryDiagnostics() {
     metric("Reconcile Poll", apiBudget.real_broker_reconcile_poll_seconds ? `${apiBudget.real_broker_reconcile_poll_seconds}s` : "-"),
   ].join(""));
 
-  const lifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
-  const lifecycleState = lifecycle.state || "IDLE";
-  const protectedState = lifecycle.protected_state || "-";
-  const entryOrder = lifecycle.entry_order || {};
-  const targetOrder = lifecycle.target_order || {};
-  const stoplossOrder = lifecycle.stoploss_order || {};
-  const fill = lifecycle.fill || {};
-  const lastEvent = latestLifecycleEvent(lifecycle);
-  const lifecycleBad = /UNPROTECTED|SAFE|MANUAL|REJECTED|CANCELLED|TIMEOUT/.test(String(lifecycleState)) || /FAILED|RECONCILIATION_REQUIRED/.test(String(protectedState));
-  const lifecycleGood = /OCO_ACTIVE|TARGET_FILLED|SL_FILLED|EXIT_RECONCILED/.test(String(lifecycleState)) && !lifecycleBad;
-  setBadge("#oa-real-lifecycle-badge", lifecycleState, lifecycleBad ? "red" : lifecycleGood ? "green" : lifecycleState === "IDLE" ? "grey" : "yellow");
-  setHtml("#oa-real-lifecycle-panel", [
-    metric("State", lifecycleState),
-    metric("Protected State", protectedState),
-    metric("Safe Mode", lifecycle.safe_mode ? "YES" : "NO"),
-    metric("Emergency Flatten", lifecycle.emergency_flatten_required ? "YES" : "NO"),
-    metric("Entry Order", entryOrder.order_id || entryOrder.id || "-"),
-    metric("Entry Status", entryOrder.status || "-"),
-    metric("Entry Qty", entryOrder.quantity || fill.filled_quantity || "-"),
-    metric("Entry Price", entryOrder.price || entryOrder.average_price || "-"),
-    metric("Fill Qty", fill.filled_quantity || "-"),
-    metric("Avg Fill", fill.average_price || "-"),
-    metric("Target Order", targetOrder.order_id || targetOrder.id || "-"),
-    metric("Target Status", targetOrder.status || "-"),
-    metric("Target Price", targetOrder.price || targetOrder.trigger_price || "-"),
-    metric("Stoploss Order", stoplossOrder.order_id || stoplossOrder.id || "-"),
-    metric("Stoploss Status", stoplossOrder.status || "-"),
-    metric("Stoploss Price", stoplossOrder.trigger_price || stoplossOrder.price || "-"),
-    metric("Last Event", lastEvent ? eventText("Real", lastEvent).replace(/^Real - /, "") : "-"),
-    metric("Blocker", (lifecycle.blockers || [])[0] || "-"),
-  ].join(""));
+  const currentReal = isCurrentRealProcessActive(result);
+  const realSession = sessionDisplayState("REAL", result);
+  if (!currentReal) {
+    setBadge("#oa-real-lifecycle-badge", realSession.label, realSession.connected ? "yellow" : "red");
+    setHtml("#oa-real-lifecycle-panel", [
+      metric("State", realSession.label),
+      metric("Protected State", "-"),
+      metric("Safe Mode", "-"),
+      metric("Emergency Flatten", "-"),
+      metric("Entry Order", "-"),
+      metric("Entry Status", "-"),
+      metric("Entry Qty", "-"),
+      metric("Entry Price", "-"),
+      metric("Fill Qty", "-"),
+      metric("Avg Fill", "-"),
+      metric("Target Order", "-"),
+      metric("Target Status", "-"),
+      metric("Target Price", "-"),
+      metric("Stoploss Order", "-"),
+      metric("Stoploss Status", "-"),
+      metric("Stoploss Price", "-"),
+      metric("Last Event", "No current real engine session"),
+      metric("Blocker", realSession.message),
+    ].join(""));
+  } else {
+    const lifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
+    const lifecycleState = lifecycle.state || "IDLE";
+    const protectedState = lifecycle.protected_state || "-";
+    const entryOrder = lifecycle.entry_order || {};
+    const targetOrder = lifecycle.target_order || {};
+    const stoplossOrder = lifecycle.stoploss_order || {};
+    const fill = lifecycle.fill || {};
+    const lastEvent = latestLifecycleEvent(lifecycle);
+    const lifecycleBad = /UNPROTECTED|SAFE|MANUAL|REJECTED|CANCELLED|TIMEOUT/.test(String(lifecycleState)) || /FAILED|RECONCILIATION_REQUIRED/.test(String(protectedState));
+    const lifecycleGood = /OCO_ACTIVE|TARGET_FILLED|SL_FILLED|EXIT_RECONCILED/.test(String(lifecycleState)) && !lifecycleBad;
+    setBadge("#oa-real-lifecycle-badge", lifecycleState, lifecycleBad ? "red" : lifecycleGood ? "green" : lifecycleState === "IDLE" ? "grey" : "yellow");
+    setHtml("#oa-real-lifecycle-panel", [
+      metric("State", lifecycleState),
+      metric("Protected State", protectedState),
+      metric("Safe Mode", lifecycle.safe_mode ? "YES" : "NO"),
+      metric("Emergency Flatten", lifecycle.emergency_flatten_required ? "YES" : "NO"),
+      metric("Entry Order", entryOrder.order_id || entryOrder.id || "-"),
+      metric("Entry Status", entryOrder.status || "-"),
+      metric("Entry Qty", entryOrder.quantity || fill.filled_quantity || "-"),
+      metric("Entry Price", entryOrder.price || entryOrder.average_price || "-"),
+      metric("Fill Qty", fill.filled_quantity || "-"),
+      metric("Avg Fill", fill.average_price || "-"),
+      metric("Target Order", targetOrder.order_id || targetOrder.id || "-"),
+      metric("Target Status", targetOrder.status || "-"),
+      metric("Target Price", targetOrder.price || targetOrder.trigger_price || "-"),
+      metric("Stoploss Order", stoplossOrder.order_id || stoplossOrder.id || "-"),
+      metric("Stoploss Status", stoplossOrder.status || "-"),
+      metric("Stoploss Price", stoplossOrder.trigger_price || stoplossOrder.price || "-"),
+      metric("Last Event", lastEvent ? eventText("Real", lastEvent).replace(/^Real - /, "") : "-"),
+      metric("Blocker", (lifecycle.blockers || [])[0] || "-"),
+    ].join(""));
+  }
 
   const blackbox = result.blackbox || state.status.blackbox || {};
   const report = blackbox.latency_report || {};
@@ -1076,7 +1206,8 @@ function renderActiveTradeCard(trades) {
 function renderRecentEvents(result) {
   const session = result.session || state.status.session || {};
   const paperLifecycle = paperLifecycleFromState(result);
-  const realLifecycle = result.real_order_lifecycle || state.status.real_order_lifecycle || {};
+  const realLifecycle = isCurrentRealProcessActive(result) ? (result.real_order_lifecycle || state.status.real_order_lifecycle || {}) : {};
+  const currentPaper = isCurrentPaperProcessActive(result);
   const events = [];
   if (result.selection?.selected?.tradingsymbol) {
     events.push(`Candidate found: ${result.selection.selected.tradingsymbol}, score ${text(result.selection.score, "-")}.`);
@@ -1084,7 +1215,7 @@ function renderRecentEvents(result) {
   (result.blockers || []).slice(0, 4).forEach(item => events.push(`Trade blocked: ${item}`));
   (session.safety_events || []).slice(-6).forEach(item => events.push(`${item.reason || "Safety event"}.`));
   (session.rejected_log || []).slice(-4).forEach(item => events.push(`Rejected setup: ${item.reason || "-"}`));
-  (paperLifecycle.events || []).slice(-6).forEach(item => events.push(eventText("Paper", item)));
+  if (currentPaper) (paperLifecycle.events || []).slice(-6).forEach(item => events.push(eventText("Paper", item)));
   (realLifecycle.history || realLifecycle.events || []).slice(-6).forEach(item => events.push(eventText("Real", item)));
   renderList("#oa-events", events.slice(-10).reverse(), "No recent events yet.");
 }
@@ -1100,9 +1231,9 @@ function eventText(prefix, item = {}) {
 
 function renderDashboardAlerts(result) {
   const alerts = [];
-  const mode = result.mode || state.status.settings?.mode || state.defaults.settings?.mode || "PAPER";
-  const trades = activeTradesFrom(result);
-  const connected = mode === "REAL" ? result.account_status?.real?.connected : result.account_status?.paper?.connected;
+  const mode = tradingModeFromState(result);
+  const trades = activeTradesFrom(result, { currentOnly: true });
+  const connected = modeConnected(mode, result);
   if (mode === "REAL") alerts.push(alertHtml("REAL MONEY MODE is selected. Orders require real login, preflight, final validation, and OCO safety.", "danger"));
   if (connected === false) alerts.push(alertHtml("Kite is disconnected for the selected mode.", "warning"));
   if (state.dataSource === "DEBUG" || state.dataSource === "DEMO") alerts.push(alertHtml("DEMO/SAMPLE DATA - not live market data.", "warning"));
@@ -1396,7 +1527,7 @@ async function stopPaperEngine() {
   try {
     const result = await api("/api/options-auto/paper/stop", { source: "UI", mode: "PAPER" });
     state.status = result;
-    state.lastResult = result.session?.last_decision ? hydrateStatusDecision(result) : result;
+    replaceLastResultFromStatus(result);
     renderAll();
     setTabAlert("paper", "Paper live scanner stopped. No real orders exist in paper mode.", "info");
   } catch (error) {
@@ -1414,7 +1545,7 @@ async function stopEngine() {
     const mode = actionMode();
     const result = await api("/api/options-auto/stop", { source: "UI", mode });
     state.status = result;
-    state.lastResult = result.session?.last_decision ? hydrateStatusDecision(result) : result;
+    replaceLastResultFromStatus(result);
     renderAll();
     setActiveAlert(`${mode} engine/feed stopped. Existing positions were not exited or modified.`, "info");
   } catch (error) {
@@ -1427,7 +1558,7 @@ async function killSwitch() {
     const mode = actionMode();
     const result = await api("/api/options-auto/kill-switch", { source: "UI", mode });
     state.status = result;
-    state.lastResult = result.session?.last_decision ? hydrateStatusDecision(result) : result;
+    replaceLastResultFromStatus(result);
     renderAll();
     setActiveAlert(`${mode} kill switch active. Engine/feed stopped and new entries are blocked.`, "danger");
   } catch (error) {
@@ -1492,22 +1623,36 @@ async function processPaperMarket() {
   }
 }
 
-function resetPaperBalance() {
-  const defaults = state.defaults.settings || {};
-  if ($("#oa-paper-balance")) $("#oa-paper-balance").value = defaults.paper_starting_balance || 20000;
-  setTabAlert("paper", "Paper balance input reset. Save settings or start paper engine to apply.", "info");
+async function resetPaperBalance() {
+  try {
+    syncSettingsToggles();
+    const defaults = state.defaults.settings || {};
+    const balance = numberValue($("#oa-paper-balance")?.value, defaults.paper_starting_balance || 20000);
+    const result = await api("/api/options-auto/paper/reset-account", {
+      ...settingsPayload(),
+      mode: "PAPER",
+      paper_starting_balance: balance,
+    });
+    state.status = result;
+    state.lastResult = {};
+    renderAll();
+    setTabAlert("paper", "Paper account balance reset. Future paper sessions will continue from this ledger.", "success");
+  } catch (error) {
+    setTabAlert("paper", error.message, "danger");
+  }
 }
 
 function renderPaperAccount() {
   const lifecycle = paperLifecycleFromState(state.lastResult);
   const account = paperAccountFromState(state.lastResult);
   const currentPaper = isCurrentPaperProcessActive(state.lastResult);
+  const paperSession = sessionDisplayState("PAPER", state.lastResult);
   const activeTrades = currentPaper ? activeTradesFrom(state.lastResult).filter(trade => trade.mode !== "REAL") : [];
   const closedTrades = currentPaper ? (lifecycle.closed_trades || []) : [];
   const orders = currentPaper ? paperOrdersFromState(state.lastResult) : [];
   const scan = liveScanFromState(state.lastResult);
   setHtml("#oa-paper-account", [
-    metric("Live Session", currentPaper ? (scan.running ? "RUNNING" : "POSITION/PENDING") : "STOPPED"),
+    metric("Live Session", currentPaper ? (scan.running ? "RUNNING" : "POSITION/PENDING") : paperSession.label),
     metric("Starting Balance", money(account.opening_balance || state.defaults.settings?.paper_starting_balance || 20000)),
     metric("Available Balance", money(account.available_balance || 0)),
     metric("Realized P&L", money(account.realized_pnl || 0)),
@@ -1523,6 +1668,11 @@ function renderPaperAccount() {
 }
 
 function renderApprovalCard() {
+  if (!isCurrentPaperProcessActive(state.lastResult)) {
+    setBadge("#oa-approval-badge", "Session Not Started", "grey");
+    setHtml("#oa-approval-card", `<p class="oa-empty-state">No active paper live session. Start Paper Engine before creating or approving a paper entry.</p>`);
+    return;
+  }
   const approval = state.lastResult.approval || state.lastResult.paper_lifecycle?.pending_approval || state.status.paper_lifecycle?.pending_approval;
   if (!approval) {
     setBadge("#oa-approval-badge", "No Pending Approval", "grey");
@@ -1626,7 +1776,7 @@ function renderClosedPaperTrade(trade = {}) {
 // real rendering/actions
 function initRealTab() {
   on("#oa-real-preflight", "click", runRealPreflight);
-  on("#oa-real-place", "click", placeRealOrder);
+  on("#oa-real-place", "click", startRealEngine);
   on("#oa-real-reconcile", "click", runRealReconcile);
   on("#oa-real-dry", "click", runRealDryRun);
   on("#oa-real-stop", "click", stopNewEntries);
@@ -1649,12 +1799,23 @@ async function runRealPreflight() {
   }
 }
 
-async function placeRealOrder() {
+function realEnginePayload() {
+  const payload = evaluationPayload("REAL");
+  payload.settings = {
+    ...payload.settings,
+    dry_run_real_only: false,
+    real_orders_enabled: true,
+    real_auto_entry_enabled: true,
+  };
+  return payload;
+}
+
+async function startRealEngine() {
   try {
-    const result = await api("/api/options-auto/real/place-order", { ...evaluationPayload("REAL"), market_open: true, instruments_valid: true });
+    const result = await api("/api/options-auto/real/start-engine", { ...realEnginePayload(), market_open: true, instruments_valid: true });
     state.lastResult = result;
     renderAll();
-    setTabAlert("real", result.real_order_sent ? `Real entry order sent: ${text(result.entry_order?.order_id, "-")}` : result.message || "Real order blocked.", result.real_order_sent ? "success" : "warning");
+    setTabAlert("real", result.real_engine_started ? "Real engine started. It will scan and place a guarded BUY when setup appears." : result.message || "Real engine blocked.", result.real_engine_started ? "success" : "warning");
   } catch (error) {
     setTabAlert("real", error.message, "danger");
   }
@@ -1730,13 +1891,13 @@ function renderRealPreflight(result = state.lastResult) {
     setText("#oa-real-mode-title", "Real trading ready after preflight.");
     setText("#oa-real-mode-copy", "Orders will be placed only after final validation, execution safety, OCO, and reconciliation checks.");
   } else {
-    setText("#oa-real-mode-title", "Real money connected. Run preflight before starting real engine.");
-    setText("#oa-real-mode-copy", "Real orders are guarded. Review blockers before placing any order.");
+    setText("#oa-real-mode-title", "Real money connected. Run preflight, then start Real Engine.");
+    setText("#oa-real-mode-copy", "Until Real Engine is started, no current real order lifecycle is shown.");
   }
   const evidence = result.evidence || {};
   const checks = evidence.checks || {};
   const reconciliation = result.reconciliation || evidence.reconciliation || {};
-  const hasResult = Boolean(result.state || evidence.timestamp || result.reconciliation);
+  const hasResult = realConnected && Boolean(result.state || evidence.timestamp || result.reconciliation);
   const rows = hasResult ? [
     ["Real Money Zerodha connected", checks.client_connected],
     ["Real mode explicitly confirmed", checks.real_mode_confirmed],
@@ -1865,7 +2026,7 @@ async function saveSettings() {
     state.status = result;
     state.lastResult = result;
     renderAll();
-    setTabAlert("settings", "Settings saved for this Options Auto session.", "success");
+    setTabAlert("settings", "Settings saved for future Options Auto sessions.", "success");
   } catch (error) {
     setTabAlert("settings", error.message, "danger");
   }
@@ -2105,15 +2266,13 @@ async function refresh(options = {}) {
   const useFullStatus = Boolean(options.full || state.activeTab === "debug");
   const endpoint = useFullStatus ? "/api/options-auto/status" : "/api/options-auto/ui-summary";
   try {
-    const payload = await api(endpoint, undefined, { timeoutMs: useFullStatus ? 6000 : 3000 });
+    const payload = normalizeRefreshPayload(await api(endpoint, undefined, { timeoutMs: useFullStatus ? 6000 : 3000 }));
     state.lastRefreshOkAt = Date.now();
     staleWarning?.classList.remove("is-visible");
     state.status = payload;
     const backtestSummary = backtestSummaryFromStatus(payload);
     if (backtestSummary) state.lastBacktest = backtestSummary;
-    if (payload.session?.last_decision && Object.keys(payload.session.last_decision).length) {
-      state.lastResult = hydrateStatusDecision(payload);
-    }
+    replaceLastResultFromStatus(payload);
     renderAll();
   } catch (error) {
     if (staleWarning) {
@@ -2128,6 +2287,24 @@ async function refresh(options = {}) {
       staleWarning.classList.add("is-visible");
     }
   }
+}
+
+function normalizeRefreshPayload(payload = {}) {
+  const previous = state.status || {};
+  const last = state.lastResult || {};
+  const normalized = { ...(payload || {}) };
+  const previousAccount = previous.account_status || last.account_status || {};
+  if (!normalized.account_status || !Object.keys(normalized.account_status).length) {
+    normalized.account_status = previousAccount;
+  }
+  const previousSettings = previous.settings || last.settings || {};
+  if (!normalized.settings || !Object.keys(normalized.settings).length) {
+    normalized.settings = { ...previousSettings };
+  }
+  if (!normalized.settings.mode) {
+    normalized.settings = { ...normalized.settings, mode: normalized.mode || previous.mode || last.mode || "PAPER" };
+  }
+  return normalized;
 }
 
 function hydrateStatusDecision(payload) {
@@ -2153,6 +2330,16 @@ function hydrateStatusDecision(payload) {
     api_budget: payload.api_budget || {},
     blackbox: payload.blackbox || {},
   };
+}
+
+function replaceLastResultFromStatus(payload = {}) {
+  const decision = payload.session?.last_decision || {};
+  if (!Object.keys(decision).length) {
+    state.lastResult = {};
+    return;
+  }
+  const mode = String(payload.live_scan?.mode || payload.settings?.mode || payload.mode || "PAPER").toUpperCase() === "REAL" ? "REAL" : "PAPER";
+  state.lastResult = liveSessionStarted(mode, payload) ? hydrateStatusDecision(payload) : {};
 }
 
 async function loadDefaults() {

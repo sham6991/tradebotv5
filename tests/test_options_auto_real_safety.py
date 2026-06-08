@@ -39,6 +39,13 @@ class FakeRealClient:
         self.stoploss_orders.append(dict(kwargs))
         return f"SL-{len(self.stoploss_orders)}"
 
+    def cancel_order(self, order_id):
+        for order in self._orders:
+            if str(order.get("order_id")) == str(order_id):
+                order["status"] = "CANCELLED"
+                return {"order_id": order_id, "status": "CANCELLED"}
+        return {"order_id": order_id, "status": "NOT_FOUND"}
+
 
 class FakeFinalValidationEngine:
     def __init__(self):
@@ -61,6 +68,20 @@ class FakeEmergencyAdapter:
     def place_emergency_sell_limit(self, **kwargs):
         self.orders.append(dict(kwargs))
         return {"ok": True, "value": f"EMG{len(self.orders)}"}
+
+
+class FakeKillSwitchRealClient(FakeRealClient):
+    def place_limit_order(self, **kwargs):
+        self.limit_orders.append(dict(kwargs))
+        order_id = f"REAL-{len(self.limit_orders)}"
+        order = {**kwargs, "order_id": order_id, "status": "COMPLETE"}
+        self._orders.append(order)
+        if str(kwargs.get("transaction_type") or "").upper() == "SELL":
+            for position in self._positions:
+                if str(position.get("tradingsymbol")) == str(kwargs.get("tradingsymbol")):
+                    position["quantity"] = 0
+                    position["net_quantity"] = 0
+        return order_id
 
 
 def auto_order(order_id, tradingsymbol="NIFTY26JUN22500CE", transaction_type="BUY", status="OPEN", order_type="LIMIT", quantity=50):
@@ -113,7 +134,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertTrue(allowed["allowed"])
         self.assertTrue(allowed["dry_run_ready"])
 
-    def test_real_preflight_defaults_to_guarded_live_when_real_client_exists(self):
+    def test_real_preflight_does_not_enable_live_orders_from_connection_only(self):
         client = FakeRealClient()
         service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
 
@@ -127,9 +148,10 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
             "instruments_valid": True,
         })
 
-        self.assertTrue(result["allowed"])
+        self.assertFalse(result["allowed"])
         self.assertTrue(result["dry_run_ready"])
-        self.assertTrue(result["real_orders_enabled"])
+        self.assertFalse(result["real_orders_enabled"])
+        self.assertIn("dry-run override", "; ".join(result["blockers"]).lower())
 
     def test_real_preflight_respects_explicit_dry_run_override(self):
         client = FakeRealClient()
@@ -211,6 +233,29 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertEqual(adapter.orders[0]["tradingsymbol"], "NIFTY26JUN22500CE")
         self.assertEqual(adapter.orders[0]["quantity"], 50)
         self.assertEqual(adapter.orders[0]["price"], 110.4)
+
+    def test_options_auto_real_kill_switch_cancels_flattens_and_verifies_flat(self):
+        client = FakeKillSwitchRealClient(
+            orders=[{**auto_order("TARGET1", transaction_type="SELL", status="OPEN", order_type="LIMIT"), "exchange": "NFO"}],
+            positions=[{"tradingsymbol": "NIFTY26JUN22500CE", "exchange": "NFO", "product": "NRML", "quantity": 50, "net_quantity": 50, "last_price": 112.4}],
+        )
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+
+        result = service.kill_switch({
+            "mode": "REAL",
+            "settings": {"emergency_flatten_verify_timeout_seconds": 0},
+            "reason": "operator emergency",
+        })
+
+        runtime = result["real_runtime"]
+        self.assertTrue(result["killed"])
+        self.assertTrue(runtime["flat_verified"], runtime)
+        self.assertEqual(runtime["cancelled_orders"][0]["order"]["order_id"], "TARGET1")
+        self.assertEqual(client._orders[0]["status"], "CANCELLED")
+        self.assertEqual(runtime["flatten"]["orders_sent"], 1)
+        self.assertEqual(client.limit_orders[-1]["transaction_type"], "SELL")
+        self.assertEqual(runtime["open_orders_after"], [])
+        self.assertEqual(runtime["positions_after"], [])
 
     def test_stop_new_entries_blocks_otherwise_clean_preflight(self):
         controller = RealExecutionController()
@@ -308,7 +353,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         result = service.place_real_order({
             "mode": "REAL",
             "decision": decision,
-            "settings": {"mode": "REAL", "static_ip_confirmed": True},
+            "settings": {"mode": "REAL", "confirm_real_mode": True, "real_orders_enabled": True, "dry_run_real_only": False, "static_ip_confirmed": True},
             "kite_profile": {"user_id": "REAL1"},
             "quotes": {"123": {"ltp": 142.4, "bid": 142.35, "ask": 142.45, "option_atr14": 5, "premium_return_1": 1.0, "age_seconds": 0}},
             "broker_orders": [],

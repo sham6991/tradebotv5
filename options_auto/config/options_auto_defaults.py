@@ -222,6 +222,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "confirm_real_mode",
         "static_ip_confirmed",
         "allow_real_emergency_orders",
+        "allow_real_emergency_flatten",
         "modify_limit_allowed",
         "market_cue_alignment_required",
         "premium_expansion_required",

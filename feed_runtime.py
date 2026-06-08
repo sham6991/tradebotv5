@@ -85,6 +85,18 @@ class Executor:
         self.last_feed_error_category = ""
         self.last_preflight_report = None
 
+    def active_live_session(self):
+        for session in (self.live_real_session, self.live_paper_session):
+            if session and not getattr(session, "session_closed", False):
+                return session
+        return None
+
+    def assert_no_active_live_session(self, requested_mode):
+        session = self.active_live_session()
+        if session:
+            active_mode = str(getattr(session, "mode", "") or "LIVE").upper()
+            raise ValueError(f"{active_mode} live session is already running. Stop it before starting {str(requested_mode or '').upper()} live trading.")
+
     def connect_zerodha(self, api_key, api_secret=None, access_token=None):
         self.zerodha = ZerodhaClient(api_key, api_secret, access_token)
         return self.zerodha
@@ -340,6 +352,7 @@ class Executor:
             self.dropped_tick_batches += 1
 
     def start_live_paper_trading(self, nifty, options, token_map, settings, save_path, on_trade=None, on_ticks=None, on_connect=None, on_close=None, on_order_update=None, on_alert=None):
+        self.assert_no_active_live_session("PAPER")
         self.last_preflight_report = validate_live_preflight(
             nifty,
             options,
@@ -365,6 +378,7 @@ class Executor:
         return self.live_paper_session
 
     def start_live_real_trading(self, nifty, options, token_map, settings, save_path, on_trade=None, on_ticks=None, on_connect=None, on_close=None, on_order_update=None, on_alert=None):
+        self.assert_no_active_live_session("LIVE")
         self.last_preflight_report = validate_live_preflight(
             nifty,
             options,

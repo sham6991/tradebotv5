@@ -67,8 +67,10 @@ class OptionsAutoTerminalService:
         self.base_result_folder = base_result_folder
         self.kite_client_provider = kite_client_provider or (lambda _mode: None)
         self.logger = OptionsAutoLogger()
-        self.settings = default_settings()
-        self.mode_guard = ModeGuard(mode=MODE_PAPER)
+        self._settings_state_loaded_from = ""
+        self._settings_state_last_saved_at = ""
+        self.settings = self._load_persisted_settings(default_settings())
+        self.mode_guard = ModeGuard(mode=normalize_mode(self.settings.get("mode")))
         self.session = OptionsAutoSessionState(self.mode_guard)
         self.paper_broker = PaperBroker(self.settings["paper_starting_balance"])
         self.paper_lifecycle = PaperLifecycleEngine(self.paper_broker)
@@ -239,6 +241,39 @@ class OptionsAutoTerminalService:
     def _runtime_state_path(self) -> str:
         return os.path.join(self.result_root(), "runtime_state.json")
 
+    def _settings_state_path(self) -> str:
+        return os.path.join(self.result_root(), "settings.json")
+
+    def _load_persisted_settings(self, base_settings: dict[str, Any]) -> dict[str, Any]:
+        path = self._settings_state_path()
+        if not os.path.exists(path):
+            return base_settings
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return base_settings
+        settings_state = dict((payload or {}).get("settings") or payload or {})
+        if not settings_state:
+            return base_settings
+        self._settings_state_loaded_from = path
+        self._settings_state_last_saved_at = str((payload or {}).get("saved_at") or "")
+        return normalize_settings({**base_settings, **settings_state})
+
+    def _persist_settings_locked(self, reason: str = "") -> None:
+        try:
+            os.makedirs(self.result_root(), exist_ok=True)
+            payload = {
+                "saved_at": datetime.now().isoformat(timespec="seconds"),
+                "reason": reason,
+                "settings": dict(self.settings),
+            }
+            with open(self._settings_state_path(), "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, default=str)
+            self._settings_state_last_saved_at = payload["saved_at"]
+        except (OSError, TypeError, ValueError) as exc:
+            self.logger.log("WARN", "Options Auto settings persistence failed", error=str(exc), reason=reason)
+
     def _load_runtime_state(self) -> None:
         path = self._runtime_state_path()
         if not os.path.exists(path):
@@ -248,6 +283,9 @@ class OptionsAutoTerminalService:
                 payload = json.load(handle)
         except (OSError, ValueError, json.JSONDecodeError):
             return
+        settings_state = dict(payload.get("settings") or {})
+        if settings_state:
+            self.settings = normalize_settings({**self.settings, **settings_state})
         lock_state = dict(payload.get("contract_lock") or {})
         if lock_state:
             self.locked_contract_manager.state = lock_state.get("state") or self.locked_contract_manager.state
@@ -262,11 +300,19 @@ class OptionsAutoTerminalService:
             self.session.active_trades = list(session_state.get("active_trades") or [])
             self.session.orders = list(session_state.get("orders") or [])
         paper_state = dict(payload.get("paper_lifecycle") or {})
+        paper_account = dict(payload.get("paper_account") or paper_state.get("account") or {})
+        if paper_account:
+            self.paper_broker = self._paper_broker_from_snapshot(paper_account)
+            self.paper_lifecycle = PaperLifecycleEngine(self.paper_broker)
         if paper_state:
             self.paper_lifecycle.pending_approval = paper_state.get("pending_approval")
             self.paper_lifecycle.pending_entries = list(paper_state.get("pending_entries") or [])
             self.paper_lifecycle.active_trades = list(paper_state.get("active_trades") or [])
             self.paper_lifecycle.closed_trades = list(paper_state.get("closed_trades") or [])
+            if self._paper_runtime_inconsistent_locked():
+                self._clear_paper_lifecycle_locked(reason="discard incoherent persisted paper lifecycle")
+                if str(self.session.status or "").upper().startswith("PAPER"):
+                    self.session.status = "PAPER_IDLE"
         real_state = dict(payload.get("real_order_lifecycle") or {})
         if real_state:
             self.real_lifecycle.state = real_state.get("state") or self.real_lifecycle.state
@@ -313,6 +359,9 @@ class OptionsAutoTerminalService:
         return {
             "enabled": bool(self.settings.get("runtime_state_persistence_enabled", True)),
             "path": self._runtime_state_path(),
+            "settings_path": self._settings_state_path(),
+            "settings_loaded_from": self._settings_state_loaded_from,
+            "settings_last_saved_at": self._settings_state_last_saved_at,
             "loaded_from": self._runtime_state_loaded_from,
             "last_saved_at": self._runtime_state_last_saved_at,
             "skipped_noncritical_writes": self._runtime_state_skipped_count,
@@ -323,14 +372,10 @@ class OptionsAutoTerminalService:
         return {
             "saved_at": datetime.now().isoformat(timespec="seconds"),
             "reason": reason,
-            "settings": {
-                "mode": self.settings.get("mode"),
-                "underlying": self.settings.get("underlying"),
-                "expiry": self.settings.get("expiry"),
-                "number_of_lots": self.settings.get("number_of_lots"),
-            },
+            "settings": dict(self.settings),
             "session": self.session.to_dict(),
             "contract_lock": self.locked_contract_manager.snapshot(),
+            "paper_account": self.paper_broker.snapshot(),
             "paper_lifecycle": self.paper_lifecycle.snapshot(),
             "real_order_lifecycle": {**self.real_lifecycle.snapshot(), "trade_plan": dict(self.real_lifecycle.trade_plan or {})},
             "websocket": self._live_scan_state_locked().get("websocket") or {},
@@ -360,6 +405,9 @@ class OptionsAutoTerminalService:
             "stop_live_scan",
             "websocket_order_update",
             "paper_market_processed",
+            "paper_account_reset",
+            "paper_account_initialized",
+            "settings",
             "real_lifecycle_poll",
         )
         return any(token in reason for token in critical_tokens)
@@ -387,7 +435,9 @@ class OptionsAutoTerminalService:
     def configure(self, payload: dict[str, Any] | None = None, kite_profile: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             self._stop_live_scan_locked(reason="configure")
-            return self._configure_locked(payload, kite_profile=kite_profile, preserve_session=False)
+            result = self._configure_locked(payload, kite_profile=kite_profile, preserve_session=False)
+            self._persist_runtime_state_locked("configure")
+            return result
 
     def _configure_locked(
         self,
@@ -396,7 +446,7 @@ class OptionsAutoTerminalService:
         preserve_session: bool = False,
         return_status: bool = True,
     ) -> dict[str, Any]:
-        settings = normalize_settings(payload)
+        settings = normalize_settings({**dict(self.settings or {}), **dict(payload or {})})
         mode = normalize_mode(settings.get("mode"))
         previous_session = self.session if preserve_session and self.mode_guard.mode == mode else None
         self.settings = settings
@@ -411,11 +461,9 @@ class OptionsAutoTerminalService:
             self.session.mode_guard = self.mode_guard
         else:
             self.session = OptionsAutoSessionState(self.mode_guard)
-        if mode == MODE_PAPER and not self._paper_lifecycle_active():
-            self.paper_broker = PaperBroker(float(settings["paper_starting_balance"]))
-            self.paper_lifecycle = PaperLifecycleEngine(self.paper_broker)
-        elif mode == MODE_PAPER:
-            self.logger.log("WARN", "Options Auto paper lifecycle preserved during configure", mode=mode)
+        if mode == MODE_PAPER:
+            self._prepare_paper_account_for_configure_locked(settings, preserve_session=preserve_session)
+        self._persist_settings_locked("settings_configured")
         self.logger.log("INFO", "Options Auto configured", mode=mode, underlying=settings.get("underlying"))
         return self.status() if return_status else {}
 
@@ -1144,6 +1192,83 @@ class OptionsAutoTerminalService:
             result["message"] = "Paper live scanner started. It will keep polling Zerodha paper data and re-check entries until stopped."
             return result
 
+    def reset_paper_account(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            payload = dict(payload or {})
+            if self._paper_lifecycle_active():
+                raise ValueError("Stop or finish the active paper trade before resetting the paper account.")
+            balance = _number(
+                payload.get("paper_starting_balance", payload.get("balance")),
+                self.settings.get("paper_starting_balance") or self.paper_broker.starting_balance or 20000.0,
+            )
+            if balance <= 0:
+                raise ValueError("Paper account reset balance must be greater than zero.")
+            self._stop_live_scan_locked(reason="paper account reset")
+            self.settings = normalize_settings({**dict(self.settings or {}), **payload, "mode": MODE_PAPER, "paper_starting_balance": balance})
+            self.mode_guard = ModeGuard(
+                mode=MODE_PAPER,
+                kite_profile=dict(self.mode_guard.kite_profile or {}),
+                real_mode_confirmed=bool(self.settings.get("confirm_real_mode")),
+                real_orders_enabled=bool(self.settings.get("real_orders_enabled")),
+            )
+            self.session = OptionsAutoSessionState(self.mode_guard)
+            self.session.status = "PAPER_ACCOUNT_RESET"
+            self._reset_paper_lifecycle_locked(balance, reason="paper account reset")
+            self._persist_settings_locked("paper_account_reset")
+            self._persist_runtime_state_locked("paper_account_reset")
+            return {
+                "reset": True,
+                "message": "Paper account balance reset. Future paper sessions will continue from this ledger until you reset it again.",
+                "settings": dict(self.settings),
+                "paper_account": self.paper_broker.snapshot(),
+                "paper_lifecycle": self.paper_lifecycle.snapshot(),
+                "session": self.session.to_dict(),
+                "live_scan": self._live_scan_state_locked(),
+            }
+
+    def start_real_engine(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            payload = {**dict(payload or {}), "mode": MODE_REAL}
+            client = self.kite_client_provider("LIVE")
+            if not client:
+                return self._blocked_real_order(["Real Money Zerodha is not connected."])
+            self._prewarm_options_reference_data_locked(MODE_REAL, payload)
+            settings = {
+                **self.settings,
+                **dict(payload.get("settings") or {}),
+                "mode": MODE_REAL,
+                "dry_run_real_only": False,
+                "real_orders_enabled": True,
+                "real_auto_entry_enabled": True,
+            }
+            settings = self._real_capability_settings(settings, MODE_REAL, client, {**payload, "settings": settings})
+            payload["settings"] = settings
+            self._configure_locked(settings, kite_profile=payload.get("kite_profile") or {}, preserve_session=False, return_status=False)
+            self.real_api_manager.client = client
+
+            preflight = self.real_preflight_check({
+                **payload,
+                "settings": settings,
+                "market_open": payload.get("market_open", True),
+                "instruments_valid": payload.get("instruments_valid", True),
+            })
+            if not preflight.get("allowed"):
+                return self._blocked_real_order(preflight.get("blockers") or ["Real engine preflight failed."], preflight=preflight)
+
+            self.session.status = "REAL_SCANNING"
+            self.session.record_safety_event("Real Options Auto engine started", {"orders_sent": 0, "auto_entry": True})
+            self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+            return {
+                "allowed": True,
+                "real_engine_started": True,
+                "real_order_sent": False,
+                "orders_sent": 0,
+                "preflight": preflight,
+                "session": self.session.to_dict(),
+                "live_scan": self._live_scan_state_locked(),
+                "message": "Real engine started. It will scan fresh real data and place one guarded BUY LIMIT when a valid setup appears.",
+            }
+
     def _start_live_scan_locked(self, mode: str, payload: dict[str, Any], status: str) -> None:
         if self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set():
             self.logger.log("INFO", "Options Auto live scanner restart requested", mode=self._live_scan_mode)
@@ -1352,24 +1477,146 @@ class OptionsAutoTerminalService:
 
     def _real_live_scan_action_locked(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         dry_run = bool(self.settings.get("dry_run_real_only") or not self.settings.get("real_orders_enabled"))
+        auto_enabled = bool(self.settings.get("real_auto_entry_enabled"))
         action = {
             "action": "REAL_SCAN_ONLY",
             "dry_run": dry_run,
             "orders_sent": 0,
-            "real_auto_entry_enabled": bool(self.settings.get("real_auto_entry_enabled")),
-            "reason": "Real scanner is decision-only. No real orders will be sent automatically.",
+            "real_auto_entry_enabled": auto_enabled,
+            "reason": "Real engine is scanning. No valid setup yet.",
         }
+        self._clear_stale_real_lifecycle_if_flat_locked(payload)
+        if self._real_entry_or_position_active_locked():
+            action.update({
+                "action": "HOLD",
+                "reason": "Real entry lifecycle is already active. New real entries are blocked.",
+                "real_order_lifecycle": self.real_lifecycle.snapshot(),
+            })
+            return action
+        if not decision.get("allowed"):
+            action["blockers"] = decision.get("blockers") or []
+            return action
         if decision.get("allowed"):
-            if not self.settings.get("real_auto_entry_enabled"):
+            if dry_run:
+                action.update({
+                    "setup_found": True,
+                    "reason": "Real dry-run override is active. Setup found, but zero real orders were sent.",
+                })
+                self.session.record_safety_event("Real Options Auto setup found in dry-run", {"orders_sent": 0})
+                return action
+            if not auto_enabled:
                 action.update({
                     "setup_found": True,
                     "reason": "real_auto_entry_enabled is false. Real scanner remains decision-only.",
                 })
                 self.session.record_safety_event("Real Options Auto setup found decision-only", {"orders_sent": 0})
                 return action
-            action["adaptive_dry_run"] = self._real_adaptive_dry_run(decision, payload)
-            self.session.record_safety_event("Real Options Auto setup found by live scanner", {"dry_run": dry_run, "orders_sent": 0})
+            preflight = self.real_preflight_check({
+                **payload,
+                "decision": decision,
+                "trade_plan": decision.get("trade_plan") or {},
+                "settings": dict(self.settings),
+                "market_open": payload.get("market_open", True),
+                "instruments_valid": payload.get("instruments_valid", True),
+            })
+            if not preflight.get("allowed"):
+                action.update({
+                    "action": "BLOCKED_REAL_PREFLIGHT",
+                    "setup_found": True,
+                    "preflight": preflight,
+                    "blockers": preflight.get("blockers") or [],
+                    "reason": "Real setup found, but real preflight blocked order placement.",
+                })
+                return action
+            order_result = self._submit_real_entry_from_decision_locked(
+                {
+                    **payload,
+                    "decision": decision,
+                    "trade_plan": decision.get("trade_plan") or {},
+                    "settings": dict(self.settings),
+                    "market_open": payload.get("market_open", True),
+                    "instruments_valid": payload.get("instruments_valid", True),
+                },
+                decision,
+                preflight,
+                start_scanner=False,
+            )
+            if order_result.get("real_order_sent"):
+                return {
+                    "action": "REAL_ENTRY_ORDER_SENT",
+                    "setup_found": True,
+                    "dry_run": False,
+                    "orders_sent": 1,
+                    "order_id": (order_result.get("entry_order") or {}).get("order_id"),
+                    "tradingsymbol": (order_result.get("entry_order") or {}).get("tradingsymbol"),
+                    "entry_order": order_result.get("entry_order") or {},
+                    "trade_plan": order_result.get("trade_plan") or {},
+                    "preflight": preflight,
+                    "final_validation": order_result.get("final_validation") or {},
+                    "real_order_lifecycle": order_result.get("real_order_lifecycle") or {},
+                    "reason": "Valid setup found. Real BUY LIMIT entry was sent and scanner remains active for monitoring.",
+                }
+            action.update({
+                "action": "BLOCKED_REAL_ORDER",
+                "setup_found": True,
+                "blockers": order_result.get("blockers") or [],
+                "preflight": preflight,
+                "final_validation": order_result.get("final_validation") or {},
+                "reason": order_result.get("message") or "Real setup found, but order placement was blocked.",
+            })
         return action
+
+    def _real_entry_or_position_active_locked(self) -> bool:
+        lifecycle = self.real_lifecycle.snapshot()
+        state = str(lifecycle.get("state") or "").upper()
+        protected_state = str(lifecycle.get("protected_state") or "").upper()
+        active_states = {
+            "ENTRY_REQUESTED",
+            "ENTRY_OPEN",
+            "ENTRY_ORDER_SENT",
+            "ENTRY_ORDER_OPEN",
+            "ENTRY_PARTIAL",
+            "ENTRY_COMPLETE",
+            "PROTECTION_PENDING",
+            "TARGET_PLACED",
+            "SL_PLACED",
+            "OCO_ACTIVE",
+            "UNPROTECTED_POSITION",
+            "MANUAL_ATTENTION",
+            "SAFE_MODE",
+        }
+        if state in active_states:
+            return True
+        if protected_state in {"ENTRY_REQUESTED", "ENTRY_OPEN", "ENTRY_FILLED_UNPROTECTED", "PROTECTIVE_EXIT_PLACING", "PROTECTIVE_EXIT_ACTIVE", "PROTECTIVE_EXIT_FAILED"}:
+            return True
+        return self.session.status == "REAL_ENTRY_ORDER_OPEN" or bool(self.session.active_trades)
+
+    def _clear_stale_real_lifecycle_if_flat_locked(self, payload: dict[str, Any] | None = None) -> bool:
+        if not self._real_entry_or_position_active_locked():
+            return False
+        client = self.kite_client_provider("LIVE")
+        if not client:
+            return False
+        try:
+            broker_payload = self._real_live_broker_payload_locked(dict(payload or {}))
+        except Exception as exc:
+            self.logger.log("WARN", "Options Auto real lifecycle stale check failed", error=str(exc))
+            return False
+        open_orders = self._open_option_orders(broker_payload.get("broker_orders") or [])
+        open_positions = [
+            position
+            for position in self._normalise_positions(broker_payload.get("positions") or [])
+            if self._is_open_option_position(position)
+        ]
+        if open_orders or open_positions:
+            return False
+        self.real_lifecycle = RealOrderLifecycleEngine(self.real_controller)
+        self.session.active_trades = []
+        if str(self.session.status or "").upper() in {"REAL_ENTRY_ORDER_OPEN", "REAL_POSITION_ACTIVE", "UNPROTECTED_REAL_POSITION"}:
+            self.session.status = "REAL_SCANNING"
+        self.session.record_safety_event("Stale real lifecycle cleared after broker flat verification", {"open_orders": 0, "open_positions": 0})
+        self.logger.log("INFO", "Options Auto stale real lifecycle cleared after broker flat verification")
+        return True
 
     def _scan_payload(self, payload: dict[str, Any], mode: str) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -1731,6 +1978,7 @@ class OptionsAutoTerminalService:
         self.session.active_trades = list(self.paper_lifecycle.active_trades)
         self.session.status = "PAPER_ENTRY_PENDING"
         self.logger.log("INFO", "Options Auto paper lifecycle entry pending", order_id=approved["entry_order"]["order_id"])
+        self._persist_runtime_state_locked("paper_order_created")
         return {
             **result,
             "approval": pending,
@@ -1748,6 +1996,7 @@ class OptionsAutoTerminalService:
         pending = self.paper_lifecycle.create_pending(result, int(self.settings.get("approval_timeout_seconds") or 30))
         self.session.status = "PAPER_APPROVAL_PENDING"
         self.logger.log("INFO", "Options Auto paper approval pending", approval_id=pending["approval_id"])
+        self._persist_runtime_state_locked("paper_approval_pending")
         return {**result, "approval": pending, "paper_lifecycle": self.paper_lifecycle.snapshot(), "session": self.session.to_dict()}
 
     def approve_paper(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1763,6 +2012,7 @@ class OptionsAutoTerminalService:
         else:
             self.session.status = "PAPER_APPROVAL_EXPIRED"
         self.logger.log("INFO", "Options Auto paper approval processed", status=result.get("status"))
+        self._persist_runtime_state_locked("paper_order_approved")
         return {**result, "paper_lifecycle": self.paper_lifecycle.snapshot(), "paper_account": self.paper_broker.snapshot(), "session": self.session.to_dict()}
 
     def reject_paper(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1770,6 +2020,7 @@ class OptionsAutoTerminalService:
         result = self.paper_lifecycle.reject(payload.get("approval_id"))
         self.session.status = "PAPER_APPROVAL_REJECTED"
         self.logger.log("INFO", "Options Auto paper approval rejected", approval_id=result.get("approval_id"))
+        self._persist_runtime_state_locked("paper_approval_rejected")
         return {**result, "paper_lifecycle": self.paper_lifecycle.snapshot(), "session": self.session.to_dict()}
 
     def process_paper_market(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1933,8 +2184,7 @@ class OptionsAutoTerminalService:
                     paper_cancel = self.paper_lifecycle.cancel_pending_entry(reason="Kill switch cancelled pending paper entries.")
                 self._sync_paper_lifecycle_to_session_locked()
             if mode == MODE_REAL:
-                real_runtime = self.real_controller.enter_safe_mode(payload.get("source") or "UI", payload.get("reason") or "Options Auto kill switch activated.")
-                self._sync_real_option_positions_locked(payload)
+                real_runtime = self._real_emergency_kill_switch_locked(payload)
             self.session.status = f"{mode}_KILL_SWITCH_ACTIVE"
             event = {
                 "mode": mode,
@@ -1947,6 +2197,111 @@ class OptionsAutoTerminalService:
             self.logger.log("WARN", "Options Auto kill switch activated", mode=mode)
             self._persist_runtime_state_locked("kill_switch")
             return {"killed": True, **event, "session": self.session.to_dict(), "live_scan": self._live_scan_state_locked()}
+
+    def _real_emergency_kill_switch_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
+        source = payload.get("source") or "UI"
+        reason = payload.get("reason") or "Options Auto kill switch activated."
+        runtime = self.real_controller.enter_safe_mode(source, reason)
+        report: dict[str, Any] = {
+            "attempted": True,
+            "safe_mode": runtime,
+            "cancelled_orders": [],
+            "flatten": {},
+            "open_orders_after": [],
+            "positions_after": [],
+            "flat_verified": False,
+            "errors": [],
+        }
+        client = self.kite_client_provider("LIVE")
+        if not client:
+            report["errors"].append("Real Zerodha client is not connected.")
+            return report
+
+        self.real_api_manager.client = client
+        emergency_guard = ModeGuard(
+            mode=MODE_REAL,
+            kite_profile=dict(self.mode_guard.kite_profile or payload.get("kite_profile") or {}),
+            real_mode_confirmed=True,
+            real_orders_enabled=True,
+        )
+        adapter = KiteOrderAdapter(self.real_api_manager, emergency_guard)
+        initial_orders = self._merge_websocket_order_updates(self._broker_orders(client, payload))
+        for order in self._open_option_orders(initial_orders):
+            order_id = str(order.get("order_id") or order.get("id") or "")
+            if not order_id:
+                report["errors"].append(f"Open option order missing order_id: {order.get('tradingsymbol') or order.get('symbol') or ''}")
+                continue
+            response = adapter.cancel_order(order_id)
+            report["cancelled_orders"].append({"order": order, "response": response})
+            if not response.get("ok"):
+                report["errors"].append(f"Cancel failed for {order_id}: {response.get('error') or response}")
+
+        positions = self._normalise_positions(self._broker_positions(client, {}))
+        option_positions = [position for position in positions if self._is_open_option_position(position)]
+        emergency_settings = {
+            **self.settings,
+            **dict(payload.get("settings") or {}),
+            "mode": MODE_REAL,
+            "confirm_real_mode": True,
+            "real_orders_enabled": True,
+            "dry_run_real_only": False,
+            "allow_real_emergency_flatten": True,
+        }
+        if option_positions:
+            flatten = self.real_controller.emergency_exit_plan(
+                emergency_guard,
+                option_positions,
+                emergency_settings,
+                confirmed=True,
+                adapter=adapter,
+            )
+            report["flatten"] = flatten
+            report["errors"].extend([str(item) for item in flatten.get("blockers") or []])
+        else:
+            report["flatten"] = {"allowed": True, "state": "NO_OPEN_OPTION_POSITION", "orders_sent": 0, "actions": [], "blockers": []}
+
+        verification = self._verify_real_flat_state_locked(client, emergency_settings)
+        report.update(verification)
+        report["errors"].extend(verification.get("verification_errors") or [])
+        self._sync_real_option_positions_locked({})
+        return report
+
+    def _verify_real_flat_state_locked(self, client: Any, settings: dict[str, Any]) -> dict[str, Any]:
+        timeout = max(0.0, _number(settings.get("emergency_flatten_verify_timeout_seconds"), 10))
+        interval = max(0.1, _number(settings.get("emergency_flatten_poll_interval_seconds"), 1))
+        deadline = time.time() + timeout
+        last_orders: list[dict[str, Any]] = []
+        last_positions: list[dict[str, Any]] = []
+        errors: list[str] = []
+        while True:
+            try:
+                last_orders = self._merge_websocket_order_updates(self._broker_orders(client, {}))
+            except Exception as exc:
+                errors.append(f"Could not fetch order book after kill switch: {exc}")
+                last_orders = []
+            try:
+                last_positions = self._normalise_positions(self._broker_positions(client, {}))
+            except Exception as exc:
+                errors.append(f"Could not fetch positions after kill switch: {exc}")
+                last_positions = []
+            open_orders = self._open_option_orders(last_orders)
+            open_positions = [position for position in last_positions if self._is_open_option_position(position)]
+            flat_verified = not open_orders and not open_positions and not errors
+            if flat_verified or time.time() >= deadline:
+                return {
+                    "open_orders_after": open_orders,
+                    "positions_after": open_positions,
+                    "flat_verified": flat_verified,
+                    "verification_errors": errors,
+                }
+            time.sleep(interval)
+
+    def _open_option_orders(self, orders: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        return [
+            dict(order)
+            for order in list(orders or [])
+            if self._is_option_order(order) and self.reconciliation._is_open_order(order)
+        ]
 
     def real_safe_mode(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -2002,66 +2357,80 @@ class OptionsAutoTerminalService:
                 self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
                 return {**blocked, "live_scan": self._live_scan_state_locked()}
 
-            final_validation = self._final_entry_validation(decision, payload)
-            if not final_validation.get("allowed"):
-                blocked = self._blocked_real_order(final_validation.get("blockers") or ["Fast final validation blocked real order."], preflight=preflight, decision=decision, final_validation=final_validation)
+            return self._submit_real_entry_from_decision_locked(payload, decision, preflight, start_scanner=True)
+
+    def _submit_real_entry_from_decision_locked(
+        self,
+        payload: dict[str, Any],
+        decision: dict[str, Any],
+        preflight: dict[str, Any],
+        start_scanner: bool = False,
+    ) -> dict[str, Any]:
+        def blocked_result(blocked: dict[str, Any]) -> dict[str, Any]:
+            if start_scanner:
                 self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
                 return {**blocked, "live_scan": self._live_scan_state_locked()}
+            return blocked
 
-            selected = dict(decision.get("selected_contract") or {})
-            trade_plan = {**dict(decision.get("trade_plan") or {}), "entry_price": final_validation.get("entry_limit") or (decision.get("trade_plan") or {}).get("entry_price")}
-            order_request, order_blockers = self._real_entry_order_request(selected, trade_plan, preflight)
-            if order_blockers:
-                blocked = self._blocked_real_order(order_blockers, preflight=preflight, decision=decision, final_validation=final_validation)
-                self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
-                return {**blocked, "live_scan": self._live_scan_state_locked()}
+        final_validation = self._final_entry_validation(decision, payload)
+        if not final_validation.get("allowed"):
+            blocked = self._blocked_real_order(final_validation.get("blockers") or ["Fast final validation blocked real order."], preflight=preflight, decision=decision, final_validation=final_validation)
+            return blocked_result(blocked)
 
-            order_submitted_at = datetime.now()
-            adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard)
-            submit_start = time.perf_counter()
-            try:
-                controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
-            finally:
-                self._record_latency_started("options_auto.real_order_submit", submit_start, {"tradingsymbol": order_request.get("tradingsymbol")})
-            broker_ack_at = datetime.now()
-            if not controller_result.get("real_order_sent"):
-                blocked = self._blocked_real_order(controller_result.get("blockers") or ["Real entry order failed."], preflight=preflight, decision=decision, final_validation=final_validation, execution=controller_result)
-                self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
-                return {**blocked, "live_scan": self._live_scan_state_locked()}
+        selected = dict(decision.get("selected_contract") or {})
+        trade_plan = {**dict(decision.get("trade_plan") or {}), "entry_price": final_validation.get("entry_limit") or (decision.get("trade_plan") or {}).get("entry_price")}
+        order_request, order_blockers = self._real_entry_order_request(selected, trade_plan, preflight)
+        if order_blockers:
+            blocked = self._blocked_real_order(order_blockers, preflight=preflight, decision=decision, final_validation=final_validation)
+            return blocked_result(blocked)
 
-            entry_order = controller_result["entry_order"]
-            lifecycle = self.real_lifecycle.submit_entry(entry_order, trade_plan, self.settings)
-            self.blackbox_recorder.record(
-                signal_generated_at=decision.get("timestamp") or datetime.now(),
-                final_validation_started_at=decision.get("timestamp") or datetime.now(),
-                final_validation_completed_at=datetime.now(),
-                order_submitted_at=order_submitted_at,
-                broker_ack_at=broker_ack_at,
-                order_status_first_seen_at=broker_ack_at,
-                data_age_ms=float((final_validation.get("quote_age_seconds") or 0) or 0) * 1000,
-                tradingsymbol=entry_order.get("tradingsymbol"),
-                order_id=entry_order.get("order_id"),
-            )
-            self.session.orders.append(entry_order)
-            self.session.status = "REAL_ENTRY_ORDER_OPEN"
-            self.session.record_safety_event("Real Options Auto entry order sent", {"order_id": entry_order.get("order_id"), "tradingsymbol": entry_order.get("tradingsymbol")})
-            self.logger.log("WARN", "Options Auto real entry order sent", order_id=entry_order.get("order_id"), tradingsymbol=entry_order.get("tradingsymbol"))
+        order_submitted_at = datetime.now()
+        adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard)
+        submit_start = time.perf_counter()
+        try:
+            controller_result = self.real_controller.place_entry_buy_limit(self.mode_guard, adapter, order_request, preflight)
+        finally:
+            self._record_latency_started("options_auto.real_order_submit", submit_start, {"tradingsymbol": order_request.get("tradingsymbol")})
+        broker_ack_at = datetime.now()
+        if not controller_result.get("real_order_sent"):
+            blocked = self._blocked_real_order(controller_result.get("blockers") or ["Real entry order failed."], preflight=preflight, decision=decision, final_validation=final_validation, execution=controller_result)
+            return blocked_result(blocked)
+
+        entry_order = controller_result["entry_order"]
+        lifecycle = self.real_lifecycle.submit_entry(entry_order, trade_plan, self.settings)
+        self.blackbox_recorder.record(
+            signal_generated_at=decision.get("timestamp") or datetime.now(),
+            final_validation_started_at=decision.get("timestamp") or datetime.now(),
+            final_validation_completed_at=datetime.now(),
+            order_submitted_at=order_submitted_at,
+            broker_ack_at=broker_ack_at,
+            order_status_first_seen_at=broker_ack_at,
+            data_age_ms=float((final_validation.get("quote_age_seconds") or 0) or 0) * 1000,
+            tradingsymbol=entry_order.get("tradingsymbol"),
+            order_id=entry_order.get("order_id"),
+        )
+        self.session.orders.append(entry_order)
+        self.session.status = "REAL_ENTRY_ORDER_OPEN"
+        self.session.record_safety_event("Real Options Auto entry order sent", {"order_id": entry_order.get("order_id"), "tradingsymbol": entry_order.get("tradingsymbol")})
+        self.logger.log("WARN", "Options Auto real entry order sent", order_id=entry_order.get("order_id"), tradingsymbol=entry_order.get("tradingsymbol"))
+        if start_scanner:
             self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
-            self._persist_runtime_state_locked("real_entry_order_sent")
-            return {
-                "allowed": True,
-                "real_order_sent": True,
-                "order_stage": "ENTRY_ORDER_OPEN",
-                "entry_order": entry_order,
-                "trade_plan": trade_plan,
-                "preflight": preflight,
-                "final_validation": final_validation,
-                "execution": controller_result,
-                "real_order_lifecycle": lifecycle,
-                "session": self.session.to_dict(),
-                "live_scan": self._live_scan_state_locked(),
-                "message": "Real BUY LIMIT entry sent through guarded Kite adapter. Real scanner remains active for fresh data and monitoring.",
-            }
+        self._persist_runtime_state_locked("real_entry_order_sent")
+        return {
+            "allowed": True,
+            "real_order_sent": True,
+            "orders_sent": 1,
+            "order_stage": "ENTRY_ORDER_OPEN",
+            "entry_order": entry_order,
+            "trade_plan": trade_plan,
+            "preflight": preflight,
+            "final_validation": final_validation,
+            "execution": controller_result,
+            "real_order_lifecycle": lifecycle,
+            "session": self.session.to_dict(),
+            "live_scan": self._live_scan_state_locked(),
+            "message": "Real BUY LIMIT entry sent through guarded Kite adapter. Real scanner remains active for fresh data and monitoring.",
+        }
 
     def upload_fii_dii_csv(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -2969,11 +3338,17 @@ class OptionsAutoTerminalService:
         if mode != MODE_REAL:
             return settings
         if client:
-            settings["confirm_real_mode"] = True
             explicit_dry_run = "dry_run_real_only" in payload or "dry_run_real_only" in dict(payload.get("settings") or {})
-            if not explicit_dry_run:
-                settings["dry_run_real_only"] = False
-            settings["real_orders_enabled"] = not bool(settings.get("dry_run_real_only"))
+            explicit_real_orders = "real_orders_enabled" in payload or "real_orders_enabled" in dict(payload.get("settings") or {})
+            if explicit_real_orders:
+                settings["real_orders_enabled"] = bool(settings.get("real_orders_enabled"))
+                if settings["real_orders_enabled"] and not explicit_dry_run:
+                    settings["dry_run_real_only"] = False
+            else:
+                settings["real_orders_enabled"] = False
+                settings["dry_run_real_only"] = True
+            if settings.get("dry_run_real_only"):
+                settings["real_orders_enabled"] = False
         return settings
 
     def _real_entry_order_request(self, selected: dict[str, Any], trade_plan: dict[str, Any], preflight: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
@@ -3211,6 +3586,79 @@ class OptionsAutoTerminalService:
             or getattr(self.paper_lifecycle, "pending_entries", None)
             or getattr(self.paper_lifecycle, "active_trades", None)
         )
+
+    def _paper_broker_from_snapshot(self, snapshot: dict[str, Any]) -> PaperBroker:
+        snapshot = dict(snapshot or {})
+        starting_balance = _number(snapshot.get("opening_balance"), self.settings.get("paper_starting_balance") or 20000.0)
+        available_balance = _number(snapshot.get("available_balance"), starting_balance)
+        return PaperBroker(
+            starting_balance=starting_balance,
+            available_balance=available_balance,
+            reserved_balance=_number(snapshot.get("reserved_balance"), 0.0),
+            orders=list(snapshot.get("orders") or []),
+            ledger=list(snapshot.get("ledger") or []),
+        )
+
+    def _reset_paper_lifecycle_locked(self, starting_balance: float | None = None, reason: str = "") -> None:
+        balance = _number(starting_balance, self.settings.get("paper_starting_balance") or 20000.0)
+        self.paper_broker = PaperBroker(balance)
+        self.paper_lifecycle = PaperLifecycleEngine(self.paper_broker)
+        self.session.active_trades = []
+        self.session.orders = []
+        self.locked_contract_manager.unlock(reason or "paper lifecycle reset")
+        self.logger.log("INFO", "Options Auto paper lifecycle reset", starting_balance=balance, reason=reason)
+
+    def _clear_paper_lifecycle_locked(self, reason: str = "") -> None:
+        self.paper_lifecycle = PaperLifecycleEngine(self.paper_broker)
+        self.session.active_trades = []
+        self.session.orders = list(self.paper_broker.orders[-100:])
+        self.locked_contract_manager.unlock(reason or "paper lifecycle cleared")
+        self.logger.log("INFO", "Options Auto paper lifecycle cleared without resetting account balance", reason=reason)
+
+    def _paper_account_is_uninitialized_locked(self) -> bool:
+        starting_balance = _number(getattr(self.paper_broker, "starting_balance", None), 0.0)
+        available_balance = _number(getattr(self.paper_broker, "available_balance", None), starting_balance)
+        reserved_balance = _number(getattr(self.paper_broker, "reserved_balance", None), 0.0)
+        return (
+            not list(getattr(self.paper_broker, "orders", []) or [])
+            and not list(getattr(self.paper_broker, "ledger", []) or [])
+            and abs(available_balance - starting_balance) < 0.01
+            and abs(reserved_balance) < 0.01
+        )
+
+    def _prepare_paper_account_for_configure_locked(self, settings: dict[str, Any], preserve_session: bool = False) -> None:
+        requested_balance = _number(settings.get("paper_starting_balance"), self.paper_broker.starting_balance or 20000.0)
+        current_opening = _number(getattr(self.paper_broker, "starting_balance", None), requested_balance)
+        if self._paper_runtime_inconsistent_locked():
+            self._clear_paper_lifecycle_locked(reason="discard incoherent paper lifecycle during configure")
+        if self._paper_lifecycle_active():
+            self.logger.log("WARN", "Options Auto paper lifecycle preserved during configure", mode=MODE_PAPER)
+            return
+        if (
+            not preserve_session
+            and self._paper_account_is_uninitialized_locked()
+            and requested_balance > 0
+            and abs(current_opening - requested_balance) >= 0.01
+        ):
+            self._reset_paper_lifecycle_locked(requested_balance, reason="paper account initialized from settings")
+            self._persist_runtime_state_locked("paper_account_initialized")
+            return
+        self._clear_paper_lifecycle_locked(reason="paper configure preserved account balance")
+
+    def _paper_runtime_inconsistent_locked(self) -> bool:
+        if not self._paper_lifecycle_active():
+            return False
+        order_ids = {str((order or {}).get("order_id") or "") for order in getattr(self.paper_broker, "orders", [])}
+        for pending in getattr(self.paper_lifecycle, "pending_entries", []) or []:
+            order_id = str(((pending or {}).get("entry_order") or {}).get("order_id") or "")
+            if order_id and order_id not in order_ids:
+                return True
+        for trade in getattr(self.paper_lifecycle, "active_trades", []) or []:
+            for key in ("entry_order_id", "target_order_id", "stoploss_order_id"):
+                order_id = str((trade or {}).get(key) or "")
+                if order_id and order_id not in order_ids:
+                    return True
+        return False
 
     def _active_positions_protected(self) -> bool:
         if not self.session.active_trades:

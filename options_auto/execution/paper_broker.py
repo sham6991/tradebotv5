@@ -138,10 +138,15 @@ class PaperBroker:
         return row
 
     def snapshot(self) -> dict[str, Any]:
+        charges = sum(abs(float(row.get("amount") or 0)) for row in self.ledger if str(row.get("type") or "").upper() == "CHARGES")
+        cash_pnl = float(self.available_balance or 0) + float(self.reserved_balance or 0) - float(self.starting_balance or 0)
         return {
             "opening_balance": self.starting_balance,
             "available_balance": self.available_balance,
             "reserved_balance": self.reserved_balance,
-            "orders": self.orders[-100:],
-            "ledger": self.ledger[-100:],
+            "realized_pnl": round(cash_pnl, 2),
+            "unrealized_pnl": 0.0,
+            "charges": round(charges, 2),
+            "orders": list(self.orders),
+            "ledger": list(self.ledger),
         }

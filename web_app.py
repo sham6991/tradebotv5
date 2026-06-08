@@ -193,6 +193,7 @@ class WebTradeBotApp:
         }
         self.status = "Ready"
         self.current_mode = "PAPER"
+        self.live_start_mode = ""
         self.current_token_map = {}
         self.tick_buffer = {"NIFTY": [], "CE": [], "PE": []}
         self.tick_rate_windows = {"NIFTY": deque(), "CE": deque(), "PE": deque()}
@@ -1566,7 +1567,14 @@ class WebTradeBotApp:
         mode = str(mode or "PAPER").upper()
         if mode not in {"PAPER", "LIVE"}:
             raise ValueError("Trading can be started only from Paper or Live trading.")
-        prepared = self.prepare_live_start(mode, payload)
+        with self.lock:
+            self.assert_live_start_allowed_locked(mode)
+            self.live_start_mode = mode
+        try:
+            prepared = self.prepare_live_start(mode, payload)
+        except Exception:
+            self.clear_live_start_mode(mode)
+            raise
         with self.lock:
             self.update_session_summary(
                 {
@@ -1583,6 +1591,16 @@ class WebTradeBotApp:
         thread.start()
         self.set_status(f"{mode.title()} live worker starting...")
         return {"started": True, "message": f"{mode} start checks passed; worker starting."}
+
+    def assert_live_start_allowed_locked(self, mode):
+        if self.live_start_mode:
+            raise ValueError(f"{self.live_start_mode} live start is already in progress.")
+        self.executor.assert_no_active_live_session(mode)
+
+    def clear_live_start_mode(self, mode=""):
+        with self.lock:
+            if not mode or self.live_start_mode == mode:
+                self.live_start_mode = ""
 
     def prepare_live_start(self, mode, payload):
         self.sync_zerodha_client_for_mode(mode)
@@ -1698,6 +1716,8 @@ class WebTradeBotApp:
                 self.session_summary["session_id"] = ""
                 self.session_summary["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             self.set_status(f"Live start failed: {exc}")
+        finally:
+            self.clear_live_start_mode(mode)
 
     def require_real_live_start_safety(self):
         failures = self.real_live_start_safety_failures()
@@ -1832,6 +1852,7 @@ class WebTradeBotApp:
     def stop(self):
         self.executor.stop()
         with self.lock:
+            self.live_start_mode = ""
             self.session_summary["session_status"] = "Idle"
             self.session_summary["session_id"] = ""
             self.session_summary["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

@@ -325,8 +325,9 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         self.assertLess(P0_CRITICAL_PROTECTION, P4_SLOW)
 
     def test_real_dry_run_sends_zero_orders_and_reports_guarded_readiness(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540, option_price=142.4))
-        result = service.real_dry_run(service_payload("REAL"))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540, option_price=142.4))
+            result = service.real_dry_run(service_payload("REAL"))
 
         self.assertTrue(result["dry_run"])
         self.assertEqual(result["orders_sent"], 0)
@@ -336,11 +337,12 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         self.assertIn("guarded", result["real_execution_reason"])
 
     def test_paper_mode_executes_dynamic_cancel_in_simulation_only(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540, option_price=142.4))
-        result = service.execute_paper_plan(service_payload("PAPER"))
-        self.assertEqual(result["paper_order"]["status"], "OPEN")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540, option_price=142.4))
+            result = service.execute_paper_plan(service_payload("PAPER"))
+            self.assertEqual(result["paper_order"]["status"], "OPEN")
 
-        processed = service.process_paper_market({"market": {"ltp": 142.5, "bid": 141, "ask": 143, "spread_pct": 0.95, "premium_return_1": -0.7, "regime": {"recommended_side": "WAIT"}}})
+            processed = service.process_paper_market({"market": {"ltp": 142.5, "bid": 141, "ask": 143, "spread_pct": 0.95, "premium_return_1": -0.7, "regime": {"recommended_side": "WAIT"}}})
 
         self.assertEqual(processed["adaptive_pending_updates"][0]["adaptive"]["action"], "CANCEL_ENTRY")
         self.assertEqual(service.paper_broker.orders[0]["status"], "CANCELLED")
@@ -393,12 +395,12 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
 
     def test_kill_switch_cancels_pending_entry_but_not_active_paper_trade(self):
         client = FakeOptionsZerodha(spot=22540, option_price=142.4)
-        with tempfile.TemporaryDirectory() as temp_dir:
-            pending_service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+        with tempfile.TemporaryDirectory() as pending_dir, tempfile.TemporaryDirectory() as active_dir:
+            pending_service = OptionsAutoTerminalService(pending_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
             pending_service.execute_paper_plan(service_payload("PAPER"))
             killed_pending = pending_service.kill_switch({"mode": "PAPER", "reason": "operator test"})
 
-            active_service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            active_service = OptionsAutoTerminalService(active_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
             active_service.execute_paper_plan(service_payload("PAPER"))
             active_service.process_paper_market({"market": {"ltp": 142.4, "bid": 142.25, "ask": 142.45, "low": 142.4, "high": 143}})
             killed_active = active_service.kill_switch({"mode": "PAPER", "reason": "operator test"})

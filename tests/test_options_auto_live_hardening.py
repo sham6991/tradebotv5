@@ -256,6 +256,7 @@ def live_settings(mode):
         "quote_stale_seconds": 3,
         "static_ip_confirmed": mode == MODE_REAL,
         "confirm_real_mode": mode == MODE_REAL,
+        "real_orders_enabled": mode == MODE_REAL,
         "dry_run_real_only": False if mode == MODE_REAL else True,
     }
 
@@ -277,6 +278,177 @@ def live_payload(mode):
 
 
 class OptionsAutoLiveHardeningTests(unittest.TestCase):
+    def _complete_paper_trade(self, service, *, entry=100.0, exit_price=90.0, target=120.0, stoploss=90.0, quantity=10):
+        service.settings["pending_entry_dynamic_cancel_enabled"] = False
+        service.settings["pending_entry_dynamic_modify_enabled"] = False
+        decision = {
+            "allowed": True,
+            "settings": dict(service.settings),
+            "trade_plan": {
+                "tradingsymbol": "NIFTY26JUN22600CE",
+                "side": "CE",
+                "quantity": quantity,
+                "lot_size": 1,
+                "entry_price": entry,
+                "target": target,
+                "stoploss": stoploss,
+            },
+        }
+        pending = service.paper_lifecycle.create_pending(decision, timeout_seconds=30, now_epoch=time.time())
+        approved = service.paper_lifecycle.approve(pending["approval_id"], now_epoch=time.time())
+        service.session.orders.append(approved["entry_order"])
+        service.session.status = "PAPER_ENTRY_PENDING"
+        service.process_paper_market({"market": {"ltp": entry, "high": entry, "low": entry, "now_epoch": time.time()}})
+        service.process_paper_market({"market": {"ltp": exit_price, "high": exit_price, "low": exit_price, "now_epoch": time.time()}})
+        return service.paper_broker.snapshot()
+
+    def test_settings_persist_across_service_instances(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+
+            service.configure({
+                "mode": MODE_PAPER,
+                "underlying": "SENSEX",
+                "expiry": _expiry_text(),
+                "paper_starting_balance": 15000,
+                "buy_score_threshold": 63,
+                "auto_entry_enabled": True,
+            })
+            restored = OptionsAutoTerminalService(temp_dir)
+
+            self.assertEqual(restored.settings["underlying"], "SENSEX")
+            self.assertEqual(restored.settings["expiry"], _expiry_text())
+            self.assertEqual(restored.settings["paper_starting_balance"], 15000.0)
+            self.assertEqual(restored.settings["buy_score_threshold"], 63.0)
+            self.assertTrue(restored.settings["auto_entry_enabled"])
+
+    def test_configure_does_not_reset_established_paper_account(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            service.reset_paper_account({"paper_starting_balance": 10000})
+            service.paper_broker.available_balance = 9860
+            service.paper_broker.ledger = [{"type": "SELL", "amount": 900, "balance": 9860}]
+            service._persist_runtime_state_locked("paper_market_processed")
+
+            status = service.configure({"mode": MODE_PAPER, "paper_starting_balance": 25000})
+            restored = OptionsAutoTerminalService(temp_dir)
+
+            self.assertEqual(status["settings"]["paper_starting_balance"], 25000.0)
+            self.assertEqual(status["paper_account"]["opening_balance"], 10000)
+            self.assertEqual(status["paper_account"]["available_balance"], 9860)
+            self.assertEqual(restored.paper_broker.starting_balance, 10000)
+            self.assertEqual(restored.paper_broker.available_balance, 9860)
+
+    def test_explicit_paper_account_reset_updates_persisted_balance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            service.reset_paper_account({"paper_starting_balance": 10000})
+            service.paper_broker.available_balance = 9860
+            service.paper_broker.ledger = [{"type": "SELL", "amount": 900, "balance": 9860}]
+
+            result = service.reset_paper_account({"paper_starting_balance": 18000})
+            restored = OptionsAutoTerminalService(temp_dir)
+
+            self.assertTrue(result["reset"])
+            self.assertEqual(result["paper_account"]["opening_balance"], 18000)
+            self.assertEqual(result["paper_account"]["available_balance"], 18000)
+            self.assertEqual(restored.paper_broker.starting_balance, 18000)
+            self.assertEqual(restored.paper_broker.available_balance, 18000)
+            self.assertFalse(restored.paper_broker.ledger)
+
+    def test_paper_loss_exit_persists_balance_for_next_session_and_trade(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            service.reset_paper_account({"paper_starting_balance": 10000})
+
+            snapshot = self._complete_paper_trade(service, entry=100, exit_price=90, target=120, stoploss=90, quantity=10)
+            restored = OptionsAutoTerminalService(temp_dir)
+            status = restored.configure({"mode": MODE_PAPER, "paper_starting_balance": 20000})
+
+            self.assertEqual(snapshot["available_balance"], 9860)
+            self.assertEqual(snapshot["realized_pnl"], -140)
+            self.assertEqual(restored.paper_broker.available_balance, 9860)
+            self.assertEqual(status["paper_account"]["available_balance"], 9860)
+            self.assertEqual(status["paper_account"]["opening_balance"], 10000)
+
+    def test_paper_profit_exit_persists_balance_for_next_day(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            service.reset_paper_account({"paper_starting_balance": 10000})
+
+            snapshot = self._complete_paper_trade(service, entry=100, exit_price=120, target=120, stoploss=90, quantity=10)
+            restored = OptionsAutoTerminalService(temp_dir)
+
+            self.assertEqual(snapshot["available_balance"], 10160)
+            self.assertEqual(snapshot["realized_pnl"], 160)
+            self.assertEqual(snapshot["charges"], 40)
+            self.assertEqual(restored.paper_broker.available_balance, 10160)
+            self.assertEqual(restored.paper_broker.snapshot()["realized_pnl"], 160)
+
+    def test_runtime_state_restores_paper_account_with_active_lifecycle(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            service._reset_paper_lifecycle_locked(10000, reason="test")
+            service.paper_broker.available_balance = 4700
+            service.paper_broker.orders = [
+                {"order_id": "PAPER-E1", "tradingsymbol": "NIFTY26JUN22600CE", "transaction_type": "BUY", "status": "COMPLETE"},
+                {"order_id": "PAPER-T1", "tradingsymbol": "NIFTY26JUN22600CE", "transaction_type": "SELL", "status": "OPEN"},
+                {"order_id": "PAPER-S1", "tradingsymbol": "NIFTY26JUN22600CE", "transaction_type": "SELL", "status": "OPEN"},
+            ]
+            service.paper_lifecycle.active_trades = [{
+                "trade_id": "OA-PAPER-RESTORE",
+                "status": "OCO_ACTIVE",
+                "tradingsymbol": "NIFTY26JUN22600CE",
+                "entry_order_id": "PAPER-E1",
+                "target_order_id": "PAPER-T1",
+                "stoploss_order_id": "PAPER-S1",
+            }]
+            service.session.status = "PAPER_TRADE_ACTIVE"
+            service._persist_runtime_state_locked("paper_market_processed")
+
+            restored = OptionsAutoTerminalService(temp_dir)
+
+            self.assertEqual(restored.paper_broker.starting_balance, 10000)
+            self.assertEqual(restored.paper_broker.available_balance, 4700)
+            self.assertEqual(len(restored.paper_broker.orders), 3)
+            self.assertEqual(len(restored.paper_lifecycle.active_trades), 1)
+
+    def test_incoherent_persisted_paper_lifecycle_does_not_block_new_balance(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = os.path.join(temp_dir, "options_auto")
+            os.makedirs(state_dir, exist_ok=True)
+            with open(os.path.join(state_dir, "runtime_state.json"), "w", encoding="utf-8") as handle:
+                json.dump({
+                    "saved_at": datetime.now().isoformat(timespec="seconds"),
+                    "reason": "stop_live_scan",
+                    "session": {"status": "BACKTEST_COMPLETE", "active_trades": []},
+                    "paper_lifecycle": {
+                        "active_trades": [{
+                            "trade_id": "OA-PAPER-STALE",
+                            "status": "OCO_ACTIVE",
+                            "tradingsymbol": "NIFTY26JUN22600CE",
+                            "entry_order_id": "PAPER-MISSING-E1",
+                            "target_order_id": "PAPER-MISSING-T1",
+                            "stoploss_order_id": "PAPER-MISSING-S1",
+                        }],
+                        "pending_entries": [],
+                        "closed_trades": [],
+                        "account": {"opening_balance": 20000, "available_balance": 20000, "orders": []},
+                    },
+                }, handle)
+
+            service = OptionsAutoTerminalService(temp_dir)
+            status = service.configure({"mode": MODE_PAPER, "paper_starting_balance": 10000})
+
+            self.assertFalse(service._paper_lifecycle_active())
+            self.assertEqual(status["paper_account"]["opening_balance"], 10000)
+            self.assertEqual(status["paper_account"]["available_balance"], 10000)
+            with open(os.path.join(state_dir, "runtime_state.json"), "r", encoding="utf-8") as handle:
+                persisted = json.load(handle)
+            self.assertEqual(persisted["settings"]["paper_starting_balance"], 10000.0)
+            self.assertEqual(persisted["paper_account"]["opening_balance"], 10000.0)
+            self.assertFalse(persisted["paper_lifecycle"]["active_trades"])
+
     def test_paper_live_stream_builds_candles_enters_exits_and_scans_next_lock_with_timing(self):
         client = StreamingOptionsZerodha("PAPER")
         timings = {}
@@ -507,6 +679,85 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
 
         self.assertLess(timings["real_order_ms"], 2500)
         print("OPTIONS_AUTO_REAL_HARD_TIMING", json.dumps({key: round(value, 2) for key, value in timings.items()}, sort_keys=True))
+
+    def test_start_real_engine_scans_first_then_places_real_buy_on_valid_setup(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+
+            started = service.start_real_engine(payload)
+            self.assertTrue(started["real_engine_started"], started.get("blockers"))
+            self.assertEqual(len(client.limit_orders), 0)
+
+            with service._lock:
+                cycle = service._run_live_scan_cycle_locked()
+            service.stop_live_scan({"mode": MODE_REAL})
+
+        action = cycle["live_scan_action"]
+        self.assertEqual(action["action"], "REAL_ENTRY_ORDER_SENT")
+        self.assertEqual(action["orders_sent"], 1)
+        self.assertEqual(len(client.limit_orders), 1)
+        self.assertEqual(client.limit_orders[0]["transaction_type"], "BUY")
+        self.assertEqual(service.session.status, "REAL_STOPPED")
+
+    def test_real_live_scan_clears_stale_lifecycle_when_broker_is_flat(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            service.real_lifecycle.submit_entry(
+                {
+                    "order_id": "STALE-REAL-ENTRY",
+                    "tradingsymbol": "NIFTY26JUN22500CE",
+                    "exchange": "NFO",
+                    "transaction_type": "BUY",
+                    "quantity": 50,
+                    "price": 100,
+                    "status": "OPEN",
+                },
+                {"tradingsymbol": "NIFTY26JUN22500CE", "quantity": 50, "entry_price": 100},
+                live_settings(MODE_REAL),
+            )
+            service.session.status = "REAL_ENTRY_ORDER_OPEN"
+
+            started = service.start_real_engine(payload)
+            self.assertTrue(started["real_engine_started"], started.get("blockers"))
+            with service._lock:
+                cycle = service._run_live_scan_cycle_locked()
+            service.stop_live_scan({"mode": MODE_REAL})
+
+        self.assertEqual(cycle["live_scan_action"]["action"], "REAL_ENTRY_ORDER_SENT")
+        self.assertEqual(len(client.limit_orders), 1)
+        self.assertNotEqual(client.limit_orders[0].get("order_id"), "STALE-REAL-ENTRY")
+
+    def test_real_live_scan_does_not_clear_lifecycle_when_broker_order_is_open(self):
+        client = StreamingOptionsZerodha("REAL")
+        open_order = {
+            "order_id": "LIVE-REAL-ENTRY",
+            "tradingsymbol": "NIFTY26JUN22500CE",
+            "exchange": "NFO",
+            "transaction_type": "BUY",
+            "quantity": 50,
+            "price": 100,
+            "status": "OPEN",
+        }
+        client._orders = [dict(open_order)]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            service.real_lifecycle.submit_entry(open_order, {"tradingsymbol": open_order["tradingsymbol"], "quantity": 50, "entry_price": 100}, live_settings(MODE_REAL))
+            service.session.status = "REAL_ENTRY_ORDER_OPEN"
+
+            started = service.start_real_engine(payload)
+            self.assertTrue(started["real_engine_started"], started.get("blockers"))
+            with service._lock:
+                cycle = service._run_live_scan_cycle_locked()
+            service.stop_live_scan({"mode": MODE_REAL})
+
+        self.assertEqual(cycle["live_scan_action"]["action"], "HOLD")
+        self.assertEqual(cycle["live_scan_action"]["reason"], "Real entry lifecycle is already active. New real entries are blocked.")
+        self.assertEqual(len(client.limit_orders), 0)
 
     def test_real_websocket_fill_places_target_and_stoploss_from_actual_fill(self):
         client = StreamingOptionsZerodha("REAL")

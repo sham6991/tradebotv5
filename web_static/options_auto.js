@@ -7,6 +7,7 @@ const state = {
   status: {},
   lastResult: {},
   lastBacktest: {},
+  lastShadowResult: {},
   lastShadowReport: {},
   lastReplay: {},
   pendingApprovalId: "",
@@ -501,7 +502,7 @@ function renderCockpitSafety(result = state.status || state.lastResult) {
     checklistRow("Real money armed", mode !== "REAL" || account.real?.connected, mode === "REAL" ? "Real connection required" : "Paper/shadow/backtest"),
   ].join(""));
   renderDangerBanner(lifecycle, blockers, lock);
-  renderLifecycleTimeline(lifecycle);
+  renderLifecycleTimeline(lifecycle, currentLiveDecisionFromState());
   renderContractCards(lock);
   renderRealWorkflow(canTrade, blockers);
 }
@@ -525,13 +526,13 @@ function renderDangerBanner(lifecycle = {}, blockers = [], lock = {}) {
   ].join("");
 }
 
-function renderLifecycleTimeline(lifecycle = {}) {
+function renderLifecycleTimeline(lifecycle = {}, currentDecision = {}) {
   const stateText = String(lifecycle.state || "IDLE").toUpperCase();
   const protectedState = String(lifecycle.protected_state || "FLAT").toUpperCase();
   setBadge("#oa-lifecycle-stage", protectedState || stateText, /FAILED|UNPROTECTED|RECONCILIATION/.test(`${stateText} ${protectedState}`) ? "red" : /ACTIVE|OCO|FLAT/.test(`${stateText} ${protectedState}`) ? "green" : "yellow");
   const steps = [
-    ["Waiting for signal", !state.lastResult.allowed],
-    ["Signal accepted", Boolean(state.lastResult.allowed)],
+    ["Waiting for signal", !currentDecision.allowed],
+    ["Signal accepted", Boolean(currentDecision.allowed)],
     ["Entry submitted", /ENTRY|PROTECTION|OCO|TARGET|SL|EXIT|UNPROTECTED/.test(stateText)],
     ["Entry open", /ENTRY_ORDER_OPEN/.test(stateText)],
     ["Entry partial", /ENTRY_PARTIAL/.test(stateText)],
@@ -677,6 +678,38 @@ function sessionDisplayState(mode = "PAPER", result = {}) {
   };
 }
 
+function currentLiveDecisionFromState() {
+  const statusDecision = state.status.session?.last_decision || {};
+  if (isCurrentLiveDecision(statusDecision, state.status)) {
+    return hydrateStatusDecision(state.status);
+  }
+  if (isCurrentLiveDecision(state.lastResult, state.lastResult)) {
+    return state.lastResult;
+  }
+  return {};
+}
+
+function isCurrentLiveDecision(decision = {}, payload = {}) {
+  if (!decision || typeof decision !== "object" || !Object.keys(decision).length) return false;
+  const mode = tradingModeFromState(payload);
+  if (!liveSessionStarted(mode, payload)) return false;
+  const decisionMode = String(decision.mode || payload.mode || payload.settings?.mode || "").toUpperCase();
+  if (["BACKTEST", "SHADOW", "REPLAY"].includes(decisionMode)) return false;
+  if (decisionMode && (decisionMode === "REAL" ? "REAL" : "PAPER") !== mode) return false;
+  const startedAt = payload.live_scan?.started_at || state.status.live_scan?.started_at || "";
+  const decisionAt = decision.timestamp || decision.generated_at || decision.datetime || "";
+  if (startedAt && !decisionAt) return false;
+  if (startedAt && !isTimestampAtOrAfter(decisionAt, startedAt, 1000)) return false;
+  return true;
+}
+
+function isTimestampAtOrAfter(value, lowerBound, toleranceMs = 0) {
+  const observed = Date.parse(value);
+  const threshold = Date.parse(lowerBound);
+  if (!Number.isFinite(observed) || !Number.isFinite(threshold)) return false;
+  return observed + toleranceMs >= threshold;
+}
+
 function isPaperLifecycleActive(lifecycle = {}) {
   return Boolean(
     lifecycle.pending_approval
@@ -814,10 +847,14 @@ function realizedPnl() {
 
 // dashboard rendering
 function renderDashboard() {
-  const result = state.lastResult || {};
-  const session = sessionDisplayState(tradingModeFromState(result), result);
+  const session = sessionDisplayState(tradingModeFromState(state.status), state.status);
   if (!session.running) {
-    renderDashboardIdle(session, result);
+    renderDashboardIdle(session, {});
+    return;
+  }
+  const result = currentLiveDecisionFromState();
+  if (!Object.keys(result).length) {
+    renderDashboardWaiting(session);
     return;
   }
   const cue = result.market_cue || {};
@@ -933,6 +970,49 @@ function renderDashboardIdle(session, result = {}) {
   });
   renderList("#oa-events", [], "No current live session events.");
   setHtml("#oa-dashboard-alerts", alertHtml(message, session.connected ? "warning" : "danger"));
+}
+
+function renderDashboardWaiting(session) {
+  const message = `${session.modeLabel} engine is running. Waiting for the next current live scan decision.`;
+  setBadge("#oa-dashboard-cue-badge", "SCANNING", "yellow");
+  setText("#oa-cue", "-");
+  setText("#oa-cue-score", "-");
+  setText("#oa-cue-confidence", "-");
+  setText("#oa-cue-updated", "-");
+  setText("#oa-cue-reason", message);
+  renderFiiDiiStatus(state.fiiDiiStatus || state.status.fii_dii || {});
+
+  setBadge("#oa-regime-side", "WAIT", "grey");
+  setText("#oa-regime", "-");
+  setText("#oa-regime-confidence", "-");
+  setText("#oa-regime-aggression", "-");
+  setText("#oa-regime-block", message);
+
+  setBadge("#oa-health-badge", "SCANNING", "yellow");
+  setText("#oa-session-health", "-");
+  setText("#oa-bot-health", "-");
+  setText("#oa-readiness-score", "-");
+  setBadge("#oa-new-entries", "NO", "yellow");
+  setText("#oa-cooldown", "Cooldown: 0 sec");
+
+  setBadge("#oa-decision-badge", "WAIT", "grey");
+  setHtml("#oa-plan-body", [
+    row("Session", "RUNNING"),
+    row("Mode", session.modeLabel),
+    row("Decision", "WAIT"),
+    row("Next Step", message),
+  ].join(""));
+  renderList("#oa-blockers-list", [message], "Waiting for current scan decision.");
+  renderActiveTradeCard([]);
+  renderDataSourcePanel({
+    data_source: state.status.data_source || "UNKNOWN",
+    live_scan: state.status.live_scan || {},
+    options_data_health: state.status.options_live_feed?.health || {},
+    allowed: false,
+    next_action: message,
+  });
+  renderList("#oa-events", [], "No current live session events.");
+  setHtml("#oa-dashboard-alerts", alertHtml(message, "warning"));
 }
 
 function renderFiiDiiStatus(status = {}) {
@@ -1291,7 +1371,6 @@ async function runBacktest() {
     setTabAlert("backtest", "Running backtest...", "info");
     const result = await api("/api/options-auto/backtest/run", backtestPayload());
     state.lastBacktest = result;
-    state.lastResult = result;
     renderBacktestResults(result);
     renderTopStatus();
     setTabAlert("backtest", "Backtest complete.", "success");
@@ -1482,7 +1561,7 @@ function initShadowTab() {
 async function runShadowStart() {
   try {
     const result = await api("/api/options-auto/shadow/start", evaluationPayload("SHADOW"));
-    state.lastResult = result;
+    state.lastShadowResult = result;
     renderShadow(result);
     renderAll();
     setTabAlert("shadow", "Shadow mode running. No orders will be placed.", "success");
@@ -1502,7 +1581,7 @@ async function runShadowReport() {
   }
 }
 
-function renderShadow(result = state.lastResult) {
+function renderShadow(result = state.lastShadowResult) {
   const selected = result.selection?.selected || {};
   setHtml("#oa-shadow-status", [
     metric("Status", result.session?.status || "Idle"),
@@ -1548,7 +1627,8 @@ function initPaperTab() {
 async function runPaperStart() {
   try {
     const result = await api("/api/options-auto/paper/start", evaluationPayload("PAPER"));
-    state.lastResult = result;
+    state.status = result;
+    replaceLastResultFromStatus(result);
     renderAll();
     setTabAlert("paper", result.message || "Paper live scanner started.", "success");
   } catch (error) {
@@ -1846,7 +1926,8 @@ function realEnginePayload() {
 async function startRealEngine() {
   try {
     const result = await api("/api/options-auto/real/start-engine", { ...realEnginePayload(), market_open: true, instruments_valid: true });
-    state.lastResult = result;
+    state.status = result;
+    replaceLastResultFromStatus(result);
     renderAll();
     setTabAlert("real", result.real_engine_started ? "Real engine started. It will scan and place a guarded BUY when setup appears." : result.message || "Real engine blocked.", result.real_engine_started ? "success" : "warning");
   } catch (error) {
@@ -2371,8 +2452,7 @@ function replaceLastResultFromStatus(payload = {}) {
     state.lastResult = {};
     return;
   }
-  const mode = String(payload.live_scan?.mode || payload.settings?.mode || payload.mode || "PAPER").toUpperCase() === "REAL" ? "REAL" : "PAPER";
-  state.lastResult = liveSessionStarted(mode, payload) ? hydrateStatusDecision(payload) : {};
+  state.lastResult = isCurrentLiveDecision(decision, payload) ? hydrateStatusDecision(payload) : {};
 }
 
 async function loadDefaults() {

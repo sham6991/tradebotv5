@@ -1283,6 +1283,7 @@ class OptionsAutoTerminalService:
         self._live_scan_last_error = ""
         self._live_scan_cycle_count = 0
         self.session.status = status
+        self.session.last_decision = {}
         stop_event = self._live_scan_stop
         self._live_scan_thread = threading.Thread(target=self._live_scan_loop, args=(stop_event,), daemon=True)
         self._live_scan_thread.start()

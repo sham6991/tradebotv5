@@ -516,6 +516,24 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
         self.assertLess(timings["next_scan_ms"], 1500)
         print("OPTIONS_AUTO_PAPER_HARD_TIMING", json.dumps({key: round(value, 2) for key, value in timings.items()}, sort_keys=True))
 
+    def test_start_paper_clears_previous_session_decision_before_first_live_scan(self):
+        client = StreamingOptionsZerodha("PAPER")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            service.session.last_decision = {
+                "mode": MODE_PAPER,
+                "timestamp": "2026-06-08T09:59:00",
+                "allowed": True,
+                "trade_plan": {"tradingsymbol": "STALE-PAPER-TRADE"},
+                "selection": {"selected": {"tradingsymbol": "STALE-PAPER-TRADE"}},
+            }
+
+            started = service.start_paper(live_payload(MODE_PAPER))
+            service._live_scan_stop.set()
+
+            self.assertEqual(started["session"]["last_decision"], {})
+            self.assertEqual(service.session.last_decision, {})
+
     def test_paper_live_scan_processes_pending_and_active_trade_from_locked_quote(self):
         client = StreamingOptionsZerodha("PAPER")
         with tempfile.TemporaryDirectory() as temp_dir:

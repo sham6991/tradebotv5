@@ -564,6 +564,148 @@ class OptionsAutoUiRenderContractTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_running_dashboard_rejects_backtest_and_previous_session_decisions(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not available")
+
+        source = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        script = textwrap.dedent(
+            f"""
+            const nodes = {{}};
+            function makeNode(tagName = "DIV") {{
+              return {{
+                tagName,
+                innerHTML: "",
+                textContent: "",
+                disabled: false,
+                dataset: {{}},
+                value: "",
+                checked: false,
+                className: "",
+                classList: {{ add() {{}}, remove() {{}}, toggle() {{}} }},
+                addEventListener() {{}},
+              }};
+            }}
+            [
+              "#oa-dashboard-cue-badge",
+              "#oa-cue",
+              "#oa-cue-score",
+              "#oa-cue-confidence",
+              "#oa-cue-updated",
+              "#oa-cue-reason",
+              "#oa-fii-dii-badge",
+              "#oa-fii-dii-status",
+              "#oa-fii-dii-note",
+              "#oa-regime-side",
+              "#oa-regime",
+              "#oa-regime-confidence",
+              "#oa-regime-aggression",
+              "#oa-regime-block",
+              "#oa-health-badge",
+              "#oa-session-health",
+              "#oa-bot-health",
+              "#oa-readiness-score",
+              "#oa-new-entries",
+              "#oa-cooldown",
+              "#oa-decision-badge",
+              "#oa-plan-body",
+              "#oa-blockers-list",
+              "#oa-active-trade-badge",
+              "#oa-active-trade-body",
+              "#oa-trade-timeline",
+              "#oa-data-source-badge",
+              "#oa-demo-banner",
+              "#oa-data-source-panel",
+              "#oa-events",
+              "#oa-dashboard-alerts",
+            ].forEach(id => nodes[id] = makeNode());
+            globalThis.document = {{
+              visibilityState: "visible",
+              querySelector(selector) {{ return nodes[selector] || null; }},
+              querySelectorAll() {{ return []; }},
+              addEventListener() {{}},
+            }};
+            globalThis.window = {{
+              setInterval() {{}},
+              crypto: {{ randomUUID() {{ return "test-id"; }} }},
+            }};
+            {source}
+
+            const account = {{ paper: {{ connected: true }}, real: {{ connected: false }} }};
+            const liveScan = {{ running: true, mode: "PAPER", started_at: "2026-06-08T10:00:00", last_cycle: "2026-06-08T10:02:00", cycle_count: 4 }};
+            state.status = {{
+              settings: {{ mode: "PAPER" }},
+              account_status: account,
+              live_scan: liveScan,
+              session: {{
+                active_trades: [],
+                last_decision: {{
+                  mode: "PAPER",
+                  timestamp: "2026-06-08T09:59:30",
+                  allowed: true,
+                  selection: {{ selected: {{ tradingsymbol: "OLD-LIVE-CE" }}, side: "CE" }},
+                  trade_plan: {{ tradingsymbol: "OLD-LIVE-CE", entry_price: 100, target: 120, stoploss: 90, quantity: 50 }},
+                }},
+              }},
+            }};
+            state.lastResult = {{
+              mode: "BACKTEST",
+              timestamp: "2026-06-08T10:01:00",
+              allowed: true,
+              selection: {{ selected: {{ tradingsymbol: "OLD-BACKTEST-CE" }}, side: "CE" }},
+              trade_plan: {{ tradingsymbol: "OLD-BACKTEST-CE", entry_price: 88, target: 110, stoploss: 80, quantity: 50 }},
+            }};
+            renderDashboard();
+            let dashboardHtml = Object.values(nodes).map(node => node.innerHTML + " " + node.textContent).join("\\n");
+            if (dashboardHtml.includes("OLD-LIVE-CE") || dashboardHtml.includes("OLD-BACKTEST-CE")) {{
+              throw new Error("Dashboard rendered stale trade while waiting for current scan: " + dashboardHtml);
+            }}
+            if (!dashboardHtml.includes("Waiting for the next current live scan decision")) {{
+              throw new Error("Dashboard did not explain current scan wait state: " + dashboardHtml);
+            }}
+
+            state.status.session.last_decision = {{
+              mode: "PAPER",
+              timestamp: "2026-06-08T10:02:01",
+              allowed: false,
+              blockers: ["Contracts are not locked"],
+              market_cue: {{ cue: "WAIT", recommended_side: "WAIT" }},
+              regime: {{ recommended_side: "WAIT", no_trade_reason: "No setup" }},
+              selection: {{ selected: {{}}, side: "WAIT" }},
+              trade_plan: {{}},
+            }};
+            renderDashboard();
+            dashboardHtml = Object.values(nodes).map(node => node.innerHTML + " " + node.textContent).join("\\n");
+            if (dashboardHtml.includes("OLD-LIVE-CE") || dashboardHtml.includes("OLD-BACKTEST-CE")) {{
+              throw new Error("Dashboard rendered stale trade after current blocked scan: " + dashboardHtml);
+            }}
+            if (!nodes["#oa-plan-body"].innerHTML.includes("Contracts are not locked")) {{
+              throw new Error("Dashboard did not render current blocked scan reason: " + nodes["#oa-plan-body"].innerHTML);
+            }}
+
+            state.status.session.last_decision = {{
+              mode: "PAPER",
+              timestamp: "2026-06-08T10:03:00",
+              allowed: true,
+              market_cue: {{ cue: "bullish", recommended_side: "CE" }},
+              regime: {{ recommended_side: "CE", regime: "bullish" }},
+              selection: {{ selected: {{ tradingsymbol: "CURRENT-LIVE-CE", name: "NIFTY", expiry: "2026-06-09", strike: 22600, ltp: 100 }}, side: "CE", score: 75 }},
+              trade_plan: {{ tradingsymbol: "CURRENT-LIVE-CE", entry_price: 100, target: 120, stoploss: 90, quantity: 50 }},
+            }};
+            renderDashboard();
+            dashboardHtml = Object.values(nodes).map(node => node.innerHTML + " " + node.textContent).join("\\n");
+            if (!dashboardHtml.includes("CURRENT-LIVE-CE")) throw new Error("Dashboard missed current live trade: " + dashboardHtml);
+            if (dashboardHtml.includes("OLD-LIVE-CE") || dashboardHtml.includes("OLD-BACKTEST-CE")) {{
+              throw new Error("Dashboard mixed stale and current trades: " + dashboardHtml);
+            }}
+            """
+        )
+
+        result = self._run_node_script(node, script)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def _node_script(self, source: str, payload: dict, *, expected_symbol: str, status_summary: dict | None = None) -> str:
         status_setup = ""
         if status_summary is not None:

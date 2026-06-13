@@ -176,9 +176,10 @@ def candle_shape(frame: pd.DataFrame) -> pd.DataFrame:
 
 
 def relative_volume(frame: pd.DataFrame, period: int = 20) -> pd.Series:
-    volume = _series(frame, "volume", 0.0)
-    average = volume.rolling(int(period), min_periods=1).mean().replace(0, pd.NA)
-    return (volume / average).fillna(0.0)
+    volume = _series(frame, "volume", 0.0).astype("float64")
+    average = volume.rolling(int(period), min_periods=1).mean().mask(lambda values: values == 0)
+    result = volume / average
+    return pd.to_numeric(result, errors="coerce").fillna(0.0).astype("float64")
 
 
 def bid_ask_spread_pct(bid: Any, ask: Any, ltp: Any = None) -> float:

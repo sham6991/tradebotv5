@@ -1,9 +1,10 @@
 import unittest
+import warnings
 
 import pandas as pd
 
 from options_auto.indicators.option_metrics import intrinsic_value, moneyness
-from options_auto.indicators.technicals import enrich_technicals, market_depth_imbalance
+from options_auto.indicators.technicals import enrich_technicals, market_depth_imbalance, relative_volume
 
 
 class OptionsAutoIndicatorsTests(unittest.TestCase):
@@ -32,6 +33,18 @@ class OptionsAutoIndicatorsTests(unittest.TestCase):
 
     def test_depth_imbalance_handles_missing_depth(self):
         self.assertEqual(market_depth_imbalance("", None), 0.0)
+
+    def test_relative_volume_handles_object_volume_without_future_warning(self):
+        frame = pd.DataFrame({"volume": pd.Series(["100", "0", None, "200"], dtype="object")})
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", FutureWarning)
+            values = relative_volume(frame, period=2)
+
+        future_warnings = [warning for warning in caught if issubclass(warning.category, FutureWarning)]
+        self.assertEqual(future_warnings, [])
+        self.assertEqual(str(values.dtype), "float64")
+        self.assertEqual(values.tolist(), [1.0, 0.0, 0.0, 2.0])
 
 
 if __name__ == "__main__":

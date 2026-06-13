@@ -21,6 +21,8 @@ class OptionsAutoWebRoutes:
         return path.startswith("/api/options-auto")
 
     def handle_get(self, handler, path: str, _parsed):
+        if path.startswith("/api/options-auto"):
+            self._sync_connection_state()
         if path == "/options-auto":
             return handler.send_static_file("options_auto.html")
         if path == "/api/options-auto/defaults":
@@ -38,6 +40,7 @@ class OptionsAutoWebRoutes:
         return handler.send_json({"error": "Options Auto route not found"}, status=404)
 
     def handle_post(self, handler, path: str, payload: dict):
+        self._sync_connection_state()
         if path == "/api/options-auto/configure":
             return handler.send_json(self._with_account_status(self.service.configure(payload, self._profile_for_payload(payload))))
         if path == "/api/options-auto/evaluate":
@@ -143,6 +146,9 @@ class OptionsAutoWebRoutes:
         return handler.send_json({"error": "Options Auto route not found"}, status=404)
 
     def account_status(self) -> dict:
+        return self._account_status_snapshot()
+
+    def _account_status_snapshot(self) -> dict:
         paper = self.app_state.connection_status("PAPER")
         live = self.app_state.connection_status("LIVE")
         return {
@@ -154,9 +160,15 @@ class OptionsAutoWebRoutes:
             "mode_lock": self._mode_lock(paper, live),
         }
 
+    def _sync_connection_state(self) -> dict:
+        account = self._account_status_snapshot()
+        if hasattr(self.service, "sync_main_app_connection_state"):
+            self.service.sync_main_app_connection_state(account)
+        return account
+
     def _with_account_status(self, payload: dict) -> dict:
         payload = _redact_sensitive(dict(payload))
-        payload["account_status"] = self.account_status()
+        payload["account_status"] = self._sync_connection_state()
         return payload
 
     def ui_summary(self) -> dict:
@@ -187,7 +199,7 @@ class OptionsAutoWebRoutes:
         if mode == "REAL" and not real_connected:
             blockers.append("Real money locked")
         if mode != "REAL" and not paper_connected:
-            blockers.append("Paper data Zerodha not connected")
+            blockers.append("Paper Zerodha data connection not connected")
         if selected_connected and not session_started:
             blockers.append("Session not started")
         if feed_stale:
@@ -278,7 +290,8 @@ class OptionsAutoWebRoutes:
         if blockers:
             return [f"{self.app_state.auth_label(blockers[0])} is already connected."]
         if require_connection and not self.app_state.connection_status(requested_mode).get("connected"):
-            return [f"Connect {self.app_state.auth_label(requested_mode)} before Options Auto real dry-run."]
+            action = "real trading" if requested_mode == "LIVE" else "paper trading"
+            return [f"Connect {self.app_state.auth_label(requested_mode)} before Options Auto {action}."]
         return []
 
 

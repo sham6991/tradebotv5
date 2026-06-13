@@ -140,6 +140,10 @@ class OptionsAutoTerminalService:
         self._last_event_scan_epoch = 0.0
         self._reference_cache: dict[str, Any] = {}
         self._feature_cache: dict[str, Any] = {"key": "", "features": {}, "hits": 0, "misses": 0}
+        self._last_main_app_live_connected: bool | None = None
+        self._last_main_app_paper_connected: bool | None = None
+        self._live_disconnect_active = False
+        self._last_live_disconnect_reason = ""
         self._runtime_state_loaded_from = ""
         self._runtime_state_last_saved_at = ""
         self._runtime_state_last_save_epoch = 0.0
@@ -199,6 +203,93 @@ class OptionsAutoTerminalService:
 
     def latency_snapshot(self) -> dict[str, Any]:
         return self.latency.snapshot()
+
+    def sync_main_app_connection_state(self, account_status: dict[str, Any] | None = None) -> dict[str, Any]:
+        account_status = dict(account_status or {})
+        real = dict(account_status.get("real") or {})
+        paper = dict(account_status.get("paper") or {})
+        live_connected = bool(real.get("connected"))
+        paper_connected = bool(paper.get("connected"))
+        with self._lock:
+            previous_live = self._last_main_app_live_connected
+            self._last_main_app_live_connected = live_connected
+            self._last_main_app_paper_connected = paper_connected
+            if not live_connected and not self._live_disconnect_active and (previous_live is True or self._real_runtime_touched_locked()):
+                self._handle_live_disconnect_locked("LIVE Zerodha disconnected in Main App.")
+            elif live_connected and self._live_disconnect_active:
+                self._handle_live_reconnect_locked()
+            return {
+                "paper_connected": paper_connected,
+                "live_connected": live_connected,
+                "live_disconnect_active": self._live_disconnect_active,
+                "last_live_disconnect_reason": self._last_live_disconnect_reason,
+            }
+
+    def _handle_live_disconnect_locked(self, reason: str) -> None:
+        reason = reason or "LIVE Zerodha disconnected in Main App."
+        self._live_disconnect_active = True
+        self._last_live_disconnect_reason = reason
+        was_real_runtime = self._real_runtime_touched_locked()
+        if self._live_scan_mode == MODE_REAL or self._options_ws_mode == MODE_REAL:
+            self._stop_live_scan_locked(reason=reason)
+        self._live_scan_last_error = reason
+        self._options_ws_last_error = reason
+        self.options_live_feed.mark_websocket_disconnected(reason)
+        self.real_api_manager.client = None
+        if was_real_runtime:
+            self.real_controller.enter_safe_mode("MAIN_APP", reason)
+        self.real_controller.state.last_preflight = self._connection_preflight_result_locked("REAL_DISCONNECTED", reason)
+        if was_real_runtime or str(self.session.status or "").upper().startswith("REAL"):
+            self.session.status = "REAL_DISCONNECTED"
+            self.session.record_safety_event("LIVE Zerodha disconnected; real execution stopped", {"reason": reason})
+        if getattr(self.real_lifecycle, "state", "") and str(getattr(self.real_lifecycle, "state", "")).upper() != "IDLE":
+            self.real_lifecycle.safe_mode = True
+            if reason not in self.real_lifecycle.blockers:
+                self.real_lifecycle.blockers.append(reason)
+        self.logger.log("WARN", "Options Auto LIVE connection disconnected; real execution stopped", reason=reason)
+        self._persist_runtime_state_locked("live_connection_disconnected")
+
+    def _handle_live_reconnect_locked(self) -> None:
+        reason = "LIVE Zerodha reconnected. Run Real Preflight again before starting Real Engine."
+        self._live_disconnect_active = False
+        self._last_live_disconnect_reason = ""
+        self._live_scan_last_error = reason
+        self.real_controller.state.last_preflight = self._connection_preflight_result_locked("REAL_RECONNECTED_WAITING_PREFLIGHT", reason)
+        if str(self.session.status or "").upper() == "REAL_DISCONNECTED":
+            self.session.status = "REAL_RECONNECTED_WAITING_PREFLIGHT"
+        self.session.record_safety_event("LIVE Zerodha reconnected; real engine remains stopped", {"reason": reason})
+        self.logger.log("INFO", "Options Auto LIVE connection reconnected; waiting for preflight")
+        self._persist_runtime_state_locked("live_connection_reconnected")
+
+    def _real_runtime_touched_locked(self) -> bool:
+        status = str(self.session.status or "").upper()
+        return bool(
+            self._live_scan_mode == MODE_REAL
+            or self._options_ws_mode == MODE_REAL
+            or status.startswith("REAL")
+            or self._real_entry_or_position_active_locked()
+            or self.real_controller.state.last_preflight
+        )
+
+    def _connection_preflight_result_locked(self, state: str, reason: str) -> dict[str, Any]:
+        return {
+            "allowed": False,
+            "state": state,
+            "blockers": [reason],
+            "warnings": [],
+            "evidence": {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "mode": MODE_REAL,
+                "checks": {
+                    "client_connected": False,
+                    "real_mode_confirmed": bool(self.settings.get("confirm_real_mode")),
+                    "real_orders_enabled": False,
+                },
+            },
+            "dry_run_ready": False,
+            "real_orders_enabled": False,
+            "active_trade_count": len(list(self.session.active_trades or [])),
+        }
 
     def _record_latency_started(self, name: str, start: float, meta: dict[str, Any] | None = None) -> None:
         try:

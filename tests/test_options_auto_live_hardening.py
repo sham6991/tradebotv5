@@ -450,6 +450,35 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
             self.assertEqual(persisted["paper_account"]["opening_balance"], 10000.0)
             self.assertFalse(persisted["paper_lifecycle"]["active_trades"])
 
+    def test_live_disconnect_stops_real_runtime_and_invalidates_preflight(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            service.sync_main_app_connection_state({"real": {"connected": True}, "paper": {"connected": False}})
+            service._live_scan_mode = MODE_REAL
+            service._options_ws_mode = MODE_REAL
+            service._options_ws_tokens = (101, 102)
+            service.options_live_feed.mark_websocket_connected(True)
+            service.session.status = "REAL_SCANNING"
+            service.real_controller.state.last_preflight = {"allowed": True, "state": "REAL_PREFLIGHT_OK", "blockers": []}
+
+            disconnected = service.sync_main_app_connection_state({"real": {"connected": False}, "paper": {"connected": False}})
+
+            self.assertTrue(disconnected["live_disconnect_active"])
+            self.assertTrue(service._live_scan_stop.is_set())
+            self.assertFalse(service.options_live_feed.websocket_connected)
+            self.assertEqual(service.options_live_feed.snapshot(service.settings)["data_mode"], "DISCONNECTED")
+            self.assertEqual(service.session.status, "REAL_DISCONNECTED")
+            self.assertFalse(service.real_controller.state.last_preflight["allowed"])
+            self.assertIn("LIVE Zerodha disconnected", service.real_controller.state.last_preflight["blockers"][0])
+            self.assertTrue(service.real_controller.state.safe_mode)
+
+            reconnected = service.sync_main_app_connection_state({"real": {"connected": True}, "paper": {"connected": False}})
+
+            self.assertFalse(reconnected["live_disconnect_active"])
+            self.assertEqual(service.session.status, "REAL_RECONNECTED_WAITING_PREFLIGHT")
+            self.assertFalse(service.real_controller.state.last_preflight["allowed"])
+            self.assertIn("Run Real Preflight again", service.real_controller.state.last_preflight["blockers"][0])
+
     def test_paper_live_stream_builds_candles_enters_exits_and_scans_next_lock_with_timing(self):
         client = StreamingOptionsZerodha("PAPER")
         timings = {}

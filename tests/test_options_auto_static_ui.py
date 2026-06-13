@@ -60,6 +60,19 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertNotIn("real_orders_enabled: true", body)
         self.assertNotIn("real_auto_entry_enabled: true", body)
 
+    def test_real_preflight_and_settings_persistence_are_hydrated_from_status(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        self.assertIn("lastRealPreflight", js)
+        self.assertIn("function syncRealPreflightCache", js)
+        self.assertIn("function realPreflightResult", js)
+        self.assertIn("state.status.settings || settings", js)
+        self.assertIn("bindCheckboxMirror(\"#oa-auto\", \"#oa-auto-settings\")", js)
+        self.assertIn("syncSettingsToggles(\"paper\")", js)
+        self.assertIn("syncSettingsToggles(\"settings\")", js)
+        self.assertIn("Real Money Zerodha", js)
+        self.assertNotIn("Kite not connected", js)
+
     def test_raw_json_controls_stay_in_debug_tab(self):
         html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
         debug_index = html.index('id="oa-tab-debug"')

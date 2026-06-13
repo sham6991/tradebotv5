@@ -9,6 +9,7 @@ QUOTE_SNAPSHOT_POLLING = "QUOTE_SNAPSHOT_POLLING"
 DATA_STALE = "DATA_STALE"
 RECONNECTING = "RECONNECTING"
 BACKFILLING = "BACKFILLING"
+DISCONNECTED = "DISCONNECTED"
 
 
 class OptionsFeedHealth:
@@ -32,6 +33,10 @@ class OptionsFeedHealth:
     def mark_reconnecting(self, error: str = "") -> None:
         self.data_mode = RECONNECTING
         self.reconnect_attempts += 1
+        self.last_error = error
+
+    def mark_disconnected(self, error: str = "") -> None:
+        self.data_mode = DISCONNECTED
         self.last_error = error
 
     def mark_backfilling(self, missing: list[str] | None = None, status: str = "") -> None:
@@ -58,7 +63,7 @@ class OptionsFeedHealth:
                 "stale": is_stale,
             }
         stale = bool(stale_labels)
-        mode = DATA_STALE if stale else self.data_mode
+        mode = self.data_mode if self.data_mode == DISCONNECTED else DATA_STALE if stale else self.data_mode
         return {
             "data_mode": mode,
             "last_index_tick": self.last_ticks.get("INDEX", ""),
@@ -71,7 +76,7 @@ class OptionsFeedHealth:
             "missing_candles": list(self.missing_candles),
             "backfill_status": self.backfill_status,
             "last_error": self.last_error,
-            "new_entries_allowed": not stale or not bool(settings.get("pause_entries_on_feed_stale", True)),
+            "new_entries_allowed": self.data_mode != DISCONNECTED and (not stale or not bool(settings.get("pause_entries_on_feed_stale", True))),
         }
 
 

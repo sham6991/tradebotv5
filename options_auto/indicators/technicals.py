@@ -164,14 +164,14 @@ def candle_shape(frame: pd.DataFrame) -> pd.DataFrame:
     high = _series(frame, "high")
     low = _series(frame, "low")
     close = _series(frame, "close")
-    candle_range = (high - low).abs().replace(0, pd.NA)
+    candle_range = (high - low).abs().astype("float64").mask(lambda values: values == 0)
     body = (close - open_).abs()
     upper_wick = high - pd.concat([open_, close], axis=1).max(axis=1)
     lower_wick = pd.concat([open_, close], axis=1).min(axis=1) - low
     return pd.DataFrame({
-        "body_pct": (body / candle_range * 100).fillna(0.0),
-        "upper_wick_pct": (upper_wick / candle_range * 100).fillna(0.0),
-        "lower_wick_pct": (lower_wick / candle_range * 100).fillna(0.0),
+        "body_pct": pd.to_numeric(body / candle_range * 100, errors="coerce").fillna(0.0).astype("float64"),
+        "upper_wick_pct": pd.to_numeric(upper_wick / candle_range * 100, errors="coerce").fillna(0.0).astype("float64"),
+        "lower_wick_pct": pd.to_numeric(lower_wick / candle_range * 100, errors="coerce").fillna(0.0).astype("float64"),
     })
 
 

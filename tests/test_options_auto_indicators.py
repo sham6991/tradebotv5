@@ -18,11 +18,15 @@ class OptionsAutoIndicatorsTests(unittest.TestCase):
             "volume": [1000 + index * 10 for index in range(30)],
         })
 
-        enriched = enrich_technicals(frame)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", FutureWarning)
+            enriched = enrich_technicals(frame)
 
         for column in ("ema9", "ema20", "ema50", "vwap", "rsi14", "atr14", "relative_volume"):
             self.assertIn(column, enriched.columns)
         self.assertNotIn("oi_change", enriched.columns)
+        future_warnings = [warning for warning in caught if issubclass(warning.category, FutureWarning)]
+        self.assertEqual(future_warnings, [])
 
     def test_option_metrics_are_directional(self):
         self.assertEqual(intrinsic_value(22550, 22500, "CE"), 50)
@@ -49,4 +53,3 @@ class OptionsAutoIndicatorsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

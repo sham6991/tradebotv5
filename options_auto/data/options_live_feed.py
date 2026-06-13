@@ -46,6 +46,10 @@ class OptionsLiveFeed:
         self.websocket_connected = bool(connected)
         self.health.mark_mode(WEBSOCKET_TICKS if connected else QUOTE_SNAPSHOT_POLLING)
 
+    def mark_websocket_disconnected(self, reason: str = "") -> None:
+        self.websocket_connected = False
+        self.health.mark_disconnected(reason)
+
     def on_tick(self, tick: dict[str, Any], *, role: str, interval: str = "3minute", client: Any | None = None, underlying: str = "NIFTY", mode: str = "PAPER") -> dict[str, Any]:
         token = _token(tick.get("instrument_token") or tick.get("token"))
         role = str(role or self._token_roles.get(token) or "").upper()

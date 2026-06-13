@@ -6,6 +6,7 @@ const state = {
   defaults: {},
   status: {},
   lastResult: {},
+  lastRealPreflight: {},
   lastBacktest: {},
   lastShadowResult: {},
   lastShadowReport: {},
@@ -139,6 +140,20 @@ function text(input, fallback = "-") {
 function numberValue(input, fallback = 0) {
   const parsed = Number(input);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function checkedValue(selector, fallback = false) {
+  const node = $(selector);
+  return node ? Boolean(node.checked) : Boolean(fallback);
+}
+
+function pairedCheckboxValue(primarySelector, secondarySelector, fallback = false) {
+  const primary = $(primarySelector);
+  const secondary = $(secondarySelector);
+  if (state.activeTab === "settings" && secondary) return Boolean(secondary.checked);
+  if (primary) return Boolean(primary.checked);
+  if (secondary) return Boolean(secondary.checked);
+  return Boolean(fallback);
 }
 
 function money(input) {
@@ -298,6 +313,7 @@ function sampleReplayCandles() {
 // shared payload builders
 function settingsPayload(modeOverride = "") {
   const mode = modeOverride || ($("#oa-setting-mode")?.value || "PAPER");
+  const saved = state.status.settings || state.defaults.settings || {};
   const dryRunRealNode = $("#oa-dry-run-real");
   return {
     mode,
@@ -309,7 +325,7 @@ function settingsPayload(modeOverride = "") {
     entry_dependency_mode: normalizeEntryMode($("#oa-entry-mode")?.value || $("#oa-backtest-entry-mode")?.value),
     number_of_lots: numberValue($("#oa-lots")?.value || $("#oa-backtest-lots")?.value, 1),
     buy_score_threshold: numberValue($("#oa-score-threshold")?.value, 50),
-    paper_starting_balance: numberValue($("#oa-paper-balance")?.value, 20000),
+    paper_starting_balance: numberValue($("#oa-paper-balance")?.value, saved.paper_starting_balance ?? 20000),
     approval_timeout_seconds: numberValue($("#oa-approval-timeout")?.value, 30),
     max_capital_per_trade_pct: numberValue($("#oa-capital-pct")?.value, 20),
     max_daily_loss: numberValue($("#oa-max-daily-loss")?.value, 1000),
@@ -347,16 +363,16 @@ function settingsPayload(modeOverride = "") {
     max_buy_limit_modifications: numberValue($("#oa-max-mods")?.value, 2),
     sl_modify_throttle_seconds: numberValue($("#oa-sl-throttle")?.value, 10),
     slippage_buffer_points: numberValue($("#oa-slippage-buffer")?.value, 0.1),
-    ask_permission_before_entry: Boolean($("#oa-ask")?.checked || $("#oa-ask-settings")?.checked),
-    auto_entry_enabled: Boolean($("#oa-auto")?.checked || $("#oa-auto-settings")?.checked),
-    require_fii_dii_upload: Boolean($("#oa-require-fii-dii")?.checked),
+    ask_permission_before_entry: pairedCheckboxValue("#oa-ask", "#oa-ask-settings", saved.ask_permission_before_entry),
+    auto_entry_enabled: pairedCheckboxValue("#oa-auto", "#oa-auto-settings", saved.auto_entry_enabled),
+    require_fii_dii_upload: checkedValue("#oa-require-fii-dii", saved.require_fii_dii_upload),
     allow_demo_data: state.activeTab === "debug",
-    confirm_real_mode: Boolean($("#oa-confirm-real")?.checked),
-    static_ip_confirmed: Boolean($("#oa-static-ip")?.checked),
+    confirm_real_mode: checkedValue("#oa-confirm-real", saved.confirm_real_mode),
+    static_ip_confirmed: checkedValue("#oa-static-ip", saved.static_ip_confirmed),
     dry_run_real_only: dryRunRealNode ? Boolean(dryRunRealNode.checked) : true,
-    real_orders_enabled: Boolean($("#oa-real-orders-enabled")?.checked),
-    real_auto_entry_enabled: Boolean($("#oa-real-auto-entry")?.checked),
-    market_context_enforcement_enabled: Boolean($("#oa-market-context-enforced")?.checked),
+    real_orders_enabled: checkedValue("#oa-real-orders-enabled", saved.real_orders_enabled),
+    real_auto_entry_enabled: checkedValue("#oa-real-auto-entry", saved.real_auto_entry_enabled),
+    market_context_enforcement_enabled: checkedValue("#oa-market-context-enforced", saved.market_context_enforcement_enabled),
   };
 }
 
@@ -511,7 +527,8 @@ function renderCockpitSafety(result = state.status || state.lastResult) {
   const dataHealthy = !(feedHealth.stale || feedHealth.feed_stale) && !status.live_scan?.blocked;
   const governor = result.governor || {};
   const blockers = [];
-  if (!connected) blockers.push(`${isReal ? "Real" : "Paper"} Kite not connected`);
+  const connectionLabel = isReal ? "Real Money Zerodha" : "Paper Zerodha data";
+  if (!connected) blockers.push(`${connectionLabel} not connected`);
   if (connected && !session.running) blockers.push("Session not started");
   if (isReal && !account.real?.connected) blockers.push("Real money is locked");
   if (!dataHealthy) blockers.push("Feed is waiting or stale");
@@ -611,6 +628,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
   const currentReal = isCurrentRealProcessActive(state.status);
   const lifecycle = currentReal ? (state.status.real_order_lifecycle || {}) : {};
   const lock = contractLockFromState({ liveOnly: true });
+  const preflight = realPreflightResult();
   const steps = [
     ["Connect real Zerodha in main app", connected],
     ["Verify access token", connected],
@@ -619,7 +637,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
     ["Check margin", Boolean(account.real_margin || account.real?.funds)],
     ["Check feed freshness", !((state.status.options_live_feed?.health || {}).stale || (state.status.options_live_feed?.health || {}).feed_stale)],
     ["Check spread/depth", true],
-    ["Run real preflight", Boolean(state.lastResult.preflight || state.lastResult.evidence)],
+    ["Run real preflight", hasRealPreflightResult(preflight)],
     ["Run real dry run", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
     ["Arm real trading", connected && Boolean($("#oa-confirm-real")?.checked)],
     ["Start real engine", state.status.live_scan?.running && state.status.live_scan?.mode === "REAL"],
@@ -629,6 +647,32 @@ function renderRealWorkflow(canTrade, blockers = []) {
   ];
   setBadge("#oa-real-workflow-badge", canTrade ? "READY" : "BLOCKED", canTrade ? "green" : "yellow");
   setHtml("#oa-real-workflow", steps.map(([label, done]) => `<li class="${done ? "is-active" : ""}">${escapeHtml(label)}${!done && blockers[0] ? `<small>${escapeHtml(blockers[0])}</small>` : ""}</li>`).join(""));
+}
+
+function hasRealPreflightResult(result = {}) {
+  return Boolean(result && typeof result === "object" && (result.state || result.evidence?.timestamp || result.evidence?.checks));
+}
+
+function realPreflightResult(result = {}) {
+  if (hasRealPreflightResult(result)) return result;
+  if (hasRealPreflightResult(state.lastRealPreflight)) return state.lastRealPreflight;
+  const runtime = state.status.real_safety?.last_preflight || {};
+  if (hasRealPreflightResult(runtime)) return { ...runtime, account_status: state.status.account_status || {} };
+  if (hasRealPreflightResult(state.lastResult)) return state.lastResult;
+  return {};
+}
+
+function syncRealPreflightCache(payload = {}) {
+  const account = payload.account_status || {};
+  const sessionStatus = String(payload.session?.status || "").toUpperCase();
+  if (!account.real?.connected || sessionStatus === "REAL_DISCONNECTED") {
+    state.lastRealPreflight = {};
+    return;
+  }
+  const runtime = payload.real_safety?.last_preflight || {};
+  if (hasRealPreflightResult(runtime)) {
+    state.lastRealPreflight = { ...runtime, account_status: account };
+  }
 }
 
 function activeTradesFrom(result = {}, options = {}) {
@@ -660,6 +704,8 @@ function isLiveModeRunning(mode = "", result = {}) {
 }
 
 function selectedModeFromState(result = {}) {
+  if (state.activeTab === "real") return "REAL";
+  if (state.activeTab === "paper") return "PAPER";
   return String(
     state.status.settings?.mode
     || result.settings?.mode
@@ -695,6 +741,7 @@ function sessionDisplayState(mode = "PAPER", result = {}) {
   const connected = modeConnected(normalized, result);
   const running = liveSessionStarted(normalized, result);
   const modeLabel = normalized === "REAL" ? "Real Money" : "Paper";
+  const connectionLabel = normalized === "REAL" ? "Real Money Zerodha" : "Paper Zerodha data";
   return {
     mode: normalized,
     modeLabel,
@@ -702,7 +749,7 @@ function sessionDisplayState(mode = "PAPER", result = {}) {
     running,
     label: !connected ? "DISCONNECTED" : running ? "RUNNING" : "SESSION NOT STARTED",
     message: !connected
-      ? `${modeLabel} is not connected. Connect it in Main App.`
+      ? `${connectionLabel} is not connected. Connect it in Main App.`
       : `${modeLabel} connected. Start ${modeLabel} Engine to begin live scanning.`,
   };
 }
@@ -1739,6 +1786,8 @@ function renderShadowReport(report = state.lastShadowReport) {
 
 // paper rendering/actions
 function initPaperTab() {
+  bindCheckboxMirror("#oa-auto", "#oa-auto-settings");
+  bindCheckboxMirror("#oa-ask", "#oa-ask-settings");
   on("#oa-paper-start", "click", runPaperStart);
   on("#oa-paper-stop", "click", stopPaperEngine);
   on("#oa-paper-kill", "click", killSwitch);
@@ -1752,6 +1801,7 @@ function initPaperTab() {
 
 async function runPaperStart() {
   try {
+    syncSettingsToggles("paper");
     const result = await api("/api/options-auto/paper/start", evaluationPayload("PAPER"));
     state.status = result;
     replaceLastResultFromStatus(result);
@@ -1864,7 +1914,7 @@ async function processPaperMarket() {
 
 async function resetPaperBalance() {
   try {
-    syncSettingsToggles();
+    syncSettingsToggles("paper");
     const defaults = state.defaults.settings || {};
     const balance = numberValue($("#oa-paper-balance")?.value, defaults.paper_starting_balance || 20000);
     const result = await api("/api/options-auto/paper/reset-account", {
@@ -1874,6 +1924,7 @@ async function resetPaperBalance() {
     });
     state.status = result;
     state.lastResult = {};
+    applySettings(result.settings || state.status.settings || {});
     renderAll();
     setTabAlert("paper", "Paper account balance reset. Future paper sessions will continue from this ledger.", "success");
   } catch (error) {
@@ -1892,7 +1943,7 @@ function renderPaperAccount() {
   const scan = liveScanFromState(state.lastResult);
   setHtml("#oa-paper-account", [
     metric("Live Session", currentPaper ? (scan.running ? "RUNNING" : "POSITION/PENDING") : paperSession.label),
-    metric("Starting Balance", money(account.opening_balance || state.defaults.settings?.paper_starting_balance || 20000)),
+    metric("Starting Balance", money(account.opening_balance || state.status.settings?.paper_starting_balance || state.defaults.settings?.paper_starting_balance || 20000)),
     metric("Available Balance", money(account.available_balance || 0)),
     metric("Realized P&L", money(account.realized_pnl || 0)),
     metric("Unrealized P&L", money(account.unrealized_pnl || 0)),
@@ -2030,6 +2081,7 @@ async function runRealPreflight() {
   try {
     const result = await api("/api/options-auto/real/preflight", { ...evaluationPayload("REAL"), market_open: true, instruments_valid: true });
     state.lastResult = result;
+    state.lastRealPreflight = result;
     renderRealPreflight(result);
     renderAll();
     setTabAlert("real", result.allowed ? "Real preflight passed. Real orders remain guarded by final validation and execution safety." : "Real preflight blocked. Review checklist.", result.allowed ? "success" : "warning");
@@ -2110,7 +2162,8 @@ async function runEmergencyPlan() {
   }
 }
 
-function renderRealPreflight(result = state.lastResult) {
+function renderRealPreflight(result = {}) {
+  result = realPreflightResult(result);
   const account = result.account_status || state.status.account_status || {};
   const realConnected = Boolean(account.real?.connected);
   const paperConnected = Boolean(account.paper?.connected);
@@ -2227,7 +2280,7 @@ function renderReports() {
 // settings rendering/actions
 function initSettingsTab() {
   on("#oa-settings-save", "click", saveSettings);
-  on("#oa-settings-reset", "click", loadDefaults);
+  on("#oa-settings-reset", "click", () => loadDefaults({ resetControls: true }));
 }
 
 function initFiiDiiUpload() {
@@ -2254,10 +2307,11 @@ function initFiiDiiUpload() {
 
 async function saveSettings() {
   try {
-    syncSettingsToggles();
+    syncSettingsToggles("settings");
     const result = await api("/api/options-auto/configure", settingsPayload());
     state.status = result;
     state.lastResult = result;
+    applySettings(result.settings || state.status.settings || {});
     renderAll();
     setTabAlert("settings", "Settings saved for future Options Auto sessions.", "success");
   } catch (error) {
@@ -2265,9 +2319,28 @@ async function saveSettings() {
   }
 }
 
-function syncSettingsToggles() {
-  if ($("#oa-auto") && $("#oa-auto-settings")) $("#oa-auto").checked = $("#oa-auto-settings").checked;
-  if ($("#oa-ask") && $("#oa-ask-settings")) $("#oa-ask").checked = $("#oa-ask-settings").checked;
+function syncSettingsToggles(source = "") {
+  syncCheckboxPair("#oa-auto", "#oa-auto-settings", source === "settings");
+  syncCheckboxPair("#oa-ask", "#oa-ask-settings", source === "settings");
+}
+
+function syncCheckboxPair(primarySelector, secondarySelector, preferSecondary = false) {
+  const primary = $(primarySelector);
+  const secondary = $(secondarySelector);
+  if (!primary || !secondary) return;
+  const checked = preferSecondary ? secondary.checked : primary.checked;
+  primary.checked = checked;
+  secondary.checked = checked;
+}
+
+function bindCheckboxMirror(primarySelector, secondarySelector) {
+  const primary = $(primarySelector);
+  const secondary = $(secondarySelector);
+  if (!primary || !secondary || primary.dataset.oaMirrorBound) return;
+  primary.dataset.oaMirrorBound = "true";
+  secondary.dataset.oaMirrorBound = "true";
+  primary.addEventListener("change", () => { secondary.checked = primary.checked; });
+  secondary.addEventListener("change", () => { primary.checked = secondary.checked; });
 }
 
 function applySettings(settings) {
@@ -2507,6 +2580,7 @@ async function refresh(options = {}) {
     state.lastRefreshOkAt = Date.now();
     staleWarning?.classList.remove("is-visible");
     state.status = payload;
+    syncRealPreflightCache(payload);
     const backtestSummary = backtestSummaryFromStatus(payload);
     if (backtestSummary) state.lastBacktest = backtestSummary;
     replaceLastResultFromStatus(payload);
@@ -2579,7 +2653,8 @@ function replaceLastResultFromStatus(payload = {}) {
   state.lastResult = isCurrentLiveDecision(decision, payload) ? hydrateStatusDecision(payload) : {};
 }
 
-async function loadDefaults() {
+async function loadDefaults(options = {}) {
+  const resetControls = Boolean(options.resetControls);
   state.defaults = await api("/api/options-auto/defaults");
   const settings = state.defaults.settings || {};
   applySettings(settings);
@@ -2591,6 +2666,9 @@ async function loadDefaults() {
   if (instruments) instruments.value = JSON.stringify(sampleInstruments(), null, 2);
   if (quotes) quotes.value = JSON.stringify(sampleQuotes(), null, 2);
   await refresh({ full: true });
+  if (!resetControls) {
+    applySettings(state.status.settings || settings);
+  }
 }
 
 function initDashboard() {

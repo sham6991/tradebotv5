@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, time
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Any
 
@@ -11,6 +12,11 @@ class EntryTimingEngine:
         settings = dict(settings or {})
         blockers: list[str] = []
         warnings: list[str] = []
+
+        cutoff = _time_from(settings.get("no_new_trade_after"))
+        current = _time_from(settings.get("timestamp") or option_quote.get("timestamp") or candle.get("timestamp"))
+        if cutoff and current and current >= cutoff:
+            blockers.append("No new trades after configured cutoff.")
 
         signal_age = option_quote.get("signal_age_seconds", candle.get("signal_age_seconds"))
         if signal_age not in ("", None):
@@ -87,3 +93,22 @@ def _number(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _time_from(value: Any) -> time | None:
+    if isinstance(value, datetime):
+        return value.time()
+    if isinstance(value, time):
+        return value
+    text = str(value or "").strip()
+    if not text:
+        return None
+    for fmt in ("%H:%M:%S", "%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(text[:19], fmt).time()
+        except ValueError:
+            continue
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).time()
+    except ValueError:
+        return None

@@ -14,11 +14,13 @@ class TradeScoreEngine:
         regime = dict(context.get("regime") or {})
         market_cue = dict(context.get("market_cue") or {})
         theta = dict(candidate.get("theta_premium_risk") or context.get("theta_premium_risk") or {})
+        settings = dict(context.get("settings") or {})
+        news_weight = max(0.0, min(0.15, _number(settings.get("news_sentiment_weight"), 3.0) / 100.0))
 
         breakdown = {
             "regime_alignment": _regime_alignment_score(side, regime),
             "market_cue_alignment": _market_cue_alignment_score(side, market_cue, bool(context.get("reversal_setup_confirmed"))),
-            "trend_premium_momentum": _trend_premium_momentum_score(side, features, candidate),
+            "trend_premium_momentum": _trend_premium_momentum_score(side, features, candidate, settings),
             "vwap_ema_structure": _vwap_ema_structure_score(side, features),
             "volume_relative_volume": _volume_score(features.get("relative_volume", candidate.get("relative_volume"))),
             "option_liquidity_oi": _clamp(candidate.get("liquidity_score")),
@@ -36,14 +38,16 @@ class TradeScoreEngine:
             "option_liquidity_oi": 0.12,
             "spread_depth": 0.10,
             "volatility_theta_suitability": 0.06,
-            "news_sentiment": 0.03,
+            "news_sentiment": news_weight,
             "time_of_day_quality": 0.04,
         }
-        total = sum(breakdown[key] * weights[key] for key in weights)
+        weight_sum = sum(weights.values()) or 1.0
+        normalized_weights = {key: value / weight_sum for key, value in weights.items()}
+        total = sum(breakdown[key] * normalized_weights[key] for key in normalized_weights)
         return {
             "score": round(_clamp(total), 2),
             "breakdown": {key: round(value, 2) for key, value in breakdown.items()},
-            "weights": weights,
+            "weights": {key: round(value, 4) for key, value in normalized_weights.items()},
         }
 
 
@@ -81,9 +85,12 @@ def _market_cue_alignment_score(side: str, cue: dict[str, Any], reversal_setup_c
     return _clamp(cue.get("confidence"))
 
 
-def _trend_premium_momentum_score(side: str, features: dict[str, Any], candidate: dict[str, Any]) -> float:
+def _trend_premium_momentum_score(side: str, features: dict[str, Any], candidate: dict[str, Any], settings: dict[str, Any]) -> float:
     trend = _number(features.get("trend_strength_score"))
     index_component = max(0.0, trend) if side == SIDE_CE else max(0.0, -trend)
+    threshold = _number(settings.get("trend_strength_threshold"), 55.0)
+    if threshold > 0 and index_component < threshold:
+        index_component *= max(0.25, index_component / threshold)
     premium = _clamp(candidate.get("premium_momentum_score", candidate.get("momentum_score", 0)))
     return (index_component + premium) / 2.0
 

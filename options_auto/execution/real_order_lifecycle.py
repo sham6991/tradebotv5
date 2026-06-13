@@ -358,6 +358,8 @@ class RealOrderLifecycleEngine:
         }
 
     def _entry_timed_out(self, now: datetime, settings: dict[str, Any]) -> bool:
+        if not bool(settings.get("cancel_unfilled_entry_after_timeout", True)):
+            return False
         submitted = _dt(self.entry_order.get("submitted_at") or self.entry_order.get("placed_at"))
         if not submitted:
             return False

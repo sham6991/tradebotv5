@@ -185,7 +185,9 @@ class PaperLifecycleEngine:
         for pending in self.pending_entries:
             order = dict(pending["entry_order"])
             limit_price = float(order["price"])
-            if now_epoch > float(pending["expires_at_epoch"]):
+            pending_settings = dict((pending.get("decision") or {}).get("settings") or {})
+            timeout_cancel_enabled = bool(pending_settings.get("cancel_unfilled_entry_after_timeout", True))
+            if timeout_cancel_enabled and now_epoch > float(pending["expires_at_epoch"]):
                 self.broker.cancel_order(order["order_id"])
                 pending["status"] = "ENTRY_CANCELLED"
                 self.events.append({"timestamp": iso_now(), "event": "ENTRY_CANCELLED", "entry_id": pending["entry_id"], "reason": "timeout"})

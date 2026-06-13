@@ -13,6 +13,7 @@ const state = {
   pendingApprovalId: "",
   activeLog: "raw",
   activeTab: "dashboard",
+  activeTickRole: "INDEX",
   dataSource: "UNKNOWN",
   fiiDiiStatus: {},
   refreshBusy: false,
@@ -426,6 +427,15 @@ function initTabs() {
       });
       renderAll();
     });
+  });
+}
+
+function initTickStreamTabs() {
+  document.addEventListener("click", event => {
+    const button = event.target.closest("[data-oa-tick-role]");
+    if (!button) return;
+    state.activeTickRole = String(button.dataset.oaTickRole || "INDEX").toUpperCase();
+    renderIndexTickStreams();
   });
 }
 
@@ -1136,6 +1146,9 @@ function renderIndustryDiagnostics() {
   const feedHealth = feed.health || {};
   const feedMode = feedHealth.data_mode || feed.data_mode || "UNKNOWN";
   const feedStale = Boolean(feedHealth.feed_stale);
+  const roleStatuses = feedHealth.role_statuses || {};
+  const freshRoles = Object.entries(roleStatuses).filter(([, item]) => item?.fresh).map(([role]) => role);
+  const staleRoles = Object.entries(roleStatuses).filter(([, item]) => item?.stale).map(([role]) => role);
   const runtime = result.runtime_persistence || state.status.runtime_persistence || {};
   const referenceCache = result.reference_cache || state.status.reference_cache || {};
   const featureCache = result.feature_cache || state.status.feature_cache || {};
@@ -1152,6 +1165,8 @@ function renderIndustryDiagnostics() {
     metric("Index Tick", feedHealth.last_index_tick || "-"),
     metric("CE Tick", feedHealth.last_ce_tick || "-"),
     metric("PE Tick", feedHealth.last_pe_tick || "-"),
+    metric("Fresh Roles", freshRoles.join(", ") || "-"),
+    metric("Stale Roles", staleRoles.join(", ") || "-"),
     metric("Feed Stale", feedStale ? "YES" : "NO"),
     metric("Stale Labels", (feedHealth.stale_labels || []).join(", ") || "-"),
     metric("Subscribed Tokens", (feed.subscribed_tokens || []).join(", ") || "-"),
@@ -1247,32 +1262,74 @@ function renderIndustryDiagnostics() {
 }
 
 function renderIndexTickStreams() {
-  const ticks = (state.status.index_ticks || state.lastResult.index_ticks || []).slice(-80);
+  const feed = state.status.options_live_feed || state.lastResult.options_live_feed || {};
+  const health = feed.health || {};
+  const streams = feed.tick_streams || {};
+  const fallbackIndexTicks = (state.status.index_ticks || state.lastResult.index_ticks || []).map(tick => ({
+    role: "INDEX",
+    observed_at: tick.observed_at,
+    exchange_timestamp: tick.exchange_timestamp,
+    ltp: tick.spot,
+    source: tick.spot_source,
+    age_seconds: tick.age_seconds,
+    tradingsymbol: tick.underlying,
+    quote_key: tick.quote_key,
+    scan: tick.live_scan_cycle,
+  }));
+  const roles = [
+    ["INDEX", "NIFTY"],
+    ["CE", "Locked CE"],
+    ["PE", "Locked PE"],
+  ];
+  const activeRole = roles.some(([role]) => role === state.activeTickRole) ? state.activeTickRole : "INDEX";
+  const ticksByRole = {
+    INDEX: (streams.INDEX || fallbackIndexTicks || []).slice(-80),
+    CE: (streams.CE || []).slice(-80),
+    PE: (streams.PE || []).slice(-80),
+  };
+  const ticks = ticksByRole[activeRole] || [];
   const latest = ticks[ticks.length - 1] || {};
   const scan = state.status.live_scan || state.lastResult.live_scan || {};
   const running = Boolean(scan.running);
+  const roleStatus = (health.role_statuses || {})[activeRole] || {};
+  const isFresh = Boolean(roleStatus.fresh);
+  const isStale = Boolean(roleStatus.stale);
+  const tabButtons = `<div class="oa-tick-tabs">${roles.map(([role, label]) => {
+    const rows = ticksByRole[role] || [];
+    const status = (health.role_statuses || {})[role] || {};
+    const className = ["oa-tick-tab", activeRole === role ? "oa-tick-tab-active" : "", status.stale ? "oa-tick-tab-stale" : status.fresh ? "oa-tick-tab-live" : ""].filter(Boolean).join(" ");
+    return `<button type="button" class="${className}" data-oa-tick-role="${role}">${label}<span>${rows.length}</span></button>`;
+  }).join("")}</div>`;
   $$("[data-index-tick-badge]").forEach(node => {
-    node.className = `oa-status-badge ${badgeClass(running ? "green" : ticks.length ? "yellow" : "grey")}`;
-    node.textContent = running ? "Live" : ticks.length ? "Last Tick" : "Waiting";
+    node.className = `oa-status-badge ${badgeClass(isFresh ? "green" : isStale ? "red" : ticks.length ? "yellow" : "grey")}`;
+    node.textContent = isFresh ? `${activeRole} Live` : isStale ? `${activeRole} Stale` : ticks.length ? `${activeRole} Last Tick` : "Waiting";
   });
   const latestHtml = ticks.length
     ? `<div class="oa-index-tick-latest">
-        ${metric("Underlying", latest.underlying || "-")}
-        ${metric("Spot", latest.spot ?? "-")}
-        ${metric("Source", latest.spot_source || "-")}
+        ${metric("Role", activeRole)}
+        ${metric("Symbol", latest.tradingsymbol || latest.underlying || "-")}
+        ${metric(activeRole === "INDEX" ? "Spot" : "LTP", latest.ltp ?? latest.spot ?? "-")}
+        ${metric("Bid", activeRole === "INDEX" ? "-" : latest.bid ?? "-")}
+        ${metric("Ask", activeRole === "INDEX" ? "-" : latest.ask ?? "-")}
+        ${metric("Depth", activeRole === "INDEX" ? "Index packet" : latest.depth_present ? "FULL" : "MISSING")}
+        ${metric("Bid Qty", activeRole === "INDEX" ? "-" : latest.bid_qty ?? "-")}
+        ${metric("Ask Qty", activeRole === "INDEX" ? "-" : latest.ask_qty ?? "-")}
+        ${metric("Source", latest.source || latest.spot_source || "-")}
         ${metric("Observed", latest.observed_at || "-")}
         ${metric("Exchange Time", latest.exchange_timestamp || "-")}
         ${metric("Scan", scan.running ? `Running #${scan.cycle_count ?? 0}` : "Stopped")}
       </div>`
-    : `<p class="oa-empty-state">No index ticks yet.</p>`;
+    : `<p class="oa-empty-state">No ${activeRole === "INDEX" ? "NIFTY" : activeRole} ticks yet.</p>`;
   const rows = ticks.slice().reverse().map(tick => `<div class="oa-index-tick-row">
       <div><span>Observed</span><strong>${escapeHtml(shortTime(tick.observed_at) || "-")}</strong></div>
-      <div><span>Spot</span><strong>${escapeHtml(tick.spot ?? "-")}</strong></div>
-      <div><span>Source</span><strong>${escapeHtml(tick.spot_source || "-")}</strong></div>
+      <div><span>LTP</span><strong>${escapeHtml(tick.ltp ?? tick.spot ?? "-")}</strong></div>
+      <div><span>Bid</span><strong>${escapeHtml(activeRole === "INDEX" ? "-" : tick.bid ?? "-")}</strong></div>
+      <div><span>Ask</span><strong>${escapeHtml(activeRole === "INDEX" ? "-" : tick.ask ?? "-")}</strong></div>
+      <div><span>Depth</span><strong>${escapeHtml(activeRole === "INDEX" ? "Index" : tick.depth_present ? "Full" : "Missing")}</strong></div>
+      <div><span>Source</span><strong>${escapeHtml(tick.source || tick.spot_source || "-")}</strong></div>
       <div><span>Age</span><strong>${escapeHtml(tick.age_seconds ?? "-")}s</strong></div>
-      <div><span>Scan</span><strong>#${escapeHtml(tick.live_scan_cycle ?? "-")}</strong></div>
     </div>`).join("");
-  const body = `${latestHtml}${rows ? `<div class="oa-index-tick-list">${rows}</div>` : ""}`;
+  const body = `${tabButtons}${latestHtml}${rows ? `<div class="oa-index-tick-list">${rows}</div>` : ""}`;
   $$("[data-index-tick-panel]").forEach(node => {
     node.innerHTML = body;
   });
@@ -1611,9 +1668,7 @@ function showBacktestFolderPath() {
 // shadow rendering/actions
 function initShadowTab() {
   on("#oa-shadow-start", "click", runShadowStart);
-  on("#oa-shadow-stop", "click", () => {
-    setTabAlert("shadow", "Shadow stop requested. No stop route exists yet; no orders were ever placed.", "info");
-  });
+  on("#oa-shadow-stop", "click", runShadowStop);
   on("#oa-shadow-report-btn", "click", runShadowReport);
 }
 
@@ -1624,6 +1679,18 @@ async function runShadowStart() {
     renderShadow(result);
     renderAll();
     setTabAlert("shadow", "Shadow mode running. No orders will be placed.", "success");
+  } catch (error) {
+    setTabAlert("shadow", error.message, "danger");
+  }
+}
+
+async function runShadowStop() {
+  try {
+    const result = await api("/api/options-auto/shadow/stop", { source: "UI" });
+    state.lastShadowResult = result;
+    state.status = { ...state.status, ...(result || {}) };
+    renderAll();
+    setTabAlert("shadow", result.message || "Shadow mode stopped.", "info");
   } catch (error) {
     setTabAlert("shadow", error.message, "danger");
   }
@@ -1989,7 +2056,7 @@ async function startRealEngine() {
 
 async function runRealReconcile() {
   try {
-    const result = await api("/api/options-auto/real/reconcile", { mode: "REAL", broker_orders: [], positions: [] });
+    const result = await api("/api/options-auto/real/reconcile", { mode: "REAL" });
     state.lastResult = result;
     renderRealPreflight(result);
     renderAll();
@@ -2034,7 +2101,7 @@ async function runSafeMode() {
 
 async function runEmergencyPlan() {
   try {
-    const result = await api("/api/options-auto/real/emergency-plan", { mode: "REAL", confirmed: Boolean($("#oa-confirm-real")?.checked), positions: [] });
+    const result = await api("/api/options-auto/real/emergency-plan", { mode: "REAL", confirmed: Boolean($("#oa-confirm-real")?.checked) });
     state.lastResult = result;
     renderAll();
     setTabAlert("real", "Emergency plan generated. Dry-run only; no orders sent.", "warning");
@@ -2491,6 +2558,7 @@ function hydrateStatusDecision(payload) {
     fii_dii: payload.fii_dii || {},
     account_status: payload.account_status || {},
     index_ticks: payload.index_ticks || [],
+    tick_streams: payload.options_live_feed?.tick_streams || {},
     live_index_candles: payload.live_index_candles || {},
     live_scan: payload.live_scan || {},
     options_live_feed: payload.options_live_feed || {},
@@ -2538,6 +2606,7 @@ function initReports() {
 
 document.addEventListener("DOMContentLoaded", () => {
   initTabs();
+  initTickStreamTabs();
   initNativeDatePickers();
   initDashboard();
   initBacktestTab();

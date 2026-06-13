@@ -112,6 +112,9 @@ class OptionsAutoTerminalService:
         self.index_ticks: list[dict[str, Any]] = []
         self.live_index_candles = LiveIndexCandleStore()
         self.options_live_feed = OptionsLiveFeed()
+        self._quote_fallback_last_attempt_epoch = 0.0
+        self._quote_fallback_last_failure_epoch = 0.0
+        self._quote_fallback_last_result: dict[str, Any] = {}
         self.blackbox_recorder = BlackboxRecorder()
         self.options_instrument_cache = OptionsInstrumentCache(cache_dir=os.path.join(self.result_root(), "instrument_cache"))
         self.locked_contract_manager = LockedContractManager()
@@ -675,7 +678,7 @@ class OptionsAutoTerminalService:
             result["error"] = f"Index token prewarm failed: {exc}"
         try:
             instruments = self.options_instrument_cache.instruments(client, option_exchange)
-            expiry = payload.get("expiry") or payload.get("option_expiry") or self.settings.get("expiry") or self._nearest_option_expiry(instruments, underlying)
+            expiry = payload.get("expiry") or payload.get("option_expiry") or self.settings.get("expiry") or self._preferred_option_expiry(instruments, underlying, self.settings)
             if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry, "prewarm"):
                 instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry, "prewarm")
             result["instrument_rows"] = len(instruments or [])
@@ -706,13 +709,13 @@ class OptionsAutoTerminalService:
         expiry_requested = payload.get("expiry") or payload.get("option_expiry") or settings.get("expiry")
         if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry_requested, "live"):
             instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry_requested, "live")
-        expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+        expiry = expiry_requested or self._preferred_option_expiry(instruments, underlying, settings)
         if expiry and self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry, "live"):
             instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry, "live")
-            expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+            expiry = expiry_requested or self._preferred_option_expiry(instruments, underlying, settings)
         warnings = list(base_diagnostics.get("warnings") or [])
         if not expiry_requested and expiry:
-            warnings.append("Expiry date was blank; using nearest valid Zerodha expiry. Select Expiry Date to lock a specific expiry.")
+            warnings.append(f"Expiry date was blank; using {str(settings.get('expiry_preference') or 'AUTO').upper()} Zerodha expiry. Select Expiry Date to lock a specific expiry.")
         expiry_blocker = self._expiry_selection_blocker(expiry, settings)
         major_step = _int_setting(settings.get("major_strike_step"), 100)
         diagnostics = {
@@ -844,6 +847,7 @@ class OptionsAutoTerminalService:
         return {
             "payload": {
                 "spot": spot.get("spot"),
+                "timestamp": spot.get("timestamp") or (candle_context.get("latest_candle") or {}).get("datetime") or (candle_context.get("latest_candle") or {}).get("timestamp"),
                 "data_source": source,
                 "quote_age_seconds": spot.get("age_seconds") or 0,
                 "index_history": candle_context.get("candles") or [],
@@ -1045,15 +1049,31 @@ class OptionsAutoTerminalService:
         }
 
     def _nearest_option_expiry(self, instruments: list[dict[str, Any]], underlying: str) -> str:
+        expiries = self._available_option_expiries(instruments, underlying)
+        return expiries[0] if expiries else ""
+
+    def _preferred_option_expiry(self, instruments: list[dict[str, Any]], underlying: str, settings: dict[str, Any]) -> str:
+        expiries = self._available_option_expiries(instruments, underlying)
+        if not expiries:
+            return ""
+        preference = str((settings or {}).get("expiry_preference") or "AUTO").upper()
+        if preference in {"NEXT", "NEXT_WEEK", "FAR"} and len(expiries) > 1:
+            return expiries[1]
+        if preference in {"MONTHLY", "MONTH_END"}:
+            first_month = expiries[0][:7]
+            month_expiries = [expiry for expiry in expiries if expiry[:7] == first_month]
+            return month_expiries[-1] if month_expiries else expiries[0]
+        return expiries[0]
+
+    def _available_option_expiries(self, instruments: list[dict[str, Any]], underlying: str) -> list[str]:
         today_text = date.today().isoformat()
-        expiries = sorted({
+        return sorted({
             _expiry_text(row.get("expiry"))
             for row in instruments or []
             if str(row.get("option_type") or row.get("instrument_type") or "").upper() in {"CE", "PE"}
             and _is_underlying_row(row, underlying)
             and _expiry_text(row.get("expiry")) >= today_text
         })
-        return expiries[0] if expiries else ""
 
     def _expiry_selection_blocker(self, expiry: Any, settings: dict[str, Any]) -> str:
         expiry_text = _expiry_text(expiry)
@@ -1184,6 +1204,18 @@ class OptionsAutoTerminalService:
         result["session"] = self.session.to_dict()
         result["message"] = "Shadow mode is running in decision-only mode. No paper or real order will be placed."
         return result
+
+    def stop_shadow(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            self.session.status = "SHADOW_STOPPED"
+            self.session.record_safety_event("Shadow mode stopped", {"source": (payload or {}).get("source") or "UI"})
+            self.logger.log("INFO", "Options Auto shadow mode stopped")
+            return {
+                "stopped": True,
+                "mode": MODE_SHADOW,
+                "session": self.session.to_dict(),
+                "message": "Shadow mode stopped. No orders were placed.",
+            }
 
     def start_paper(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
@@ -1642,7 +1674,9 @@ class OptionsAutoTerminalService:
         return {key: payload[key] for key in allowed_keys if key in payload} | {"mode": mode}
 
     def _live_scan_interval_locked(self) -> float:
-        profile = str(self.settings.get("strategy_profile") or "BALANCED").strip().lower()
+        profile = str(self.settings.get("strategy_profile") or "BALANCED").strip().upper()
+        if not bool(self.settings.get("adaptive_live_enabled", True)):
+            profile = "BALANCED"
         if profile == "AGGRESSIVE":
             key = "adaptive_scan_seconds_aggressive"
         elif profile == "CONSERVATIVE":
@@ -1699,18 +1733,29 @@ class OptionsAutoTerminalService:
 
     def _stale_diagnostics_locked(self) -> dict[str, Any]:
         feed = (self.options_live_feed.snapshot(self.settings).get("health") or {})
+        role_statuses = dict(feed.get("role_statuses") or {})
         tick_times = [
             str(feed.get("last_index_tick") or ""),
             str(feed.get("last_ce_tick") or ""),
             str(feed.get("last_pe_tick") or ""),
         ]
         last_tick_at = max([item for item in tick_times if item] or [""])
+        fresh_roles = [
+            role
+            for role, status in role_statuses.items()
+            if isinstance(status, dict) and bool(status.get("fresh"))
+        ]
+        stale_roles = [
+            role
+            for role, status in role_statuses.items()
+            if isinstance(status, dict) and bool(status.get("stale"))
+        ]
         running = bool(self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set())
         reason = "healthy"
         if not last_tick_at:
             reason = "waiting for websocket tick or quote polling fallback"
         elif feed.get("feed_stale"):
-            reason = "feed is stale"
+            reason = "stale roles: " + ", ".join(stale_roles or feed.get("stale_labels") or ["UNKNOWN"])
         elif running and not self._live_scan_last_cycle:
             reason = "waiting for first decision cycle"
         elif running:
@@ -1718,7 +1763,11 @@ class OptionsAutoTerminalService:
         return {
             "last_tick_at": last_tick_at,
             "last_decision_at": self._live_scan_last_cycle,
-            "ticks_receiving": bool(last_tick_at) and not bool(feed.get("feed_stale")),
+            "ticks_receiving": bool(fresh_roles),
+            "all_roles_fresh": bool(role_statuses) and not bool(feed.get("feed_stale")),
+            "fresh_roles": fresh_roles,
+            "stale_roles": stale_roles,
+            "role_statuses": role_statuses,
             "decision_updating": running and bool(self._live_scan_last_cycle),
             "reason": reason,
         }
@@ -1926,7 +1975,48 @@ class OptionsAutoTerminalService:
         missing_contracts = [contract for contract in contracts or [] if not self._quote_for_contract(contract, websocket_quotes)]
         if not missing_contracts or not bool(settings.get("quote_polling_fallback_enabled", True)):
             return websocket_result
+        now_epoch = time.time()
+        min_interval = max(0.0, _number(settings.get("quote_snapshot_min_interval_seconds"), 0.0))
+        if self.paper_lifecycle.pending_entries or self.paper_lifecycle.active_trades or self.real_lifecycle.entry_order:
+            min_interval = 0.0
+        failure_backoff = max(0.0, _number(settings.get("quote_failure_backoff_seconds"), 0.0))
+        fallback_wait = max(
+            min_interval - (now_epoch - self._quote_fallback_last_attempt_epoch),
+            failure_backoff - (now_epoch - self._quote_fallback_last_failure_epoch),
+        )
+        if fallback_wait > 0:
+            cached_result = dict(self._quote_fallback_last_result or {})
+            cached_quotes = dict(cached_result.get("quotes") or {})
+            max_age = max(0.0, _number(settings.get("max_quote_age_seconds"), settings.get("quote_stale_seconds") or 3))
+            if cached_quotes and now_epoch - self._quote_fallback_last_attempt_epoch <= max_age:
+                merged_quotes = {**websocket_quotes, **cached_quotes}
+                requested = list(dict.fromkeys(list(websocket_result.get("requested_quote_keys") or []) + list(cached_result.get("requested_quote_keys") or [])))
+                warnings = list(dict.fromkeys(list(websocket_result.get("warnings") or []) + ["Reused fresh snapshot quote fallback during throttle window."]))
+                return {
+                    "quotes": merged_quotes,
+                    "missing_quote_keys": list(cached_result.get("missing_quote_keys") or []),
+                    "errors": list(cached_result.get("errors") or []),
+                    "warnings": warnings,
+                    "requested_quote_keys": requested,
+                    "valid_quote_count": len({item.get("quote_key") for item in merged_quotes.values() if item.get("quote_key")}),
+                    "quote_source": "zerodha_websocket_tick+cached_snapshot_fallback" if websocket_quotes else "zerodha_cached_snapshot_quote",
+                    "data_mode": "WEBSOCKET_TICKS_WITH_CACHED_SNAPSHOT_FALLBACK" if websocket_quotes else "QUOTE_SNAPSHOT_POLLING",
+                    "quote_fallback_throttled": True,
+                    "quote_fallback_wait_seconds": round(fallback_wait, 3),
+                    "blocked": bool(cached_result.get("errors")),
+                }
+            throttled = dict(websocket_result)
+            warnings = list(throttled.get("warnings") or [])
+            warnings.append(f"Snapshot quote fallback throttled for {fallback_wait:.1f}s.")
+            throttled["warnings"] = list(dict.fromkeys(warnings))
+            throttled["quote_fallback_throttled"] = True
+            throttled["quote_fallback_wait_seconds"] = round(fallback_wait, 3)
+            return throttled
+        self._quote_fallback_last_attempt_epoch = now_epoch
         fallback_result = OptionsQuoteProvider(client, source=source).quote_candidates(missing_contracts, settings)
+        self._quote_fallback_last_result = dict(fallback_result or {})
+        if fallback_result.get("errors") or fallback_result.get("missing_quote_keys"):
+            self._quote_fallback_last_failure_epoch = time.time()
         merged_quotes = {**websocket_quotes, **dict(fallback_result.get("quotes") or {})}
         requested = list(dict.fromkeys(list(websocket_result.get("requested_quote_keys") or []) + list(fallback_result.get("requested_quote_keys") or [])))
         missing = list(dict.fromkeys(list(fallback_result.get("missing_quote_keys") or [])))
@@ -2605,12 +2695,12 @@ class OptionsAutoTerminalService:
         expiry_requested = payload.get("expiry") or payload.get("option_expiry") or settings.get("expiry")
         if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry_requested, "backtest"):
             instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry_requested, "backtest")
-        expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+        expiry = expiry_requested or self._preferred_option_expiry(instruments, underlying, settings)
         if not expiry:
             raise ValueError(f"No {underlying} option expiry found on {option_exchange}.")
         if self._should_refresh_option_instruments(option_exchange, instruments, underlying, expiry, "backtest"):
             instruments = self._refresh_option_instruments(client, option_exchange, instruments, underlying, expiry, "backtest")
-            expiry = expiry_requested or self._nearest_option_expiry(instruments, underlying)
+            expiry = expiry_requested or self._preferred_option_expiry(instruments, underlying, settings)
             if not expiry:
                 raise ValueError(f"No {underlying} option expiry found on {option_exchange} after refreshing instrument cache.")
         major_step = _int_setting(settings.get("major_strike_step"), 100)

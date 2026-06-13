@@ -9,7 +9,9 @@ from options_auto.data.fii_dii_loader import parse_fii_dii_csv_text
 from options_auto.data.zerodha_pulse_news import NewsSentimentEngine
 from options_auto.execution.kite_api_manager import KiteApiManager, RateLimiter
 from options_auto.intelligence.adaptive_risk_engine import RiskEngine
+from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
 from options_auto.intelligence.entry_timing_engine import EntryTimingEngine
+from options_auto.intelligence.exit_manager import build_long_option_trade_plan
 from options_auto.intelligence.master_governor import MasterGovernor
 from options_auto.intelligence.options_greeks_risk_engine import OptionsGreeksRiskEngine
 from options_auto.telegram_safety import TelegramSafety
@@ -128,6 +130,78 @@ class OptionsAutoPhaseEngineTests(unittest.TestCase):
 
         self.assertFalse(timing["allowed"])
         self.assertFalse(risk["allowed"])
+
+    def test_no_new_trade_after_blocks_entry_timing(self):
+        timing = EntryTimingEngine().evaluate(
+            {"high": 120, "low": 110, "open": 112, "close": 118},
+            {"ltp": 118, "intended_entry": 118},
+            {"timestamp": "2026-06-04 15:01:00", "no_new_trade_after": "15:00"},
+        )
+
+        self.assertFalse(timing["allowed"])
+        self.assertIn("No new trades after configured cutoff.", timing["blockers"])
+
+    def test_cooldown_settings_use_risk_state_timestamps(self):
+        risk = RiskEngine().evaluate(
+            {
+                "max_daily_loss": 1000,
+                "max_daily_profit_lock": 5000,
+                "max_trades_per_day": 3,
+                "max_open_trades": 1,
+                "max_consecutive_losses": 5,
+                "cooldown_after_loss_seconds": 600,
+                "cooldown_after_rejection_seconds": 180,
+                "cooldown_after_api_error_seconds": 300,
+            },
+            {
+                "consecutive_losses": 1,
+                "last_loss_epoch": 100,
+                "rejected_orders": 1,
+                "last_rejection_epoch": 200,
+                "api_failures": 1,
+                "last_api_error_epoch": 250,
+            },
+            now_epoch=300,
+        )
+
+        self.assertFalse(risk["allowed"])
+        self.assertIn("Loss cooldown is active.", risk["blockers"])
+        self.assertIn("Order rejection cooldown is active.", risk["blockers"])
+        self.assertIn("Broker/API error cooldown is active.", risk["blockers"])
+
+    def test_market_context_settings_adjust_threshold_and_trade_plan(self):
+        payload = sample_payload()
+        payload["settings"] = {
+            **payload["settings"],
+            "market_context_enabled": True,
+            "market_context_dynamic_thresholds_enabled": True,
+            "market_context_exit_policy_enabled": True,
+            "buy_score_threshold": 70,
+        }
+
+        decision = evaluate_options_auto_decision(
+            "PAPER",
+            payload["settings"],
+            pd.DataFrame(payload["candles"]) if payload.get("candles") else pd.DataFrame([{"datetime": "2026-06-04 10:00", "open": 22500, "high": 22580, "low": 22480, "close": 22550, "volume": 100000}]),
+            payload["instruments"],
+            payload["quotes"],
+            payload,
+            {},
+            {"available_margin": 20000},
+            payload["timestamp"],
+        )
+
+        self.assertIn("market_context", decision)
+        self.assertIn("trade_candidate_validation", decision)
+
+        plan = build_long_option_trade_plan(
+            {"tradingsymbol": "NIFTY26JUN22500CE", "instrument_token": 1, "option_type": "CE", "ask": 100, "ltp": 100, "tick_size": 0.05, "lot_size": 50},
+            {"quantity": 50, "lots": 1},
+            {"regime": "strong_bullish", "target_multiplier": 1.6},
+            {"market_context_target_multiplier_adjustment": 0.15, "market_context_stoploss_multiplier_adjustment": -0.15},
+        )
+        self.assertGreater(plan["risk_reward"], 1.6)
+        self.assertLess(plan["stop_distance"], 3.0)
 
 
 if __name__ == "__main__":

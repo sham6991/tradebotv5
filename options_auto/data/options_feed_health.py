@@ -44,10 +44,19 @@ class OptionsFeedHealth:
         now = now or datetime.now()
         max_age = float(settings.get("max_tick_age_seconds") or settings.get("max_quote_age_seconds") or 3)
         stale_labels = []
+        role_statuses = {}
         for label, timestamp in self.last_ticks.items():
             when = _dt(timestamp)
-            if when and (now - when).total_seconds() > max_age:
+            age = (now - when).total_seconds() if when else None
+            is_stale = bool(age is not None and age > max_age)
+            if is_stale:
                 stale_labels.append(label)
+            role_statuses[label] = {
+                "last_tick": timestamp,
+                "age_seconds": round(age, 3) if age is not None else None,
+                "fresh": bool(age is not None and age <= max_age),
+                "stale": is_stale,
+            }
         stale = bool(stale_labels)
         mode = DATA_STALE if stale else self.data_mode
         return {
@@ -55,6 +64,7 @@ class OptionsFeedHealth:
             "last_index_tick": self.last_ticks.get("INDEX", ""),
             "last_ce_tick": self.last_ticks.get("CE", ""),
             "last_pe_tick": self.last_ticks.get("PE", ""),
+            "role_statuses": role_statuses,
             "feed_stale": stale,
             "stale_labels": stale_labels,
             "reconnect_attempts": self.reconnect_attempts,

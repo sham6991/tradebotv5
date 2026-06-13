@@ -122,6 +122,8 @@ class MarketContextRouter:
     def _classify(self, evidence: dict[str, Any], side: str, side_confidence: float, settings: dict[str, Any]) -> tuple[str, float, str]:
         if evidence["low_liquidity"]:
             return "LOW_LIQUIDITY", max(60.0, evidence["feed_confidence"]), "Low liquidity or stale data: fresh tradable option data is not available."
+        if evidence["news_missing_block"]:
+            return "NEWS_EVENT_UNAVAILABLE", 60.0, "News/event setting requires a fresh news signal, but no usable news signal is available."
         if evidence["news_shock"]:
             return "NEWS_EVENT_SHOCK", max(70.0, evidence["news_score"]), "Explicit news/event shock is active and confirmed by available market evidence."
         if evidence["post_spike_trap"]:
@@ -149,6 +151,8 @@ class MarketContextRouter:
             return "WAIT_LOW_LIQUIDITY", SIDE_WAIT, WAIT
         if market_type == "NEWS_EVENT_SHOCK":
             return "WAIT_NEWS_SHOCK", SIDE_WAIT, WAIT
+        if market_type == "NEWS_EVENT_UNAVAILABLE":
+            return "WAIT_NEWS_UNAVAILABLE", SIDE_WAIT, WAIT
         if market_type == "VOLATILE_CHOP":
             return "WAIT_VOLATILE_CHOP", SIDE_WAIT, WAIT
         if market_type == "SIDEWAYS_RANGE":
@@ -222,13 +226,16 @@ class MarketContextRouter:
             or missing_quotes
             or (_has_key(feed, "valid_quote_count") and _number(feed.get("valid_quote_count")) <= 0)
         )
+        news_enabled = bool(settings.get("news_event_enabled", True))
+        news_fail_open = bool(settings.get("news_event_fail_open", True))
         news_score = _number(news.get("score"))
-        news_status = str(news.get("status") or "").upper()
+        news_status = str(news.get("status") or "").upper() if news_enabled else "DISABLED"
         market_confirmed = bool(news.get("market_confirmation") or news.get("market_confirmed") or news.get("confirmed_by_market"))
         news_threshold = _number(settings.get("news_event_min_score_for_shock"), 70.0)
         require_market_confirmation = bool(settings.get("news_event_require_market_confirmation", True))
         news_confirmed = market_confirmed or not require_market_confirmation
-        news_shock = news_status == "NEWS_EVENT_SHOCK" and news_score >= news_threshold and news_confirmed
+        news_missing_block = bool(news_enabled and not news_fail_open and not news_status)
+        news_shock = bool(news_enabled and news_status == "NEWS_EVENT_SHOCK" and news_score >= news_threshold and news_confirmed)
         return {
             "timestamp": str(timestamp or ""),
             "trend_strength_score": trend,
@@ -243,8 +250,11 @@ class MarketContextRouter:
             "news_status": news_status,
             "news_score": news_score,
             "news_market_confirmation": market_confirmed,
+            "news_event_enabled": news_enabled,
+            "news_event_fail_open": news_fail_open,
             "news_event_min_score_for_shock": news_threshold,
             "news_event_require_market_confirmation": require_market_confirmation,
+            "news_missing_block": news_missing_block,
             "news_shock": news_shock,
             "post_spike_trap": bool(market_cue.get("premium_trap") or market_cue.get("post_spike_trap") or features.get("post_spike_premium_trap")),
             "volatile_chop": regime_name == "volatile_choppy" or cue_name == "volatile_uncertain" or (atr_pct > 0.45 and abs(trend) < 35),

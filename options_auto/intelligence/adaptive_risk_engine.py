@@ -40,6 +40,15 @@ class RiskEngine:
             blockers.append("Max open trades reached.")
         if int(state_dict.get("consecutive_losses") or 0) >= int(settings.get("max_consecutive_losses") or 0):
             blockers.append("Consecutive loss lock reached.")
+        if now_epoch and int(state_dict.get("consecutive_losses") or 0) > 0:
+            if _within_cooldown(state_dict.get("last_loss_epoch"), now_epoch, settings.get("cooldown_after_loss_seconds")):
+                blockers.append("Loss cooldown is active.")
+        if now_epoch and int(state_dict.get("rejected_orders") or 0) > 0:
+            if _within_cooldown(state_dict.get("last_rejection_epoch"), now_epoch, settings.get("cooldown_after_rejection_seconds")):
+                blockers.append("Order rejection cooldown is active.")
+        if now_epoch and int(state_dict.get("api_failures") or 0) > 0:
+            if _within_cooldown(state_dict.get("last_api_error_epoch"), now_epoch, settings.get("cooldown_after_api_error_seconds")):
+                blockers.append("Broker/API error cooldown is active.")
         if now_epoch and float(state_dict.get("cooldown_until_epoch") or 0) > now_epoch:
             blockers.append("Cooldown is active.")
         if int(state_dict.get("api_failures") or 0) >= 3:
@@ -123,3 +132,12 @@ class PositionSizer:
             "risk_per_lot": risk_per_lot,
             "reason": "",
         }
+
+
+def _within_cooldown(event_epoch: Any, now_epoch: float, seconds: Any) -> bool:
+    try:
+        event = float(event_epoch or 0)
+        cooldown = float(seconds or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(event > 0 and cooldown > 0 and now_epoch - event < cooldown)

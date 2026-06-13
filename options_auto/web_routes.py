@@ -48,6 +48,8 @@ class OptionsAutoWebRoutes:
             return handler.send_json(self._with_account_status(self.service.kill_switch(payload)))
         if path == "/api/options-auto/shadow/start":
             return handler.send_json(self._with_account_status(self.service.start_shadow(self._with_profile(payload))))
+        if path == "/api/options-auto/shadow/stop":
+            return handler.send_json(self._with_account_status(self.service.stop_shadow(payload)))
         if path == "/api/options-auto/shadow/outcome":
             return handler.send_json(self.service.shadow_record_outcome(payload))
         if path == "/api/options-auto/paper/start":

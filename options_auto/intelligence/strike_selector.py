@@ -43,7 +43,7 @@ class StrikeSelector:
     ) -> StrikeSelection:
         settings = dict(settings or {})
         context = dict(context or {})
-        context = self._compatible_context(context, side)
+        context = self._compatible_context({**context, "settings": settings}, side)
         side = str(side or SIDE_WAIT).upper()
         if side not in {SIDE_CE, SIDE_PE}:
             return StrikeSelection(side=SIDE_WAIT, selected=None, score=0.0, blockers=["Regime says WAIT."])
@@ -119,6 +119,9 @@ class StrikeSelector:
             "ask": ask,
             "bid_qty": bid_qty,
             "ask_qty": ask_qty,
+            "depth_present": bool(quote.get("depth_present") or (float(bid or 0) > 0 and float(ask or 0) > 0)),
+            "bid_present": bool(quote.get("bid_present") or float(bid or 0) > 0),
+            "ask_present": bool(quote.get("ask_present") or float(ask or 0) > 0),
             "total_depth": total_depth,
             "spread_pct": spread_pct,
             "depth_imbalance": depth,
@@ -191,6 +194,14 @@ class StrikeSelector:
             blockers.append("Spread too wide.")
         if int(float(candidate.get("bid_qty") or 0)) + int(float(candidate.get("ask_qty") or 0)) < int(settings.get("min_depth_qty") or 1):
             blockers.append("Depth too low.")
+        if settings.get("strict_liquidity_filter") and not candidate.get("depth_present"):
+            blockers.append("Market depth is missing.")
+        min_volume = float(settings.get("min_volume") or 0)
+        if min_volume > 0 and float(candidate.get("volume") or 0) < min_volume:
+            blockers.append("Volume below configured minimum.")
+        min_oi = float(settings.get("min_oi") or 0)
+        if min_oi > 0 and float(candidate.get("oi") or 0) < min_oi:
+            blockers.append("OI below configured minimum.")
         if settings.get("strict_liquidity_filter") and float(candidate.get("liquidity_score") or 0) < 45:
             blockers.append("Liquidity score too low.")
         if not settings.get("allow_deep_otm", False) and candidate.get("moneyness") == "OTM" and float(candidate.get("distance_pct") or 0) > 1.2:

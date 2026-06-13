@@ -135,8 +135,16 @@ class TradeCandidateValidator:
             blockers.append("Invalid bid/ask spread.")
         elif spread > _number(settings.get("max_spread_pct"), 0.6):
             blockers.append("Spread too wide.")
+        if settings.get("strict_liquidity_filter") and not bool(selected.get("depth_present", bid > 0 and ask > 0)):
+            blockers.append("Market depth is missing.")
         if total_depth < _number(settings.get("min_depth_qty"), 1):
             blockers.append("Depth too low.")
+        min_volume = _number(settings.get("min_volume"))
+        if min_volume > 0 and _number(selected.get("volume")) < min_volume:
+            blockers.append("Volume below configured minimum.")
+        min_oi = _number(settings.get("min_oi"))
+        if min_oi > 0 and _number(selected.get("oi")) < min_oi:
+            blockers.append("OI below configured minimum.")
         if settings.get("strict_liquidity_filter") and _number(selected.get("liquidity_score")) < 45:
             blockers.append("Liquidity score too low.")
         return blockers

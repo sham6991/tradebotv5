@@ -101,9 +101,10 @@ def evaluate_options_auto_decision(
     trade_plan: dict[str, Any] = {}
     trade_score = {"score": 0.0, "breakdown": {}, "weights": {}}
     entry_timing = {"allowed": True, "state": "TIMING_OK", "blockers": [], "warnings": []}
-    effective_threshold = _effective_entry_score_threshold(settings)
+    effective_threshold = _effective_entry_score_threshold(settings, market_context)
 
     if selected:
+        selected["days_to_expiry"] = _days_to_expiry(selected.get("expiry"), timestamp)
         data_quality = DataQualityEngine().validate_quote(
             {
                 "ltp": selected.get("ltp"),
@@ -120,7 +121,10 @@ def evaluate_options_auto_decision(
             _number(selected.get("ask"), selected.get("ltp")) * _number(settings.get("min_stoploss_pct"), 3.0) / 100.0,
             _number(settings.get("minimum_stoploss_points"), 2.0),
         )
-        sizing_settings = {**settings, "stop_distance_points": preliminary_stop}
+        sizing_settings = _expiry_day_sizing_settings(
+            _market_context_sizing_settings({**settings, "stop_distance_points": preliminary_stop}, market_context),
+            selected,
+        )
         position_size = PositionSizer().quantity(
             _number(selected.get("ask"), selected.get("ltp")),
             int(_number(selected.get("lot_size"))),
@@ -131,7 +135,6 @@ def evaluate_options_auto_decision(
             position_blockers.append(position_size.get("reason") or "Insufficient capital/risk budget for one lot.")
 
         selected["quantity"] = int(position_size.get("quantity") or selected.get("lot_size") or 1)
-        selected["days_to_expiry"] = _days_to_expiry(selected.get("expiry"), timestamp)
         theta_settings = {
             **settings,
             "quantity": selected["quantity"],
@@ -169,7 +172,7 @@ def evaluate_options_auto_decision(
             entry_timing = _relax_simple_ohlcv_entry_timing(entry_timing)
         warnings.extend(entry_timing.get("warnings") or [])
 
-        trade_plan = build_long_option_trade_plan(selected, position_size, regime.to_dict(), settings)
+        trade_plan = build_long_option_trade_plan(selected, position_size, regime.to_dict(), _market_context_exit_settings(settings, market_context))
 
     trade_candidate_validation = TradeCandidateValidator().validate(
         selected_side=selected_side,
@@ -195,6 +198,10 @@ def evaluate_options_auto_decision(
     execution = _execution_state(mode)
 
     market_blockers = []
+    enabled_underlyings = {str(item or "").upper() for item in list(settings.get("enabled_underlyings") or []) if str(item or "").strip()}
+    underlying = str(settings.get("underlying") or "").upper()
+    if enabled_underlyings and underlying and underlying not in enabled_underlyings:
+        market_blockers.append(f"{underlying} is not enabled for Options Auto.")
     if (market_cue.to_dict().get("fii_dii_status") or {}).get("status") == "REQUIRED_MISSING_UPLOAD":
         market_blockers.append("FII/DII CSV upload is required for pre-market cue.")
     if regime.recommended_side == SIDE_WAIT and not (simple_mode and selected_side in {SIDE_CE, SIDE_PE}):
@@ -409,10 +416,61 @@ def _explanation(allowed: bool, side: str, selected: dict[str, Any], score: dict
     return "No trade: setup did not produce a valid selected contract."
 
 
-def _effective_entry_score_threshold(settings: dict[str, Any]) -> float:
+def _effective_entry_score_threshold(settings: dict[str, Any], market_context: dict[str, Any] | None = None) -> float:
     if simple_ohlcv_entry_enabled(settings):
         return simple_ohlcv_threshold(settings)
-    return _number(settings.get("buy_score_threshold"), 70.0)
+    threshold = _number(settings.get("buy_score_threshold"), 70.0)
+    context = dict(market_context or {})
+    if bool(settings.get("market_context_dynamic_thresholds_enabled", False)):
+        threshold += _number(context.get("threshold_adjustment"))
+    return max(0.0, min(100.0, threshold))
+
+
+def _market_context_sizing_settings(settings: dict[str, Any], market_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = dict(settings or {})
+    if not bool(result.get("market_context_position_sizing_enabled", False)):
+        return result
+    context = dict(market_context or {})
+    enforcement = str(context.get("enforcement") or "").upper()
+    permission = str(context.get("permission") or "").upper()
+    multiplier = max(0.0, _number(context.get("size_multiplier"), 1.0))
+    if multiplier <= 0 and enforcement != ENFORCED:
+        return result
+    if result.get("number_of_lots") not in ("", None):
+        lots = int(_number(result.get("number_of_lots")))
+        result["number_of_lots"] = max(0, int(lots * multiplier)) if permission not in {"ALLOW", "ALLOW_SELECTIVE"} else max(1, int(lots * multiplier) or 1)
+    if result.get("max_lots_per_trade") not in ("", None):
+        max_lots = int(_number(result.get("max_lots_per_trade"), 1))
+        result["max_lots_per_trade"] = max(0, int(max_lots * multiplier)) if permission not in {"ALLOW", "ALLOW_SELECTIVE"} else max(1, int(max_lots * multiplier) or 1)
+    result["market_context_size_multiplier_applied"] = multiplier
+    return result
+
+
+def _market_context_exit_settings(settings: dict[str, Any], market_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = dict(settings or {})
+    if not bool(result.get("market_context_exit_policy_enabled", True)):
+        return result
+    context = dict(market_context or {})
+    result["market_context_target_multiplier_adjustment"] = _number(context.get("target_multiplier_adjustment"))
+    result["market_context_stoploss_multiplier_adjustment"] = _number(context.get("stoploss_multiplier_adjustment"))
+    if context.get("max_holding_minutes") not in ("", None):
+        result["max_holding_minutes"] = int(_number(context.get("max_holding_minutes"), result.get("max_holding_minutes") or 45))
+    return result
+
+
+def _expiry_day_sizing_settings(settings: dict[str, Any], selected: dict[str, Any]) -> dict[str, Any]:
+    result = dict(settings or {})
+    if int(_number(selected.get("days_to_expiry"), 999)) != 0:
+        return result
+    max_lots = int(_number(result.get("expiry_day_max_lots"), 0))
+    if max_lots <= 0:
+        return result
+    if result.get("number_of_lots") not in ("", None):
+        result["number_of_lots"] = min(int(_number(result.get("number_of_lots"), max_lots)), max_lots)
+    if result.get("max_lots_per_trade") not in ("", None):
+        result["max_lots_per_trade"] = min(int(_number(result.get("max_lots_per_trade"), max_lots)), max_lots)
+    result["expiry_day_max_lots_applied"] = max_lots
+    return result
 
 
 def _relax_simple_ohlcv_theta(theta: dict[str, Any]) -> dict[str, Any]:

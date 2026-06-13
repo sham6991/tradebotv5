@@ -273,6 +273,7 @@ class RealExecutionController:
             blockers.append("Emergency exit requires explicit confirmation.")
 
         actions = []
+        emergency_order_type = str(settings.get("emergency_flatten_order_type") or "AGGRESSIVE_LIMIT").upper()
         for position in rows:
             quantity = self._position_quantity(position)
             if quantity == 0:
@@ -285,7 +286,7 @@ class RealExecutionController:
                 "product": position.get("product") or "NRML",
                 "transaction_type": exit_side,
                 "quantity": abs(quantity),
-                "order_type": "LIMIT",
+                "order_type": emergency_order_type,
                 "ltp": position.get("last_price") or position.get("ltp") or position.get("average_price") or position.get("close"),
                 "reason": "Emergency position close plan; dry-run only by default.",
             })
@@ -296,6 +297,8 @@ class RealExecutionController:
         if allow_flatten and confirmed and not blockers:
             if not adapter:
                 blockers.append("Emergency flatten adapter is unavailable; use broker terminal/manual supervision.")
+            if emergency_order_type not in {"AGGRESSIVE_LIMIT", "LIMIT"}:
+                blockers.append("Emergency flatten currently supports AGGRESSIVE_LIMIT/LIMIT only.")
             for action in actions:
                 if blockers:
                     break

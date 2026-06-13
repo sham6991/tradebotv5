@@ -29,6 +29,7 @@ def build_long_option_trade_plan(
         entry * _number(settings.get("min_stoploss_pct"), 3.0) / 100.0,
         _number(settings.get("minimum_stoploss_points"), 2.0),
     )
+    stop_distance *= max(0.5, 1.0 + _number(settings.get("market_context_stoploss_multiplier_adjustment"), 0.0))
     profile = str(settings.get("strategy_profile") or "BALANCED").upper()
     if str(regime.get("regime") or "").startswith("strong"):
         risk_reward = max(_profile_rr(profile), _number(regime.get("target_multiplier"), 1.6))
@@ -38,6 +39,7 @@ def build_long_option_trade_plan(
         risk_reward = _profile_rr(profile)
     if selected.get("days_to_expiry") == 0:
         risk_reward = min(risk_reward, 1.2)
+    risk_reward = max(0.7, risk_reward + _number(settings.get("market_context_target_multiplier_adjustment"), 0.0))
     target_distance = stop_distance * risk_reward
     stoploss = round_to_tick(entry - stop_distance, tick_size)
     target = round_to_tick(entry + target_distance, tick_size)
@@ -54,9 +56,11 @@ def build_long_option_trade_plan(
         "quantity": int(sizing.get("quantity") or 0),
         "lots": int(sizing.get("lots") or 0),
         "lot_size": int(selected.get("lot_size") or 0),
-        "order_type": "LIMIT",
-        "stoploss_order_type": "SL",
-        "target_order_type": "LIMIT",
+        "risk_reward": round(risk_reward, 4),
+        "max_holding_minutes": settings.get("max_holding_minutes"),
+        "order_type": str(settings.get("buy_order_type") or "LIMIT").upper(),
+        "stoploss_order_type": str(settings.get("stoploss_order_type") or "SL").upper(),
+        "target_order_type": str(settings.get("target_order_type") or "LIMIT").upper(),
         "trailing_style": regime.get("trailing_style"),
     }
 

@@ -68,6 +68,27 @@ class OptionsAutoTradeCandidateValidatorTests(unittest.TestCase):
         self.assertEqual(result["stage"], "LIQUIDITY_BLOCKED")
         self.assertIn("Depth too low.", result["blockers"])
 
+    def test_min_volume_and_oi_settings_block_candidate(self):
+        result = self.validate(
+            selected_contract=contract(volume=500, oi=1000),
+            settings={"buy_score_threshold": 50, "max_spread_pct": 0.6, "min_depth_qty": 1, "min_volume": 1000, "min_oi": 2000},
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["stage"], "LIQUIDITY_BLOCKED")
+        self.assertIn("Volume below configured minimum.", result["blockers"])
+        self.assertIn("OI below configured minimum.", result["blockers"])
+
+    def test_strict_liquidity_blocks_missing_depth(self):
+        result = self.validate(
+            selected_contract=contract(depth_present=False),
+            settings={"buy_score_threshold": 50, "max_spread_pct": 0.6, "min_depth_qty": 1, "strict_liquidity_filter": True},
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["stage"], "LIQUIDITY_BLOCKED")
+        self.assertIn("Market depth is missing.", result["blockers"])
+
     def test_theta_score_and_timing_stages_are_separate(self):
         theta = self.validate(theta_premium_risk={"allowed": False, "blockers": ["Theta risk too high."], "warnings": []})
         score = self.validate(trade_score={"score": 40}, effective_score_threshold=50)

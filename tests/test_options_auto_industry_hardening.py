@@ -447,6 +447,25 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
         self.assertEqual(snapshot["subscribed_tokens"], [1001, 2001, 2002])
         self.assertEqual(len(snapshot["option_candles"]["streams"]), 2)
 
+    def test_live_feed_does_not_invent_bid_ask_when_depth_missing(self):
+        feed = OptionsLiveFeed()
+        feed.subscribe_locked_contracts(1001, {"instrument_token": 2001, "tradingsymbol": "NIFTY26JUN22500CE", "exchange": "NFO"}, {"instrument_token": 2002})
+        now = datetime.now()
+
+        feed.on_tick({"instrument_token": 2001, "last_price": 110, "timestamp": now}, role="CE", interval="1minute")
+        quote = feed.quote_candidates(
+            [{"instrument_token": 2001, "tradingsymbol": "NIFTY26JUN22500CE", "exchange": "NFO"}],
+            {"max_tick_age_seconds": 3},
+        )["quotes"]["NFO:NIFTY26JUN22500CE"]
+        stream = feed.snapshot()["tick_streams"]["CE"]
+
+        self.assertEqual(quote["ltp"], 110.0)
+        self.assertEqual(quote["bid"], 0.0)
+        self.assertEqual(quote["ask"], 0.0)
+        self.assertFalse(quote["depth_present"])
+        self.assertEqual(stream[-1]["ltp"], 110.0)
+        self.assertFalse(stream[-1]["depth_present"])
+
     def test_feed_health_blocks_new_entries_on_stale_ticks(self):
         health = OptionsFeedHealth()
         health.mark_tick("INDEX", datetime.now() - timedelta(seconds=10))
@@ -456,6 +475,7 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
         self.assertEqual(result["data_mode"], DATA_STALE)
         self.assertFalse(result["new_entries_allowed"])
         self.assertEqual(result["stale_labels"], ["INDEX"])
+        self.assertTrue(result["role_statuses"]["INDEX"]["stale"])
 
     def test_persistent_instrument_cache_reuses_daily_file(self):
         with tempfile.TemporaryDirectory() as tmp:

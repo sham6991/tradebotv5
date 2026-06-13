@@ -5,7 +5,7 @@ from typing import Any
 from options_auto.constants import SIDE_CE, SIDE_PE, SIDE_WAIT
 
 
-SIMPLE_ENTRY_MODES = {"OHLCV_VOLUME", "OHLCV_VOLUME_PROFILE", "SIMPLE_OHLCV", "MAIN_APP_STYLE"}
+SIMPLE_ENTRY_MODES = {"SIMPLE", "OHLCV_VOLUME", "OHLCV_VOLUME_PROFILE", "SIMPLE_OHLCV", "MAIN_APP_STYLE"}
 FULL_ENTRY_MODE = "FULL_CONFIRMATION"
 PROFILE_ENTRY_MODE = "PROFILE"
 SIMPLE_ENTRY_MODE = "OHLCV_VOLUME_PROFILE"
@@ -13,14 +13,11 @@ SIMPLE_ENTRY_MODE = "OHLCV_VOLUME_PROFILE"
 
 def resolve_entry_dependency_mode(settings: dict[str, Any] | None = None) -> str:
     settings = dict(settings or {})
-    raw_mode = str(settings.get("entry_dependency_mode") or PROFILE_ENTRY_MODE).strip().upper()
+    raw_mode = str(settings.get("entry_dependency_mode") or FULL_ENTRY_MODE).strip().upper()
     if raw_mode in SIMPLE_ENTRY_MODES:
         return SIMPLE_ENTRY_MODE
-    if raw_mode in {"FULL", "FULL_CONFIRMATION", "CONFIRMATION_STACK"}:
+    if raw_mode in {"FULL", "FULL_CONFIRMATION", "CONFIRMATION_STACK", PROFILE_ENTRY_MODE}:
         return FULL_ENTRY_MODE
-    profile = str(settings.get("strategy_profile") or "BALANCED").strip().upper()
-    if profile == "AGGRESSIVE" and _bool(settings.get("aggressive_uses_simple_ohlcv_entry"), True):
-        return SIMPLE_ENTRY_MODE
     return FULL_ENTRY_MODE
 
 

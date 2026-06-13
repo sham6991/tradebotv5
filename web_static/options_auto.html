@@ -126,6 +126,21 @@
                 <div><span>No-Trade Reason</span><strong id="oa-regime-block">-</strong></div>
               </div>
               </article>
+              <article class="oa-card">
+                <div class="oa-card-head">
+                  <h2>Market Context</h2>
+                  <span id="oa-market-context-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
+                </div>
+                <div id="oa-market-context-panel" class="oa-summary-grid"></div>
+                <p id="oa-market-context-reason" class="oa-muted">No market context evaluated yet.</p>
+              </article>
+              <article class="oa-card">
+                <div class="oa-card-head">
+                  <h2>Trade Candidate</h2>
+                  <span id="oa-trade-candidate-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
+                </div>
+                <div id="oa-trade-candidate-panel" class="oa-summary-grid"></div>
+              </article>
             </div>
 
             <article class="oa-card oa-trade-plan-card">
@@ -253,7 +268,6 @@
                 <label>Entry Mode
                   <select id="oa-backtest-entry-mode">
                     <option value="OHLCV_VOLUME_PROFILE">OHLCV + Volume Profile</option>
-                    <option value="PROFILE">Profile default</option>
                     <option value="FULL_CONFIRMATION">Full confirmation</option>
                   </select>
                 </label>
@@ -538,7 +552,6 @@
                 <label>Entry Mode
                   <select id="oa-entry-mode">
                     <option value="OHLCV_VOLUME_PROFILE">OHLCV + Volume Profile</option>
-                    <option value="PROFILE">Profile default</option>
                     <option value="FULL_CONFIRMATION">Full confirmation</option>
                   </select>
                 </label>
@@ -632,6 +645,10 @@
               <div class="oa-toggle-row">
                 <label><input id="oa-confirm-real" type="checkbox"> Real mode explicitly confirmed</label>
                 <label><input id="oa-static-ip" type="checkbox"> Static IP/order readiness confirmed</label>
+                <label><input id="oa-dry-run-real" type="checkbox" checked> Real dry-run only</label>
+                <label><input id="oa-real-orders-enabled" type="checkbox"> Real orders enabled</label>
+                <label><input id="oa-real-auto-entry" type="checkbox"> Real auto entry</label>
+                <label><input id="oa-market-context-enforced" type="checkbox"> Enforce market context</label>
               </div>
               <p class="oa-danger-text">Real order controls are guarded by LIVE login, preflight, final validation, OCO, and reconciliation.</p>
             </details>

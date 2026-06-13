@@ -171,6 +171,56 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertTrue(result["dry_run_ready"])
         self.assertIn("dry-run override", "; ".join(result["blockers"]))
 
+    def test_real_preflight_blocks_when_real_orders_disabled_even_without_dry_run(self):
+        client = FakeRealClient()
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+
+        result = service.real_preflight_check({
+            "mode": "REAL",
+            "settings": {
+                "mode": "REAL",
+                "confirm_real_mode": True,
+                "static_ip_confirmed": True,
+                "dry_run_real_only": False,
+                "real_orders_enabled": False,
+            },
+            "kite_profile": {"user_id": "REAL1"},
+            "broker_orders": [],
+            "positions": [],
+            "market_open": True,
+            "instruments_valid": True,
+        })
+
+        self.assertFalse(result["allowed"])
+        self.assertTrue(result["dry_run_ready"])
+        self.assertFalse(result["real_orders_enabled"])
+        self.assertIn("Real orders are disabled", "; ".join(result["blockers"]))
+
+    def test_start_real_engine_does_not_force_enable_real_flags(self):
+        client = FakeRealClient()
+        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+
+        result = service.start_real_engine({
+            "settings": {
+                "confirm_real_mode": True,
+                "static_ip_confirmed": True,
+                "dry_run_real_only": True,
+                "real_orders_enabled": False,
+                "real_auto_entry_enabled": False,
+            },
+            "kite_profile": {"user_id": "REAL1"},
+            "broker_orders": [],
+            "positions": [],
+            "market_open": True,
+            "instruments_valid": True,
+        })
+
+        self.assertFalse(result["allowed"])
+        self.assertFalse(service.settings["real_orders_enabled"])
+        self.assertTrue(service.settings["dry_run_real_only"])
+        self.assertFalse(service.settings["real_auto_entry_enabled"])
+        self.assertEqual(client.limit_orders, [])
+
     def test_duplicate_and_manual_orders_block_reconciliation(self):
         engine = ReconciliationEngine()
         duplicate = auto_order("A1")

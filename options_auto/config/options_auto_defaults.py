@@ -65,6 +65,19 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "min_oi": 0,
     "quote_stale_seconds": 3.0,
     "market_cue_alignment_required": False,
+    "market_context_enabled": True,
+    "market_context_enforcement_enabled": False,
+    "market_context_dynamic_thresholds_enabled": False,
+    "market_context_position_sizing_enabled": False,
+    "market_context_exit_policy_enabled": True,
+    "market_context_expiry_scalp_enabled": False,
+    "market_context_unknown_blocks_when_enforced": True,
+    "market_context_expiry_scalp_max_holding_minutes": 8,
+    "news_event_enabled": True,
+    "news_event_min_score_for_shock": 70.0,
+    "news_event_require_market_confirmation": True,
+    "news_event_fail_open": True,
+    "news_refresh_ttl_seconds": 300,
     "news_sentiment_weight": 3.0,
     "trend_strength_threshold": 55.0,
     "atr_target_multiplier": 1.5,
@@ -225,6 +238,16 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "allow_real_emergency_flatten",
         "modify_limit_allowed",
         "market_cue_alignment_required",
+        "market_context_enabled",
+        "market_context_enforcement_enabled",
+        "market_context_dynamic_thresholds_enabled",
+        "market_context_position_sizing_enabled",
+        "market_context_exit_policy_enabled",
+        "market_context_expiry_scalp_enabled",
+        "market_context_unknown_blocks_when_enforced",
+        "news_event_enabled",
+        "news_event_require_market_confirmation",
+        "news_event_fail_open",
         "premium_expansion_required",
         "allow_target_extension",
         "expiry_scalp_extension_enabled",
@@ -288,6 +311,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "max_spread_pct",
         "quote_stale_seconds",
         "news_sentiment_weight",
+        "news_event_min_score_for_shock",
         "trend_strength_threshold",
         "atr_target_multiplier",
         "atr_stoploss_multiplier",
@@ -365,21 +389,38 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "max_full_quote_batch_size",
         "real_broker_reconcile_poll_seconds",
         "event_driven_min_scan_interval_ms",
+        "market_context_expiry_scalp_max_holding_minutes",
+        "news_refresh_ttl_seconds",
     ):
         settings[key] = _int(settings.get(key), int(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 
     settings["mode"] = str(settings.get("mode") or MODE_PAPER).strip().upper()
     settings["underlying"] = str(settings.get("underlying") or "NIFTY").strip().upper()
     settings["strategy_profile"] = str(settings.get("strategy_profile") or "BALANCED").strip().upper()
-    entry_mode = str(settings.get("entry_dependency_mode") or "PROFILE").strip().upper()
+    _normalize_market_context_aliases(settings, payload)
+    entry_mode = str(settings.get("entry_dependency_mode") or "FULL_CONFIRMATION").strip().upper()
     if entry_mode in {"SIMPLE", "SIMPLE_OHLCV", "MAIN_APP_STYLE", "OHLCV_VOLUME", "OHLCV_VOLUME_PROFILE"}:
         entry_mode = "OHLCV_VOLUME_PROFILE"
-    elif entry_mode in {"FULL", "FULL_CONFIRMATION", "CONFIRMATION_STACK"}:
+    elif entry_mode in {"FULL", "FULL_CONFIRMATION", "CONFIRMATION_STACK", "PROFILE"}:
         entry_mode = "FULL_CONFIRMATION"
     else:
-        entry_mode = "PROFILE"
+        entry_mode = "FULL_CONFIRMATION"
     settings["entry_dependency_mode"] = entry_mode
     settings["expiry_preference"] = str(settings.get("expiry_preference") or "AUTO").strip().upper()
     settings["backtest_entry_mode"] = str(settings.get("backtest_entry_mode") or "NEXT_CANDLE_OPEN_PLUS_SLIPPAGE").strip().upper()
     settings["same_day_expiry_cutoff_time"] = str(settings.get("same_day_expiry_cutoff_time") or "11:30").strip()
     return settings
+
+
+def _normalize_market_context_aliases(settings: dict[str, Any], payload: dict[str, Any]) -> None:
+    aliases = {
+        "market_playbook_enabled": "market_context_enabled",
+        "market_playbook_enforcement_enabled": "market_context_enforcement_enabled",
+        "market_playbook_dynamic_thresholds_enabled": "market_context_dynamic_thresholds_enabled",
+        "market_playbook_position_sizing_enabled": "market_context_position_sizing_enabled",
+        "market_playbook_exit_policy_enabled": "market_context_exit_policy_enabled",
+        "market_playbook_expiry_scalp_enabled": "market_context_expiry_scalp_enabled",
+    }
+    for old_key, new_key in aliases.items():
+        if old_key in payload and payload.get(old_key) not in (None, ""):
+            settings[new_key] = _bool(payload.get(old_key), bool(DEFAULT_OPTIONS_AUTO_SETTINGS[new_key]))

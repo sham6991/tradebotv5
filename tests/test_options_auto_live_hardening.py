@@ -257,6 +257,7 @@ def live_settings(mode):
         "static_ip_confirmed": mode == MODE_REAL,
         "confirm_real_mode": mode == MODE_REAL,
         "real_orders_enabled": mode == MODE_REAL,
+        "real_auto_entry_enabled": mode == MODE_REAL,
         "dry_run_real_only": False if mode == MODE_REAL else True,
     }
 
@@ -617,6 +618,8 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
             self.assertTrue(status["reference_cache"]["warmed"])
             self.assertTrue(os.path.exists(status["runtime_persistence"]["path"]))
             self.assertIn("websocket_connected", status["api_budget"])
+            self.assertEqual(status["scan_scheduler"]["event_driven_min_scan_interval_ms"], 1)
+            self.assertIn("last_tick_at", status["stale_diagnostics"])
             service.stop_live_scan({"mode": MODE_PAPER})
 
     def test_incremental_index_feature_cache_reuses_same_live_frame(self):

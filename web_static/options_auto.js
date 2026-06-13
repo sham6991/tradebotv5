@@ -75,8 +75,9 @@ async function api(path, payload, requestOptions = {}) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       };
+  const requestPath = payload === undefined ? withCacheBuster(path) : path;
   try {
-    const response = await fetch(path, { ...fetchOptions, signal: controller.signal });
+    const response = await fetch(requestPath, { ...fetchOptions, cache: "no-store", signal: controller.signal });
     const data = await response.json();
     if (!response.ok || data.error) throw new Error(data.error || response.statusText);
     return data;
@@ -88,6 +89,11 @@ async function api(path, payload, requestOptions = {}) {
   } finally {
     window.clearTimeout(timer);
   }
+}
+
+function withCacheBuster(path) {
+  const separator = String(path || "").includes("?") ? "&" : "?";
+  return `${path}${separator}_=${Date.now()}`;
 }
 
 function requestTimeoutMs(path, payload, requestOptions = {}) {
@@ -153,6 +159,14 @@ function score(input) {
 function percent(input) {
   if (input === undefined || input === null || input === "") return "-";
   return `${Number(input).toFixed(2)}%`;
+}
+
+function normalizeEntryMode(input) {
+  const mode = text(input, "FULL_CONFIRMATION").trim().toUpperCase();
+  if (["SIMPLE", "SIMPLE_OHLCV", "MAIN_APP_STYLE", "OHLCV_VOLUME", "OHLCV_VOLUME_PROFILE"].includes(mode)) {
+    return "OHLCV_VOLUME_PROFILE";
+  }
+  return "FULL_CONFIRMATION";
 }
 
 function latency(item) {
@@ -283,6 +297,7 @@ function sampleReplayCandles() {
 // shared payload builders
 function settingsPayload(modeOverride = "") {
   const mode = modeOverride || ($("#oa-setting-mode")?.value || "PAPER");
+  const dryRunRealNode = $("#oa-dry-run-real");
   return {
     mode,
     underlying: $("#oa-underlying")?.value || $("#oa-backtest-symbol")?.value || "NIFTY",
@@ -290,7 +305,7 @@ function settingsPayload(modeOverride = "") {
     option_expiry: $("#oa-expiry-date")?.value || $("#oa-backtest-expiry")?.value || "",
     chart_interval: $("#oa-chart-interval")?.value || $("#oa-backtest-interval")?.value || "3minute",
     strategy_profile: $("#oa-profile")?.value || $("#oa-backtest-profile")?.value || "BALANCED",
-    entry_dependency_mode: $("#oa-entry-mode")?.value || $("#oa-backtest-entry-mode")?.value || "OHLCV_VOLUME_PROFILE",
+    entry_dependency_mode: normalizeEntryMode($("#oa-entry-mode")?.value || $("#oa-backtest-entry-mode")?.value),
     number_of_lots: numberValue($("#oa-lots")?.value || $("#oa-backtest-lots")?.value, 1),
     buy_score_threshold: numberValue($("#oa-score-threshold")?.value, 50),
     paper_starting_balance: numberValue($("#oa-paper-balance")?.value, 20000),
@@ -337,6 +352,10 @@ function settingsPayload(modeOverride = "") {
     allow_demo_data: state.activeTab === "debug",
     confirm_real_mode: Boolean($("#oa-confirm-real")?.checked),
     static_ip_confirmed: Boolean($("#oa-static-ip")?.checked),
+    dry_run_real_only: dryRunRealNode ? Boolean(dryRunRealNode.checked) : true,
+    real_orders_enabled: Boolean($("#oa-real-orders-enabled")?.checked),
+    real_auto_entry_enabled: Boolean($("#oa-real-auto-entry")?.checked),
+    market_context_enforcement_enabled: Boolean($("#oa-market-context-enforced")?.checked),
   };
 }
 
@@ -385,7 +404,7 @@ function backtestPayload() {
       chart_interval: interval,
       paper_starting_balance: numberValue($("#oa-backtest-balance")?.value, 20000),
       strategy_profile: $("#oa-backtest-profile")?.value || "BALANCED",
-      entry_dependency_mode: $("#oa-backtest-entry-mode")?.value || $("#oa-entry-mode")?.value || "OHLCV_VOLUME_PROFILE",
+      entry_dependency_mode: normalizeEntryMode($("#oa-backtest-entry-mode")?.value || $("#oa-entry-mode")?.value),
       number_of_lots: numberValue($("#oa-backtest-lots")?.value || $("#oa-lots")?.value, 1),
       major_strike_step: numberValue($("#oa-backtest-major-step")?.value || $("#oa-major-strike-step")?.value, 100),
       max_trades_per_day: numberValue($("#oa-backtest-max-trades")?.value, 3),
@@ -479,7 +498,7 @@ function renderCockpitSafety(result = state.status || state.lastResult) {
   const lock = contractLockFromState({ liveOnly: true });
   const feed = status.options_live_feed || {};
   const feedHealth = feed.health || {};
-  const dataHealthy = !feedHealth.stale && !status.live_scan?.blocked;
+  const dataHealthy = !(feedHealth.stale || feedHealth.feed_stale) && !status.live_scan?.blocked;
   const governor = result.governor || {};
   const blockers = [];
   if (!connected) blockers.push(`${isReal ? "Real" : "Paper"} Kite not connected`);
@@ -588,7 +607,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
     ["Load instruments", Boolean(lock.ce || lock.pe || state.status.instrument_cache)],
     ["Confirm market open", true],
     ["Check margin", Boolean(account.real_margin || account.real?.funds)],
-    ["Check feed freshness", !(state.status.options_live_feed?.health || {}).stale],
+    ["Check feed freshness", !((state.status.options_live_feed?.health || {}).stale || (state.status.options_live_feed?.health || {}).feed_stale)],
     ["Check spread/depth", true],
     ["Run real preflight", Boolean(state.lastResult.preflight || state.lastResult.evidence)],
     ["Run real dry run", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
@@ -878,6 +897,8 @@ function renderDashboard() {
   setText("#oa-regime-confidence", regime.confidence !== undefined ? score(regime.confidence) : "-");
   setText("#oa-regime-aggression", regime.aggressiveness || "-");
   setText("#oa-regime-block", regime.no_trade_reason || "-");
+  renderMarketContext(result.market_context || result.market_playbook || {});
+  renderTradeCandidateValidation(result.trade_candidate_validation || {});
 
   setBadge("#oa-health-badge", health.mode || "Waiting", health.mode === "NORMAL" ? "green" : health.mode ? "yellow" : "grey");
   setText("#oa-session-health", health.session_health_score !== undefined ? score(health.session_health_score) : "-");
@@ -929,6 +950,40 @@ function renderDashboard() {
   renderDashboardAlerts(result);
 }
 
+function renderMarketContext(context = {}) {
+  const permission = context.permission || "WAITING";
+  const bad = Boolean(context.would_block) || ["WAIT", "BLOCK", "UNKNOWN"].includes(permission);
+  const good = ["ALLOW", "ALLOW_SELECTIVE"].includes(permission);
+  setBadge("#oa-market-context-badge", permission, bad ? "yellow" : good ? "green" : "grey");
+  setHtml("#oa-market-context-panel", [
+    metric("Market Type", context.market_type || "-"),
+    metric("Playbook", context.playbook || "-"),
+    metric("Recommended Side", context.recommended_side || "WAIT"),
+    metric("Confidence", context.confidence !== undefined ? score(context.confidence) : "-"),
+    metric("Enforcement", context.enforcement || "-"),
+    metric("Would Block", context.would_block === undefined ? "-" : context.would_block ? "YES" : "NO"),
+  ].join(""));
+  setText("#oa-market-context-reason", context.reason || "No market context evaluated yet.");
+}
+
+function renderTradeCandidateValidation(validation = {}) {
+  const stage = validation.stage || "WAITING";
+  const allowed = Boolean(validation.allowed);
+  const selected = validation.selected_contract || {};
+  const evidence = validation.evidence || {};
+  setBadge("#oa-trade-candidate-badge", stage, allowed ? "green" : stage === "WAITING" ? "grey" : "yellow");
+  setHtml("#oa-trade-candidate-panel", [
+    metric("Contract", selected.tradingsymbol || evidence.tradingsymbol || "-"),
+    metric("Side", selected.option_type || selected.instrument_type || evidence.side || "-"),
+    metric("Score", evidence.score !== undefined ? score(evidence.score) : "-"),
+    metric("LTP", selected.ltp || evidence.ltp || "-"),
+    metric("Bid / Ask", selected.bid || selected.ask ? `${text(selected.bid)} / ${text(selected.ask)}` : "-"),
+    metric("Spread", selected.spread_pct !== undefined ? percent(selected.spread_pct) : "-"),
+    metric("Depth", selected.total_depth || evidence.total_depth || "-"),
+    metric("Blockers", (validation.blockers || []).slice(0, 2).join("; ") || "-"),
+  ].join(""));
+}
+
 function renderDashboardIdle(session, result = {}) {
   const message = session.message || "Start the matching engine to begin live scanning.";
   setBadge("#oa-dashboard-cue-badge", session.label, session.connected ? "yellow" : "red");
@@ -944,6 +999,8 @@ function renderDashboardIdle(session, result = {}) {
   setText("#oa-regime-confidence", "-");
   setText("#oa-regime-aggression", "-");
   setText("#oa-regime-block", message);
+  renderMarketContext({ permission: "WAIT", reason: message });
+  renderTradeCandidateValidation({ stage: "WAITING", blockers: [message] });
 
   setBadge("#oa-health-badge", session.label, session.connected ? "yellow" : "red");
   setText("#oa-session-health", "-");
@@ -987,6 +1044,8 @@ function renderDashboardWaiting(session) {
   setText("#oa-regime-confidence", "-");
   setText("#oa-regime-aggression", "-");
   setText("#oa-regime-block", message);
+  renderMarketContext({ permission: "WAIT", reason: message });
+  renderTradeCandidateValidation({ stage: "WAITING", blockers: [message] });
 
   setBadge("#oa-health-badge", "SCANNING", "yellow");
   setText("#oa-session-health", "-");
@@ -1913,14 +1972,7 @@ async function runRealPreflight() {
 }
 
 function realEnginePayload() {
-  const payload = evaluationPayload("REAL");
-  payload.settings = {
-    ...payload.settings,
-    dry_run_real_only: false,
-    real_orders_enabled: true,
-    real_auto_entry_enabled: true,
-  };
-  return payload;
+  return evaluationPayload("REAL");
 }
 
 async function startRealEngine() {
@@ -2157,7 +2209,7 @@ function applySettings(settings) {
     ["#oa-underlying", settings.underlying],
     ["#oa-expiry-date", settings.expiry || settings.option_expiry],
     ["#oa-profile", settings.strategy_profile],
-    ["#oa-entry-mode", settings.entry_dependency_mode],
+    ["#oa-entry-mode", normalizeEntryMode(settings.entry_dependency_mode)],
     ["#oa-chart-interval", settings.chart_interval],
     ["#oa-lots", settings.number_of_lots],
     ["#oa-score-threshold", settings.buy_score_threshold],
@@ -2193,7 +2245,7 @@ function applySettings(settings) {
     ["#oa-backtest-lots", settings.number_of_lots],
     ["#oa-backtest-major-step", settings.major_strike_step],
     ["#oa-backtest-profile", settings.strategy_profile],
-    ["#oa-backtest-entry-mode", settings.entry_dependency_mode],
+    ["#oa-backtest-entry-mode", normalizeEntryMode(settings.entry_dependency_mode)],
     ["#oa-backtest-score", settings.buy_score_threshold],
     ["#oa-backtest-span", settings.atm_scan_strike_span],
   ];
@@ -2216,6 +2268,10 @@ function applySettings(settings) {
     ["#oa-strict-liquidity", settings.strict_liquidity_filter],
     ["#oa-confirm-real", settings.confirm_real_mode],
     ["#oa-static-ip", settings.static_ip_confirmed],
+    ["#oa-dry-run-real", settings.dry_run_real_only],
+    ["#oa-real-orders-enabled", settings.real_orders_enabled],
+    ["#oa-real-auto-entry", settings.real_auto_entry_enabled],
+    ["#oa-market-context-enforced", settings.market_context_enforcement_enabled],
   ];
   toggles.forEach(([selector, checked]) => {
     const node = $(selector);

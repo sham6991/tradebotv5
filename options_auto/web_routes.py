@@ -178,6 +178,7 @@ class OptionsAutoWebRoutes:
         session_started = bool(live_scan.get("running")) and live_scan_mode == trade_mode and selected_connected
         session_state = "RUNNING" if session_started else "DISCONNECTED" if not selected_connected else "SESSION_NOT_STARTED"
         data_health = feed.get("health") or {}
+        feed_stale = bool(data_health.get("stale") or data_health.get("feed_stale"))
         protection_state = str(lifecycle.get("protected_state") or "FLAT").upper()
         lifecycle_state = str(lifecycle.get("state") or "IDLE").upper()
         blockers = []
@@ -187,7 +188,7 @@ class OptionsAutoWebRoutes:
             blockers.append("Paper data Zerodha not connected")
         if selected_connected and not session_started:
             blockers.append("Session not started")
-        if data_health.get("stale"):
+        if feed_stale:
             blockers.append("Options feed is stale")
         if not (lock.get("ce") and lock.get("pe")):
             blockers.append("Contracts are not locked")
@@ -197,7 +198,7 @@ class OptionsAutoWebRoutes:
             "mode": mode,
             "real_money_state": "ARMED" if mode == "REAL" and real_connected else "LOCKED",
             "kite": "CONNECTED" if selected_connected else "DISCONNECTED",
-            "data": "STALE" if data_health.get("stale") else "HEALTHY" if data_health else "WAITING",
+            "data": "STALE" if feed_stale else "HEALTHY" if data_health else "WAITING",
             "engine": session_state,
             "session_started": session_started,
             "session_state": session_state,
@@ -225,6 +226,8 @@ class OptionsAutoWebRoutes:
             "live_index_candles": status.get("live_index_candles") or {},
             "contract_lock": status.get("contract_lock") or {},
             "live_scan": live_scan,
+            "scan_scheduler": status.get("scan_scheduler") or {},
+            "stale_diagnostics": status.get("stale_diagnostics") or {},
             "options_live_feed": feed,
             "real_order_lifecycle": lifecycle,
             "runtime_persistence": status.get("runtime_persistence") or {},

@@ -46,6 +46,8 @@ class FakeOptionsAutoService:
             "settings": {"mode": "REAL"},
             "session": {"active_trades": []},
             "options_live_feed": {"health": {"stale": False}},
+            "scan_scheduler": {"running": True, "event_driven_min_scan_interval_ms": 500},
+            "stale_diagnostics": {"last_tick_at": "2026-06-13T10:00:00", "reason": "healthy"},
             "contract_lock": {"lock": {"ce": {"tradingsymbol": "NIFTY26JUN23500CE"}, "pe": {"tradingsymbol": "NIFTY26JUN23400PE"}}},
             "real_order_lifecycle": {"state": "IDLE", "protected_state": "FLAT"},
             "real_safety": {"safe_mode": False},
@@ -83,6 +85,8 @@ class SummaryOnlyOptionsAutoService:
             "settings": {"mode": self.mode},
             "session": self.session,
             "live_scan": self.live_scan,
+            "scan_scheduler": {"running": bool(self.live_scan.get("running")), "event_driven_min_scan_interval_ms": 500},
+            "stale_diagnostics": {"last_tick_at": "2026-06-13T10:00:00", "reason": "healthy"},
             "options_live_feed": {"health": {"stale": False}},
             "contract_lock": {"lock": {"ce": {"tradingsymbol": "NIFTY26JUN23500CE"}, "pe": {"tradingsymbol": "NIFTY26JUN23400PE"}}},
             "real_order_lifecycle": {"state": "IDLE", "protected_state": "FLAT"},
@@ -195,6 +199,9 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
         self.assertTrue(result["session_started"])
         self.assertEqual(result["session_state"], "RUNNING")
         self.assertIn("latency", result)
+        self.assertIn("scan_scheduler", result)
+        self.assertIn("stale_diagnostics", result)
+        self.assertEqual(result["scan_scheduler"]["event_driven_min_scan_interval_ms"], 500)
         self.assertEqual(result["contract_lock"]["lock"]["ce"]["tradingsymbol"], "NIFTY26JUN23500CE")
 
     def test_options_auto_ui_summary_connected_but_stopped_is_not_started(self):

@@ -16,11 +16,13 @@ from options_auto.intelligence.exit_manager import build_long_option_trade_plan
 from options_auto.intelligence.feature_builder import build_index_features
 from options_auto.intelligence.master_governor import MasterGovernor
 from options_auto.intelligence.market_cue_engine import MarketCueEngine
+from options_auto.intelligence.market_context_router import ENFORCED, MarketContextRouter
 from options_auto.intelligence.options_greeks_risk_engine import OptionsGreeksRiskEngine
 from options_auto.intelligence.professional_discipline import ProfessionalDisciplineEngine
 from options_auto.intelligence.regime_classifier import RegimeClassifier
 from options_auto.intelligence.simple_ohlcv_entry import resolve_entry_dependency_mode, resolve_simple_ohlcv_side, simple_ohlcv_entry_enabled, simple_ohlcv_threshold
 from options_auto.intelligence.strike_selector import StrikeSelector
+from options_auto.intelligence.trade_candidate_validator import TradeCandidateValidator
 
 
 def evaluate_options_auto_decision(
@@ -57,6 +59,17 @@ def evaluate_options_auto_decision(
     if simple_mode and simple_side.get("side") in {SIDE_CE, SIDE_PE}:
         selected_side = str(simple_side["side"])
 
+    market_context = MarketContextRouter().route(
+        market_cue=market_cue.to_dict(),
+        regime=regime.to_dict(),
+        index_features=index_features,
+        news_event_signal=cue_payload.get("news_event_signal") or cue_payload.get("news_event") or {},
+        settings=settings,
+        timestamp=timestamp_text,
+        recent_side_state=cue_payload.get("recent_side_state") or {},
+        feed_health=cue_payload.get("feed_health") or cue_payload.get("options_data_health") or {},
+    ).to_dict()
+
     available_capital = _available_capital(mode, settings, account_state)
     settings["available_capital"] = available_capital
     news_score = _number(cue_payload.get("news_score"), market_cue.components.get("news", 0.0))
@@ -77,7 +90,8 @@ def evaluate_options_auto_decision(
     spot = _number(cue_payload.get("spot"), _number(cue_payload.get("index_ltp"), index_features.get("close", 0.0)))
     selection = StrikeSelector().select(list(option_candidates or []), dict(quotes or {}), spot, selected_side, settings, context)
     selected = dict(selection.selected or {})
-    blockers = list(selection.blockers)
+    selection_blockers = list(selection.blockers)
+    position_blockers: list[str] = []
     warnings: list[str] = []
     warnings.extend(regime.warnings)
 
@@ -87,6 +101,7 @@ def evaluate_options_auto_decision(
     trade_plan: dict[str, Any] = {}
     trade_score = {"score": 0.0, "breakdown": {}, "weights": {}}
     entry_timing = {"allowed": True, "state": "TIMING_OK", "blockers": [], "warnings": []}
+    effective_threshold = _effective_entry_score_threshold(settings)
 
     if selected:
         data_quality = DataQualityEngine().validate_quote(
@@ -98,7 +113,6 @@ def evaluate_options_auto_decision(
             },
             settings,
         ).to_dict()
-        blockers.extend(data_quality.get("blockers") or [])
         warnings.extend(data_quality.get("warnings") or [])
 
         preliminary_stop = max(
@@ -114,7 +128,7 @@ def evaluate_options_auto_decision(
             sizing_settings,
         )
         if int(position_size.get("quantity") or 0) <= 0:
-            blockers.append(position_size.get("reason") or "Insufficient capital/risk budget for one lot.")
+            position_blockers.append(position_size.get("reason") or "Insufficient capital/risk budget for one lot.")
 
         selected["quantity"] = int(position_size.get("quantity") or selected.get("lot_size") or 1)
         selected["days_to_expiry"] = _days_to_expiry(selected.get("expiry"), timestamp)
@@ -129,7 +143,6 @@ def evaluate_options_auto_decision(
         if simple_mode:
             theta_premium_risk = _relax_simple_ohlcv_theta(theta_premium_risk)
         selected["theta_premium_risk"] = theta_premium_risk
-        blockers.extend(theta_premium_risk.get("blockers") or [])
         warnings.extend(theta_premium_risk.get("warnings") or [])
         warnings.extend(selected.get("warnings") or [])
 
@@ -140,9 +153,6 @@ def evaluate_options_auto_decision(
             "entry_dependency_mode": selected.get("entry_dependency_mode") or entry_dependency_mode,
             "entry_dependency_reason": selected.get("entry_dependency_reason"),
         }
-        effective_threshold = _effective_entry_score_threshold(settings)
-        if float(trade_score.get("score") or 0) < effective_threshold:
-            blockers.append(f"TotalScore {float(trade_score.get('score') or 0):.1f} is below threshold {effective_threshold:.1f}.")
 
         entry_timing = EntryTimingEngine().evaluate(
             dict(cue_payload.get("signal_candle") or selected.get("candle") or {}),
@@ -157,10 +167,21 @@ def evaluate_options_auto_decision(
         )
         if simple_mode:
             entry_timing = _relax_simple_ohlcv_entry_timing(entry_timing)
-        blockers.extend(entry_timing.get("blockers") or [])
         warnings.extend(entry_timing.get("warnings") or [])
 
         trade_plan = build_long_option_trade_plan(selected, position_size, regime.to_dict(), settings)
+
+    trade_candidate_validation = TradeCandidateValidator().validate(
+        selected_side=selected_side,
+        selected_contract=selected,
+        settings=settings,
+        data_quality=data_quality,
+        theta_premium_risk=theta_premium_risk,
+        trade_score=trade_score,
+        entry_timing=entry_timing,
+        selection_blockers=selection_blockers,
+        effective_score_threshold=effective_threshold,
+    ).to_dict()
 
     risk = RiskEngine().evaluate(settings, risk_state or {}, now_epoch=_epoch(timestamp))
     discipline = ProfessionalDisciplineEngine().evaluate(
@@ -186,8 +207,17 @@ def evaluate_options_auto_decision(
         market_blockers.append("Market cue is strongly opposite the selected side.")
     if simple_mode and selected_side == SIDE_WAIT:
         market_blockers.append("Simple OHLCV/volume-profile entry did not produce a directional setup.")
+    if market_context.get("enforcement") == ENFORCED and market_context.get("would_block"):
+        market_blockers.append(f"Market context blocked trade: {market_context.get('market_type')} / {market_context.get('playbook')}")
+    if (
+        market_context.get("enforcement") == ENFORCED
+        and selected_side in {SIDE_CE, SIDE_PE}
+        and market_context.get("recommended_side") in {SIDE_CE, SIDE_PE}
+        and selected_side != market_context.get("recommended_side")
+    ):
+        market_blockers.append("Market context is opposite the selected side.")
 
-    strategy_blockers = list(dict.fromkeys(blockers))
+    strategy_blockers = list(dict.fromkeys(position_blockers + (trade_candidate_validation.get("blockers") or [])))
     governor = MasterGovernor().evaluate(
         ModeGuard(mode=mode).to_dict(),
         data_quality,
@@ -216,6 +246,8 @@ def evaluate_options_auto_decision(
         risk,
         discipline,
         governor,
+        market_context,
+        trade_candidate_validation,
         blockers,
         allowed,
         trade_plan,
@@ -227,6 +259,8 @@ def evaluate_options_auto_decision(
         "timestamp": timestamp_text,
         "market_cue": market_cue.to_dict(),
         "regime": regime.to_dict(),
+        "market_context": market_context,
+        "market_playbook": market_context,
         "selected_side": selected_side if selected else SIDE_WAIT,
         "selected_contract": selected,
         "selection": selection.to_dict(),
@@ -239,6 +273,7 @@ def evaluate_options_auto_decision(
         "risk": risk,
         "discipline": discipline,
         "entry_timing": entry_timing,
+        "trade_candidate_validation": trade_candidate_validation,
         "execution": execution,
         "governor": governor,
         "position_size": position_size,
@@ -319,6 +354,8 @@ def _decision_snapshot(
     risk: dict[str, Any],
     discipline: dict[str, Any],
     governor: dict[str, Any],
+    market_context: dict[str, Any],
+    trade_candidate_validation: dict[str, Any],
     blockers: list[str],
     allowed: bool,
     trade_plan: dict[str, Any],
@@ -337,6 +374,7 @@ def _decision_snapshot(
         "relative_volume": features.get("relative_volume"),
         "market_cue": market_cue,
         "regime": regime,
+        "market_context": market_context,
         "selected_side": selected_side,
         "selected_contract": selected,
         "expiry": selected.get("expiry"),
@@ -353,6 +391,7 @@ def _decision_snapshot(
         "expected_edge": theta.get("expected_edge") if isinstance(theta, dict) else {},
         "trade_score_breakdown": score,
         "data_quality": data_quality,
+        "trade_candidate_validation": trade_candidate_validation,
         "risk_state": risk,
         "discipline_state": discipline,
         "governor_state": governor,

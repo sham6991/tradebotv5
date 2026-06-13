@@ -174,6 +174,8 @@ class OptionsAutoTerminalService:
                 "live_index_candles": self.live_index_candles.snapshot(),
                 "contract_lock": self.locked_contract_manager.snapshot(),
                 "live_scan": self._live_scan_state_locked(),
+                "scan_scheduler": self._scan_scheduler_snapshot_locked(),
+                "stale_diagnostics": self._stale_diagnostics_locked(),
                 "options_live_feed": self.options_live_feed.snapshot(self.settings),
                 "real_order_lifecycle": self.real_lifecycle.snapshot(),
                 "blackbox": self.blackbox_recorder.snapshot(),
@@ -218,6 +220,8 @@ class OptionsAutoTerminalService:
                 "live_index_candles": self.live_index_candles.snapshot(),
                 "contract_lock": self.locked_contract_manager.snapshot(),
                 "live_scan": self._live_scan_state_locked(),
+                "scan_scheduler": self._scan_scheduler_snapshot_locked(),
+                "stale_diagnostics": self._stale_diagnostics_locked(),
                 "options_live_feed": self.options_live_feed.snapshot(self.settings),
                 "real_order_lifecycle": self.real_lifecycle.snapshot(),
                 "instrument_cache": self.options_instrument_cache.snapshot(),
@@ -500,7 +504,10 @@ class OptionsAutoTerminalService:
             self.logger.log("WARN", "Options Auto data blocked evaluation", mode=mode, blockers=decision["blockers"])
             return {**decision, "session": self.session.to_dict(), "paper_account": self.paper_broker.snapshot()}
         if live_data:
+            diagnostics = dict(live_data.get("diagnostics") or {})
             payload = {**payload, **dict(live_data.get("payload") or {})}
+            payload["options_data_health"] = diagnostics.get("options_data_health") or {}
+            payload["feed_health"] = (self.options_live_feed.snapshot(settings).get("health") or {})
             instruments = list(live_data.get("instruments") or instruments)
             quotes = dict(live_data.get("quotes") or quotes)
             if mode in {MODE_PAPER, MODE_REAL}:
@@ -1237,9 +1244,6 @@ class OptionsAutoTerminalService:
                 **self.settings,
                 **dict(payload.get("settings") or {}),
                 "mode": MODE_REAL,
-                "dry_run_real_only": False,
-                "real_orders_enabled": True,
-                "real_auto_entry_enabled": True,
             }
             settings = self._real_capability_settings(settings, MODE_REAL, client, {**payload, "settings": settings})
             payload["settings"] = settings
@@ -1669,6 +1673,54 @@ class OptionsAutoTerminalService:
                 "last_error": self._options_ws_last_error,
                 "order_update_count": len(self._options_ws_order_updates),
             },
+        }
+
+    def _scan_scheduler_snapshot_locked(self) -> dict[str, Any]:
+        running = bool(self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set())
+        last_event_at = ""
+        if self._last_event_scan_epoch:
+            try:
+                last_event_at = datetime.fromtimestamp(float(self._last_event_scan_epoch)).isoformat(timespec="seconds")
+            except (TypeError, ValueError, OSError):
+                last_event_at = ""
+        return {
+            "running": running,
+            "mode": self._live_scan_mode,
+            "interval_seconds": self._live_scan_interval_seconds,
+            "cycle_count": self._live_scan_cycle_count,
+            "last_decision_at": self._live_scan_last_cycle,
+            "event_driven_decisions_enabled": bool(self.settings.get("event_driven_decisions_enabled", True)),
+            "event_driven_min_scan_interval_ms": self.settings.get("event_driven_min_scan_interval_ms"),
+            "last_event_scan_wake_at": last_event_at,
+            "pending_entry_check_seconds": self.settings.get("pending_entry_check_seconds"),
+            "active_trade_check_seconds": self.settings.get("active_trade_check_seconds"),
+            "real_broker_reconcile_poll_seconds": self.settings.get("real_broker_reconcile_poll_seconds"),
+        }
+
+    def _stale_diagnostics_locked(self) -> dict[str, Any]:
+        feed = (self.options_live_feed.snapshot(self.settings).get("health") or {})
+        tick_times = [
+            str(feed.get("last_index_tick") or ""),
+            str(feed.get("last_ce_tick") or ""),
+            str(feed.get("last_pe_tick") or ""),
+        ]
+        last_tick_at = max([item for item in tick_times if item] or [""])
+        running = bool(self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set())
+        reason = "healthy"
+        if not last_tick_at:
+            reason = "waiting for websocket tick or quote polling fallback"
+        elif feed.get("feed_stale"):
+            reason = "feed is stale"
+        elif running and not self._live_scan_last_cycle:
+            reason = "waiting for first decision cycle"
+        elif running:
+            reason = "waiting for min scan interval or next data event"
+        return {
+            "last_tick_at": last_tick_at,
+            "last_decision_at": self._live_scan_last_cycle,
+            "ticks_receiving": bool(last_tick_at) and not bool(feed.get("feed_stale")),
+            "decision_updating": running and bool(self._live_scan_last_cycle),
+            "reason": reason,
         }
 
     def _ensure_options_websocket_locked(
@@ -3341,12 +3393,13 @@ class OptionsAutoTerminalService:
         if client:
             explicit_dry_run = "dry_run_real_only" in payload or "dry_run_real_only" in dict(payload.get("settings") or {})
             explicit_real_orders = "real_orders_enabled" in payload or "real_orders_enabled" in dict(payload.get("settings") or {})
-            if explicit_real_orders:
-                settings["real_orders_enabled"] = bool(settings.get("real_orders_enabled"))
-                if settings["real_orders_enabled"] and not explicit_dry_run:
-                    settings["dry_run_real_only"] = False
-            else:
+            explicit_real_auto = "real_auto_entry_enabled" in payload or "real_auto_entry_enabled" in dict(payload.get("settings") or {})
+            settings["real_orders_enabled"] = bool(settings.get("real_orders_enabled"))
+            settings["dry_run_real_only"] = bool(settings.get("dry_run_real_only"))
+            settings["real_auto_entry_enabled"] = bool(settings.get("real_auto_entry_enabled")) if explicit_real_auto else False
+            if not explicit_real_orders:
                 settings["real_orders_enabled"] = False
+            if not explicit_dry_run and not explicit_real_orders:
                 settings["dry_run_real_only"] = True
             if settings.get("dry_run_real_only"):
                 settings["real_orders_enabled"] = False

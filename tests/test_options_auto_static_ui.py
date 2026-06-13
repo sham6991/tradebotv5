@@ -22,6 +22,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-live-feed-panel"', html)
         self.assertIn('id="oa-real-lifecycle-panel"', html)
         self.assertIn('id="oa-blackbox-panel"', html)
+        self.assertIn('id="oa-market-context-panel"', html)
+        self.assertIn('id="oa-trade-candidate-panel"', html)
         self.assertEqual(html.count('data-index-tick-panel'), 3)
         self.assertEqual(html.count('data-contract-lock-card'), 3)
         self.assertEqual(html.count('data-contract-lock-badge'), 3)
@@ -34,6 +36,29 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-real-kill"', html)
         self.assertIn("REAL MONEY MODE - LIVE ZERODHA ORDERS ONLY AFTER PREFLIGHT", html)
         self.assertNotIn("disabled in this build", html.lower())
+
+    def test_entry_mode_ui_does_not_offer_profile_default(self):
+        html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        self.assertIn('value="OHLCV_VOLUME_PROFILE"', html)
+        self.assertIn('value="FULL_CONFIRMATION"', html)
+        self.assertNotIn('value="PROFILE"', html)
+        self.assertIn("function normalizeEntryMode", js)
+
+    def test_start_real_payload_does_not_force_real_enablement(self):
+        html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        match = re.search(r"function realEnginePayload\(\) \{(?P<body>.*?)\n\}", js, re.DOTALL)
+
+        self.assertIsNotNone(match)
+        body = match.group("body")
+        self.assertIn('id="oa-dry-run-real" type="checkbox" checked', html)
+        self.assertIn("dryRunRealNode ? Boolean(dryRunRealNode.checked) : true", js)
+        self.assertIn('evaluationPayload("REAL")', body)
+        self.assertNotIn("dry_run_real_only: false", body)
+        self.assertNotIn("real_orders_enabled: true", body)
+        self.assertNotIn("real_auto_entry_enabled: true", body)
 
     def test_raw_json_controls_stay_in_debug_tab(self):
         html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
@@ -193,6 +218,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
 
         self.assertIn("/api/options-auto/ui-summary", js)
         self.assertIn("/api/options-auto/status", js)
+        self.assertIn("withCacheBuster", js)
+        self.assertIn('cache: "no-store"', js)
         self.assertIn("scheduleRefresh", js)
         self.assertIn("state.activeTab === \"debug\"", js)
         self.assertIn("timeoutMs", js)

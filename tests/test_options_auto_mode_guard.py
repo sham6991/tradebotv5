@@ -32,7 +32,7 @@ class OptionsAutoModeGuardTests(unittest.TestCase):
             self.assertEqual(result["session"]["status"], "REAL_DRY_RUN_SCANNING")
             self.assertTrue(result["live_scan"]["running"])
             self.assertEqual(result["orders_sent"], 0)
-            self.assertIn("scanner started", result["message"])
+            self.assertIn("Scanner test started", result["message"])
             service.stop_live_scan({"mode": "REAL"})
 
 

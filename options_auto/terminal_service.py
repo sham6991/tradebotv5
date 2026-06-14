@@ -1668,6 +1668,9 @@ class OptionsAutoTerminalService:
             payload["settings"] = settings
             self._configure_locked(settings, kite_profile=payload.get("kite_profile") or {}, preserve_session=False, return_status=False)
             self.real_api_manager.client = client
+            scanner_blockers = self._real_scanner_start_blockers_locked(settings, client)
+            if scanner_blockers:
+                return self._blocked_real_order(scanner_blockers)
 
             preflight = self.real_preflight_check({
                 **payload,
@@ -1675,21 +1678,34 @@ class OptionsAutoTerminalService:
                 "market_open": payload.get("market_open", True),
                 "instruments_valid": payload.get("instruments_valid", True),
             })
-            if not preflight.get("allowed"):
-                return self._blocked_real_order(preflight.get("blockers") or ["Real engine preflight failed."], preflight=preflight)
-
-            self.session.status = "REAL_SCANNING"
-            self.session.record_safety_event("Real Options Auto engine started", {"orders_sent": 0, "auto_entry": True})
-            self._start_live_scan_locked(MODE_REAL, payload, status="REAL_SCANNING")
+            real_order_ready = bool(preflight.get("allowed"))
+            order_blockers = list(preflight.get("blockers") or [])
+            scan_only = bool(settings.get("dry_run_real_only") or not settings.get("real_orders_enabled"))
+            status = "REAL_DRY_RUN_SCANNING" if scan_only else "REAL_SCANNING"
+            self.session.status = status
+            self.session.record_safety_event(
+                "Real Options Auto scanner started",
+                {"orders_sent": 0, "real_order_ready": real_order_ready, "order_blockers": order_blockers},
+            )
+            self._start_live_scan_locked(MODE_REAL, payload, status=status)
+            if real_order_ready:
+                message = "Real scanner started. It will scan fresh real data and place one guarded BUY LIMIT when a valid setup appears."
+            elif scan_only:
+                message = "Real scanner started in scan-only mode. Real orders are not armed, so Zerodha orders will not be sent."
+            else:
+                first_blocker = order_blockers[0] if order_blockers else "real order preflight is not ready"
+                message = f"Real scanner started, but order placement is blocked until preflight is clean: {first_blocker}"
             return {
                 "allowed": True,
                 "real_engine_started": True,
+                "real_order_ready": real_order_ready,
+                "real_order_blockers": order_blockers,
                 "real_order_sent": False,
                 "orders_sent": 0,
                 "preflight": preflight,
                 "session": self.session.to_dict(),
                 "live_scan": self._live_scan_state_locked(),
-                "message": "Real engine started. It will scan fresh real data and place one guarded BUY LIMIT when a valid setup appears.",
+                "message": message,
             }
 
     def _start_live_scan_locked(self, mode: str, payload: dict[str, Any], status: str) -> None:
@@ -1711,6 +1727,16 @@ class OptionsAutoTerminalService:
         self._live_scan_thread = threading.Thread(target=self._live_scan_loop, args=(stop_event,), daemon=True)
         self._live_scan_thread.start()
         self.logger.log("INFO", "Options Auto live scanner started", mode=self._live_scan_mode, interval_seconds=self._live_scan_interval_seconds)
+
+    def _real_scanner_start_blockers_locked(self, settings: dict[str, Any], client: Any | None) -> list[str]:
+        blockers: list[str] = []
+        if not settings.get("confirm_real_mode"):
+            blockers.append("Real mode confirmation is missing.")
+        if not client:
+            blockers.append("Real Money Zerodha is not connected.")
+        if not self._results_writable():
+            blockers.append("Options Auto results folder is not writable.")
+        return blockers
 
     def _stop_live_scan_locked(self, reason: str = "") -> None:
         if self._live_scan_thread and self._live_scan_thread.is_alive() and not self._live_scan_stop.is_set():
@@ -1983,7 +2009,7 @@ class OptionsAutoTerminalService:
             if dry_run:
                 action.update({
                     "setup_found": True,
-                    "reason": "Real dry-run override is active. Setup found, but zero real orders were sent.",
+                    "reason": "Real scan-only mode is active. Setup found, but zero real orders were sent.",
                 })
                 self.session.record_safety_event("Real Options Auto setup found in dry-run", {"orders_sent": 0})
                 return action
@@ -2771,7 +2797,7 @@ class OptionsAutoTerminalService:
             self._start_live_scan_locked(MODE_REAL, payload, status="REAL_DRY_RUN_SCANNING")
             result["session"] = self.session.to_dict()
             result["live_scan"] = self._live_scan_state_locked()
-            result["message"] = "Real dry-run scanner started. It keeps polling Real Zerodha data and sends zero orders."
+            result["message"] = "Scanner test started in real-data mode. It keeps polling Real Zerodha data and sends zero orders."
             return result
 
     def real_preflight_check(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:

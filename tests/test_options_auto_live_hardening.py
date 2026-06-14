@@ -462,11 +462,15 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
                 "instruments_valid": True,
             })
 
-            self.assertFalse(result["allowed"])
+            self.assertTrue(result["allowed"])
+            self.assertTrue(result["real_engine_started"])
+            self.assertFalse(result["real_order_ready"])
+            self.assertTrue(result["live_scan"]["running"])
             self.assertTrue(service.settings["dry_run_real_only"])
             self.assertFalse(service.settings["real_orders_enabled"])
             self.assertTrue(service.settings["real_auto_entry_enabled"])
             self.assertEqual(client.limit_orders, [])
+            service.stop_live_scan({"mode": MODE_REAL})
 
     def test_configure_does_not_reset_established_paper_account(self):
         with tempfile.TemporaryDirectory() as temp_dir:

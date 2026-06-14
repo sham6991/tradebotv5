@@ -157,7 +157,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertTrue(result["dry_run_ready"])
         self.assertFalse(result["real_orders_enabled"])
-        self.assertIn("dry-run override", "; ".join(result["blockers"]).lower())
+        self.assertIn("scan-only mode", "; ".join(result["blockers"]).lower())
 
     def test_real_preflight_respects_explicit_dry_run_override(self):
         client = FakeRealClient()
@@ -175,7 +175,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
 
         self.assertFalse(result["allowed"])
         self.assertTrue(result["dry_run_ready"])
-        self.assertIn("dry-run override", "; ".join(result["blockers"]))
+        self.assertIn("scan-only mode", "; ".join(result["blockers"]).lower())
 
     def test_real_preflight_blocks_when_real_orders_disabled_even_without_dry_run(self):
         client = FakeRealClient()
@@ -221,11 +221,15 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
             "instruments_valid": True,
         })
 
-        self.assertFalse(result["allowed"])
+        self.assertTrue(result["allowed"])
+        self.assertTrue(result["real_engine_started"])
+        self.assertFalse(result["real_order_ready"])
+        self.assertTrue(result["live_scan"]["running"])
         self.assertFalse(service.settings["real_orders_enabled"])
         self.assertTrue(service.settings["dry_run_real_only"])
         self.assertFalse(service.settings["real_auto_entry_enabled"])
         self.assertEqual(client.limit_orders, [])
+        service.stop_live_scan({"mode": "REAL"})
 
     def test_duplicate_and_manual_orders_block_reconciliation(self):
         engine = ReconciliationEngine()

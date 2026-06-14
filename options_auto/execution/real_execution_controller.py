@@ -150,7 +150,7 @@ class RealExecutionController:
         dry_run_ready = not blockers
         if not settings.get("real_orders_enabled"):
             if settings.get("dry_run_real_only"):
-                blockers.append("Real dry-run override is active; live order sending is blocked.")
+                blockers.append("Real scan-only mode is active; live order sending is blocked.")
             else:
                 blockers.append("Real orders are disabled; live order sending is blocked.")
         result = self._result("REAL_PREFLIGHT_OK" if not blockers else "BLOCKED_BY_EXECUTION", blockers, warnings, evidence)

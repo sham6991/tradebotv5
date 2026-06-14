@@ -650,7 +650,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
     ["Check feed freshness", !((state.status.options_live_feed?.health || {}).stale || (state.status.options_live_feed?.health || {}).feed_stale)],
     ["Check spread/depth", true],
     ["Run real preflight", hasRealPreflightResult(preflight)],
-    ["Run real dry run", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
+    ["Optional scanner test", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
     ["Arm real trading", connected && Boolean($("#oa-confirm-real")?.checked)],
     ["Start real scanner", state.status.live_scan?.running && state.status.live_scan?.mode === "REAL"],
     ["Approve setup when required", !approval || approval.status !== "PENDING"],
@@ -1290,6 +1290,15 @@ function renderIndustryDiagnostics() {
   const feedHealth = feed.health || {};
   const feedMode = feedHealth.data_mode || feed.data_mode || "UNKNOWN";
   const feedStale = Boolean(feedHealth.feed_stale);
+  const liveScan = result.live_scan || state.status.live_scan || {};
+  const subscribedTokens = feed.subscribed_tokens || liveScan.websocket?.tokens || [];
+  const websocketLabel = feed.websocket_connected
+    ? "CONNECTED"
+    : liveScan.running
+      ? subscribedTokens.length
+        ? "CONNECTING / WAITING"
+        : "WAITING FOR CONTRACT LOCK"
+      : "NOT STARTED";
   const roleStatuses = feedHealth.role_statuses || {};
   const freshRoles = Object.entries(roleStatuses).filter(([, item]) => item?.fresh).map(([role]) => role);
   const staleRoles = Object.entries(roleStatuses).filter(([, item]) => item?.stale).map(([role]) => role);
@@ -1304,7 +1313,7 @@ function renderIndustryDiagnostics() {
     metric("Broker Updates", "Polling + reconciliation"),
     metric("Postback Required", "NO"),
     metric("Postback", "DISABLED"),
-    metric("Websocket", feed.websocket_connected ? "CONNECTED" : "DISCONNECTED"),
+    metric("Websocket", websocketLabel),
     metric("Quote Fallback", feed.quote_polling_fallback ? "ENABLED" : "OFF"),
     metric("Index Tick", feedHealth.last_index_tick || "-"),
     metric("CE Tick", feedHealth.last_ce_tick || "-"),
@@ -1313,7 +1322,7 @@ function renderIndustryDiagnostics() {
     metric("Stale Roles", staleRoles.join(", ") || "-"),
     metric("Feed Stale", feedStale ? "YES" : "NO"),
     metric("Stale Labels", (feedHealth.stale_labels || []).join(", ") || "-"),
-    metric("Subscribed Tokens", (feed.subscribed_tokens || []).join(", ") || "-"),
+    metric("Subscribed Tokens", subscribedTokens.join(", ") || "-"),
     metric("Option Streams", (feed.option_candles?.streams || []).length),
     metric("Runtime Saved", runtime.last_saved_at || "-"),
     metric("Reference Warm", referenceCache.warmed ? "YES" : "NO"),
@@ -2216,9 +2225,11 @@ async function startRealEngine() {
     if (result.approval?.approval_id || result.real_pending_approval?.approval_id) {
       state.realPendingApprovalId = result.approval?.approval_id || result.real_pending_approval?.approval_id;
     }
+    if (result.preflight) state.lastRealPreflight = result.preflight;
     await refreshUiSummaryAfterMutation(result);
     renderAll();
-    setTabAlert("real", result.real_engine_started ? "Real scanner started. It will scan and wait for manual approval when required." : result.message || "Real scanner blocked.", result.real_engine_started ? "success" : "warning");
+    const alertKind = result.real_engine_started ? (result.real_order_ready ? "success" : "warning") : "warning";
+    setTabAlert("real", result.message || (result.real_engine_started ? "Real scanner started." : "Real scanner blocked."), alertKind);
   } catch (error) {
     setTabAlert("real", error.message, "danger");
   }
@@ -2267,7 +2278,7 @@ async function runRealDryRun() {
     const result = await api("/api/options-auto/real/dry-run", evaluationPayload("REAL"));
     await refreshUiSummaryAfterMutation(result);
     renderAll();
-    setTabAlert("real", result.message || "Real dry-run complete. No order placed.", "info");
+    setTabAlert("real", result.message || "Scanner test started. No Zerodha order will be placed.", "info");
   } catch (error) {
     setTabAlert("real", error.message, "danger");
   }

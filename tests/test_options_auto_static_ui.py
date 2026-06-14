@@ -38,6 +38,7 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-real-kill"', html)
         self.assertIn("REAL MONEY MODE - LIVE ZERODHA ORDERS ONLY AFTER PREFLIGHT", html)
         self.assertIn("Start Real Scanner", html)
+        self.assertIn("Test Scanner (No Orders)", html)
         self.assertNotIn("Start Real Engine", html)
         self.assertNotIn("disabled in this build", html.lower())
 
@@ -75,6 +76,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("syncSettingsToggles(\"paper\")", js)
         self.assertIn("syncSettingsToggles(\"settings\")", js)
         self.assertIn("Real Money Zerodha", js)
+        self.assertIn("WAITING FOR CONTRACT LOCK", js)
+        self.assertIn("NOT STARTED", js)
         self.assertIn("Entry Poll", js)
         self.assertIn("Order Updates", js)
         self.assertNotIn("Kite not connected", js)

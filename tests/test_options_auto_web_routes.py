@@ -40,6 +40,8 @@ class FakeOptionsAutoService:
         self.start_payload = None
         self.reset_payload = None
         self.upload_payload = None
+        self.real_approve_payload = None
+        self.real_reject_payload = None
 
     def status(self):
         return {
@@ -61,6 +63,14 @@ class FakeOptionsAutoService:
     def start_real_engine(self, payload):
         self.start_payload = dict(payload)
         return {"allowed": True, "real_engine_started": True, "real_order_sent": False}
+
+    def approve_real_entry(self, payload):
+        self.real_approve_payload = dict(payload)
+        return {"allowed": True, "real_order_sent": True, "orders_sent": 1}
+
+    def reject_real_entry(self, payload):
+        self.real_reject_payload = dict(payload)
+        return {"status": "REJECTED", "real_order_sent": False}
 
     def reset_paper_account(self, payload):
         self.reset_payload = dict(payload)
@@ -141,6 +151,18 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
         self.assertTrue(result["real_engine_started"])
         self.assertEqual(routes.service.start_payload["kite_profile"], {"user_id": "REAL1"})
         self.assertTrue(result["account_status"]["real"]["connected"])
+
+    def test_real_approval_routes_reach_service_when_live_connected(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
+        routes.service = FakeOptionsAutoService()
+        handler = FakeHandler()
+
+        approved = routes.handle_post(handler, "/api/options-auto/real/approve-entry", {"approval_id": "OA-REAL-1"})
+        rejected = routes.handle_post(handler, "/api/options-auto/real/reject-entry", {"approval_id": "OA-REAL-1"})
+
+        self.assertTrue(approved["real_order_sent"])
+        self.assertEqual(rejected["status"], "REJECTED")
+        self.assertEqual(routes.service.real_approve_payload["kite_profile"], {"user_id": "REAL1"})
 
     def test_options_auto_service_provider_maps_real_and_live_to_live_client(self):
         app_state = FakeAppState(paper_connected=False, live_connected=True)

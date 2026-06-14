@@ -259,6 +259,7 @@ def live_settings(mode):
         "real_orders_enabled": mode == MODE_REAL,
         "real_auto_entry_enabled": mode == MODE_REAL,
         "dry_run_real_only": False if mode == MODE_REAL else True,
+        "news_event_enabled": False,
     }
 
 
@@ -896,6 +897,44 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
         self.assertEqual(len(client.limit_orders), 1)
         self.assertEqual(client.limit_orders[0]["transaction_type"], "BUY")
         self.assertEqual(service.session.status, "REAL_STOPPED")
+
+    def test_real_auto_entry_disabled_creates_manual_approval_then_approve_sends_order(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            payload["settings"] = {**payload["settings"], "real_auto_entry_enabled": False, "ask_permission_before_entry": False}
+
+            started = service.start_real_engine(payload)
+            self.assertTrue(started["real_engine_started"], started.get("blockers"))
+            with service._lock:
+                cycle = service._run_live_scan_cycle_locked()
+            action = cycle["live_scan_action"]
+            self.assertEqual(action["action"], "REAL_APPROVAL_PENDING")
+            self.assertEqual(len(client.limit_orders), 0)
+
+            approval_id = action["approval"]["approval_id"]
+            approved = service.approve_real_entry({"approval_id": approval_id, "market_open": True, "instruments_valid": True})
+            service.stop_live_scan({"mode": MODE_REAL})
+
+        self.assertTrue(approved["real_order_sent"], approved.get("blockers"))
+        self.assertEqual(len(client.limit_orders), 1)
+        self.assertIsNone(service.real_pending_approval)
+
+    def test_real_ask_permission_creates_manual_approval_even_when_auto_entry_enabled(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            payload = live_payload(MODE_REAL)
+            payload["settings"] = {**payload["settings"], "real_auto_entry_enabled": True, "ask_permission_before_entry": True}
+
+            service.start_real_engine(payload)
+            with service._lock:
+                cycle = service._run_live_scan_cycle_locked()
+            service.stop_live_scan({"mode": MODE_REAL})
+
+        self.assertEqual(cycle["live_scan_action"]["action"], "REAL_APPROVAL_PENDING")
+        self.assertEqual(len(client.limit_orders), 0)
 
     def test_real_live_scan_clears_stale_lifecycle_when_broker_is_flat(self):
         client = StreamingOptionsZerodha("REAL")

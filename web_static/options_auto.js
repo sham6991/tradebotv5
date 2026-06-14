@@ -12,6 +12,7 @@ const state = {
   lastShadowReport: {},
   lastReplay: {},
   pendingApprovalId: "",
+  realPendingApprovalId: "",
   activeLog: "raw",
   activeTab: "dashboard",
   activeTickRole: "INDEX",
@@ -102,6 +103,7 @@ function requestTimeoutMs(path, payload, requestOptions = {}) {
   if (requestOptions.timeoutMs !== undefined) return Number(requestOptions.timeoutMs);
   if (path === "/api/options-auto/backtest/run") return 180000;
   if (path === "/api/options-auto/paper/start") return 30000;
+  if (path === "/api/options-auto/real/start-engine" || path === "/api/options-auto/real/approve-entry") return 30000;
   if (path === "/api/options-auto/evaluate" || path === "/api/options-auto/paper/execute-plan" || path === "/api/options-auto/paper/request-approval") return 30000;
   return Number(payload === undefined ? 3000 : 5000);
 }
@@ -366,6 +368,13 @@ function settingsPayload(modeOverride = "") {
     ask_permission_before_entry: pairedCheckboxValue("#oa-ask", "#oa-ask-settings", saved.ask_permission_before_entry),
     auto_entry_enabled: pairedCheckboxValue("#oa-auto", "#oa-auto-settings", saved.auto_entry_enabled),
     require_fii_dii_upload: checkedValue("#oa-require-fii-dii", saved.require_fii_dii_upload),
+    news_event_enabled: checkedValue("#oa-news-event-enabled", saved.news_event_enabled),
+    news_event_provider: $("#oa-news-event-provider")?.value || saved.news_event_provider || "ZERODHA_PULSE",
+    news_event_cache_ttl_seconds: numberValue($("#oa-news-cache-ttl")?.value, saved.news_event_cache_ttl_seconds ?? saved.news_refresh_ttl_seconds ?? 300),
+    news_event_min_score_for_warning: numberValue($("#oa-news-warning-score")?.value, saved.news_event_min_score_for_warning ?? 40),
+    news_event_min_score_for_shock: numberValue($("#oa-news-shock-score")?.value, saved.news_event_min_score_for_shock ?? 70),
+    news_event_require_market_confirmation: checkedValue("#oa-news-market-confirm", saved.news_event_require_market_confirmation),
+    news_event_show_in_ui: checkedValue("#oa-news-show-ui", saved.news_event_show_in_ui),
     allow_demo_data: state.activeTab === "debug",
     confirm_real_mode: checkedValue("#oa-confirm-real", saved.confirm_real_mode),
     static_ip_confirmed: checkedValue("#oa-static-ip", saved.static_ip_confirmed),
@@ -506,6 +515,7 @@ function renderAll() {
   renderBacktestResults();
   renderShadow();
   renderRealPreflight();
+  renderRealApprovalCard();
   renderPaperAccount();
   renderReports();
   renderDeveloperRawJson();
@@ -628,6 +638,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
   const connected = Boolean(account.real?.connected);
   const currentReal = isCurrentRealProcessActive(state.status);
   const lifecycle = currentReal ? (state.status.real_order_lifecycle || {}) : {};
+  const approval = realApprovalFromState();
   const lock = contractLockFromState({ liveOnly: true });
   const preflight = realPreflightResult();
   const steps = [
@@ -642,6 +653,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
     ["Run real dry run", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
     ["Arm real trading", connected && Boolean($("#oa-confirm-real")?.checked)],
     ["Start real engine", state.status.live_scan?.running && state.status.live_scan?.mode === "REAL"],
+    ["Approve setup when required", !approval || approval.status !== "PENDING"],
     ["Monitor lifecycle", currentReal && Boolean(lifecycle.state)],
     ["Stop new entries if needed", true],
     ["Emergency flatten / kill switch only if needed", !/UNPROTECTED|FAILED/.test(`${lifecycle.state} ${lifecycle.protected_state}`)],
@@ -661,6 +673,18 @@ function realPreflightResult(result = {}) {
   if (hasRealPreflightResult(runtime)) return { ...runtime, account_status: state.status.account_status || {} };
   if (hasRealPreflightResult(state.lastResult)) return state.lastResult;
   return {};
+}
+
+function realApprovalFromState() {
+  const approval = firstNonEmptyObject(
+    state.lastResult.approval,
+    state.lastResult.real_pending_approval,
+    state.lastResult.live_scan_action?.approval,
+    state.status.real_pending_approval
+  );
+  const approvalId = String(approval.approval_id || "");
+  const mode = String(approval.mode || "").toUpperCase();
+  return mode === "REAL" || approvalId.startsWith("OA-REAL") ? approval : {};
 }
 
 function syncRealPreflightCache(payload = {}) {
@@ -951,6 +975,7 @@ function renderDashboard() {
   setText("#oa-cue-updated", cue.last_updated || cue.timestamp || "-");
   setText("#oa-cue-reason", cue.reason || cue.reason_summary || "No market cue evaluated yet.");
   renderFiiDiiStatus(cue.fii_dii_status || result.fii_dii_status || state.fiiDiiStatus || state.status.fii_dii || {});
+  renderNewsEventSignal(newsEventSignalFrom(result));
 
   setBadge("#oa-regime-side", regime.recommended_side || "WAIT", regime.recommended_side === "WAIT" ? "yellow" : "blue");
   setText("#oa-regime", regime.regime || "-");
@@ -1056,6 +1081,7 @@ function renderDashboardIdle(session, result = {}) {
   setText("#oa-cue-updated", "-");
   setText("#oa-cue-reason", message);
   renderFiiDiiStatus(state.fiiDiiStatus || state.status.fii_dii || {});
+  renderNewsEventSignal(newsEventSignalFrom(result));
 
   setBadge("#oa-regime-side", "WAIT", "grey");
   setText("#oa-regime", "-");
@@ -1101,6 +1127,7 @@ function renderDashboardWaiting(session) {
   setText("#oa-cue-updated", "-");
   setText("#oa-cue-reason", message);
   renderFiiDiiStatus(state.fiiDiiStatus || state.status.fii_dii || {});
+  renderNewsEventSignal(newsEventSignalFrom({}));
 
   setBadge("#oa-regime-side", "WAIT", "grey");
   setText("#oa-regime", "-");
@@ -1152,6 +1179,51 @@ function renderFiiDiiStatus(status = {}) {
   setText("#oa-fii-dii-note", status.warning || (status.warnings || [])[0] || "FII/DII status ready.");
 }
 
+function newsEventSignalFrom(result = {}) {
+  return firstNonEmptyObject(
+    result.news_event_signal,
+    result.market_context?.news_event_signal,
+    result.market_playbook?.news_event_signal,
+    state.status.news_event_signal,
+    state.lastResult.news_event_signal,
+    state.lastResult.market_context?.news_event_signal
+  );
+}
+
+function renderNewsEventSignal(signal = {}) {
+  const settings = state.status.settings || state.defaults.settings || {};
+  const card = $(".oa-news-event-card");
+  if (card) card.hidden = settings.news_event_show_in_ui === false;
+  if (settings.news_event_show_in_ui === false) return;
+  const status = String(signal.status || "REFRESH_PENDING").toUpperCase();
+  const severity = String(signal.severity || "NONE").toUpperCase();
+  const isShock = status === "NEWS_EVENT_SHOCK" || severity === "SHOCK";
+  const isWarning = status === "NEWS_WARNING" || severity === "WARNING";
+  const isOk = ["NO_RELEVANT_NEWS", "OK"].includes(status);
+  const isDisabled = status === "DISABLED";
+  const kind = isShock ? "red" : isWarning ? "yellow" : isOk ? "green" : isDisabled ? "grey" : "yellow";
+  const label = isShock ? "SHOCK" : isWarning ? "WARNING" : isDisabled ? "DISABLED" : status.replaceAll("_", " ");
+  if (card) {
+    card.classList.toggle("is-shock", isShock);
+    card.classList.toggle("is-warning", isWarning && !isShock);
+  }
+  setBadge("#oa-news-event-badge", label || "Waiting", kind);
+  const headlines = (signal.matched_headlines || []).slice(0, 3);
+  setHtml("#oa-news-event-panel", [
+    metric("Provider", signal.provider || "ZERODHA_PULSE"),
+    metric("Score", signal.score !== undefined ? score(signal.score) : "-"),
+    metric("Severity", signal.severity || "-"),
+    metric("Event Type", signal.event_type || "-"),
+    metric("Would Block", signal.would_block ? "YES" : "NO"),
+    metric("Market Confirmed", signal.market_confirmation || signal.market_confirmed ? "YES" : "NO"),
+    metric("Newest Age", signal.newest_item_age_minutes !== null && signal.newest_item_age_minutes !== undefined ? `${signal.newest_item_age_minutes} min` : "-"),
+    metric("Fetched", signal.fetched_at || "-"),
+    metric("Cache", signal.cache_status || (signal.stale ? "STALE" : "-")),
+    headlines.length ? `<div class="oa-news-headlines">${headlines.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "",
+  ].join(""));
+  setText("#oa-news-event-reason", signal.reason || signal.error || "No Zerodha Pulse news signal yet.");
+}
+
 function renderDataSourcePanel(result = {}) {
   const source = result.data_source || state.dataSource || "UNKNOWN";
   const demo = source === "DEBUG" || source === "DEMO" || Boolean(result.demo_data);
@@ -1186,7 +1258,7 @@ function renderDataSourcePanel(result = {}) {
     metric("Instrument Cache", firstCache.source || "-"),
     metric("Cache File", firstCache.path || "-"),
     metric("FII/DII", (state.fiiDiiStatus.status || result.market_cue?.fii_dii_status?.status || "Not uploaded")),
-    metric("News", result.market_cue?.components?.news !== undefined ? score(result.market_cue.components.news) : "No news summary"),
+    metric("News", newsEventSignalFrom(result).status || (result.market_cue?.components?.news !== undefined ? score(result.market_cue.components.news) : "No news summary")),
     metric("Trading Allowed", result.allowed ? "YES" : "NO"),
     metric("Governor", result.governor?.state || "-"),
     metric("Live Scanner", scan.running ? "RUNNING" : "STOPPED"),
@@ -2106,6 +2178,8 @@ function renderClosedPaperTrade(trade = {}) {
 function initRealTab() {
   on("#oa-real-preflight", "click", runRealPreflight);
   on("#oa-real-place", "click", startRealEngine);
+  on("#oa-real-approve-entry", "click", approveRealEntry);
+  on("#oa-real-reject-entry", "click", rejectRealEntry);
   on("#oa-real-reconcile", "click", runRealReconcile);
   on("#oa-real-dry", "click", runRealDryRun);
   on("#oa-real-stop", "click", stopNewEntries);
@@ -2136,9 +2210,38 @@ function realEnginePayload() {
 async function startRealEngine() {
   try {
     const result = await api("/api/options-auto/real/start-engine", { ...realEnginePayload(), market_open: true, instruments_valid: true });
+    if (result.approval?.approval_id || result.real_pending_approval?.approval_id) {
+      state.realPendingApprovalId = result.approval?.approval_id || result.real_pending_approval?.approval_id;
+    }
     await refreshUiSummaryAfterMutation(result);
     renderAll();
-    setTabAlert("real", result.real_engine_started ? "Real engine started. It will scan and place a guarded BUY when setup appears." : result.message || "Real engine blocked.", result.real_engine_started ? "success" : "warning");
+    setTabAlert("real", result.real_engine_started ? "Real engine started. It will scan and wait for manual approval when required." : result.message || "Real engine blocked.", result.real_engine_started ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function approveRealEntry() {
+  try {
+    const approvalId = state.realPendingApprovalId || realApprovalFromState().approval_id || "";
+    const result = await api("/api/options-auto/real/approve-entry", { approval_id: approvalId, ...realEnginePayload(), market_open: true, instruments_valid: true });
+    if (result.real_order_sent) state.realPendingApprovalId = "";
+    await refreshUiSummaryAfterMutation(result);
+    renderAll();
+    setTabAlert("real", result.real_order_sent ? "Manual approval accepted. Real BUY entry was sent to Zerodha." : result.message || "Real approval did not send an order.", result.real_order_sent ? "success" : "warning");
+  } catch (error) {
+    setTabAlert("real", error.message, "danger");
+  }
+}
+
+async function rejectRealEntry() {
+  try {
+    const approvalId = state.realPendingApprovalId || realApprovalFromState().approval_id || "";
+    const result = await api("/api/options-auto/real/reject-entry", { approval_id: approvalId });
+    state.realPendingApprovalId = "";
+    await refreshUiSummaryAfterMutation(result, { clearLastResult: true });
+    renderAll();
+    setTabAlert("real", "Real approval rejected. No Zerodha order was sent.", "info");
   } catch (error) {
     setTabAlert("real", error.message, "danger");
   }
@@ -2258,6 +2361,30 @@ function renderRealPreflight(result = {}) {
   setHtml("#oa-real-checklist", rows.map(([label, ok]) => checklistRow(label, ok, reasonForCheck(label, result))).join(""));
   const active = isCurrentRealProcessActive(result) ? activeTradesFrom(result).filter(trade => trade.mode === "REAL") : [];
   setHtml("#oa-real-position", active.length ? active.map(trade => `<div class="oa-mini-trade">${renderTradeDetails(trade)}</div>`).join("") : `<p class="oa-empty-state">No active real position or current real order lifecycle is reported.</p>`);
+  renderRealApprovalCard();
+}
+
+function renderRealApprovalCard() {
+  const approval = realApprovalFromState();
+  if (!approval || !approval.approval_id) {
+    setBadge("#oa-real-approval-badge", "No Pending Approval", "grey");
+    setHtml("#oa-real-approval-card", `<p class="oa-empty-state">No real entry approval is pending. Start Real Engine to scan live data.</p>`);
+    return;
+  }
+  state.realPendingApprovalId = approval.approval_id || state.realPendingApprovalId;
+  const expiresIn = approval.expires_at_epoch ? Math.max(0, Math.round(approval.expires_at_epoch - Date.now() / 1000)) : "-";
+  setBadge("#oa-real-approval-badge", approval.status || "PENDING", approval.status === "PENDING" ? "yellow" : "grey");
+  setHtml("#oa-real-approval-card", [
+    row("Approval ID", approval.approval_id || "-"),
+    row("Status", approval.status || "-"),
+    row("Contract", approval.trade_plan?.tradingsymbol || approval.selected_contract?.tradingsymbol || "-"),
+    row("Entry", approval.trade_plan?.entry_price || "-"),
+    row("Target", approval.trade_plan?.target || "-"),
+    row("Stoploss", approval.trade_plan?.stoploss || "-"),
+    row("Quantity", approval.trade_plan?.quantity || "-"),
+    row("Reason", approval.reason || "Manual approval required before Zerodha order placement."),
+    row("Countdown", expiresIn === 0 ? "Expired" : `${expiresIn} sec`),
+  ].join(""));
 }
 
 function checklistRow(label, ok, reason = "") {
@@ -2424,6 +2551,10 @@ function applySettings(settings) {
     ["#oa-backtest-entry-mode", normalizeEntryMode(settings.entry_dependency_mode)],
     ["#oa-backtest-score", settings.buy_score_threshold],
     ["#oa-backtest-span", settings.atm_scan_strike_span],
+    ["#oa-news-event-provider", settings.news_event_provider],
+    ["#oa-news-cache-ttl", settings.news_event_cache_ttl_seconds || settings.news_refresh_ttl_seconds],
+    ["#oa-news-warning-score", settings.news_event_min_score_for_warning],
+    ["#oa-news-shock-score", settings.news_event_min_score_for_shock],
   ];
   pairs.forEach(([selector, content]) => {
     const node = $(selector);
@@ -2435,6 +2566,9 @@ function applySettings(settings) {
     ["#oa-ask", settings.ask_permission_before_entry],
     ["#oa-ask-settings", settings.ask_permission_before_entry],
     ["#oa-require-fii-dii", settings.require_fii_dii_upload],
+    ["#oa-news-event-enabled", settings.news_event_enabled],
+    ["#oa-news-market-confirm", settings.news_event_require_market_confirmation],
+    ["#oa-news-show-ui", settings.news_event_show_in_ui],
     ["#oa-trailing", settings.trailing_stop_enabled],
     ["#oa-breakeven", settings.break_even_sl_enabled],
     ["#oa-partial", settings.partial_exit_enabled],

@@ -92,6 +92,13 @@ class OptionsAutoWebRoutes:
             if blockers:
                 raise PermissionError(blockers[0])
             return handler.send_json(self._with_account_status(self.service.start_real_engine(self._with_profile(payload))))
+        if path == "/api/options-auto/real/approve-entry":
+            blockers = self._mode_blockers("LIVE", require_connection=True)
+            if blockers:
+                raise PermissionError(blockers[0])
+            return handler.send_json(self._with_account_status(self.service.approve_real_entry(self._with_profile({**dict(payload or {}), "mode": "REAL"}))))
+        if path == "/api/options-auto/real/reject-entry":
+            return handler.send_json(self._with_account_status(self.service.reject_real_entry(payload)))
         if path == "/api/options-auto/real/preflight":
             blockers = self._mode_blockers("LIVE")
             if blockers:
@@ -241,12 +248,15 @@ class OptionsAutoWebRoutes:
             "session": session,
             "paper_account": status.get("paper_account") or {},
             "paper_lifecycle": status.get("paper_lifecycle") or {},
+            "real_pending_approval": status.get("real_pending_approval") or {},
             "real_safety": status.get("real_safety") or {},
             "ready_trade_plan_cache": status.get("ready_trade_plan_cache") or {},
             "adaptive": status.get("adaptive") or {},
             "performance": status.get("performance") or {},
             "latency": status.get("latency") or {},
             "fii_dii": status.get("fii_dii") or {},
+            "news_event_signal": status.get("news_event_signal") or {},
+            "news_provider": status.get("news_provider") or {},
             "index_ticks": status.get("index_ticks") or [],
             "live_index_candles": status.get("live_index_candles") or {},
             "contract_lock": status.get("contract_lock") or {},

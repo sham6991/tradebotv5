@@ -74,9 +74,18 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "market_context_unknown_blocks_when_enforced": True,
     "market_context_expiry_scalp_max_holding_minutes": 8,
     "news_event_enabled": True,
+    "news_event_provider": "ZERODHA_PULSE",
+    "news_event_fetch_timeout_seconds": 0.8,
+    "news_event_cache_ttl_seconds": 300,
+    "news_event_max_items": 12,
+    "news_event_use_stale_cache": True,
+    "news_event_stale_cache_max_minutes": 30,
+    "news_event_min_score_for_warning": 40.0,
     "news_event_min_score_for_shock": 70.0,
     "news_event_require_market_confirmation": True,
     "news_event_fail_open": True,
+    "news_event_show_in_ui": True,
+    "news_event_debug": False,
     "news_refresh_ttl_seconds": 300,
     "news_sentiment_weight": 3.0,
     "trend_strength_threshold": 55.0,
@@ -250,6 +259,9 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "news_event_enabled",
         "news_event_require_market_confirmation",
         "news_event_fail_open",
+        "news_event_use_stale_cache",
+        "news_event_show_in_ui",
+        "news_event_debug",
         "premium_expansion_required",
         "allow_target_extension",
         "expiry_scalp_extension_enabled",
@@ -314,6 +326,8 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "max_spread_pct",
         "quote_stale_seconds",
         "news_sentiment_weight",
+        "news_event_fetch_timeout_seconds",
+        "news_event_min_score_for_warning",
         "news_event_min_score_for_shock",
         "trend_strength_threshold",
         "atr_target_multiplier",
@@ -395,12 +409,16 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "event_driven_min_scan_interval_ms",
         "market_context_expiry_scalp_max_holding_minutes",
         "news_refresh_ttl_seconds",
+        "news_event_cache_ttl_seconds",
+        "news_event_max_items",
+        "news_event_stale_cache_max_minutes",
     ):
         settings[key] = _int(settings.get(key), int(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 
     settings["mode"] = str(settings.get("mode") or MODE_PAPER).strip().upper()
     settings["underlying"] = str(settings.get("underlying") or "NIFTY").strip().upper()
     settings["strategy_profile"] = str(settings.get("strategy_profile") or "BALANCED").strip().upper()
+    settings["news_event_provider"] = str(settings.get("news_event_provider") or "ZERODHA_PULSE").strip().upper()
     _normalize_market_context_aliases(settings, payload)
     entry_mode = str(settings.get("entry_dependency_mode") or "FULL_CONFIRMATION").strip().upper()
     if entry_mode in {"SIMPLE", "SIMPLE_OHLCV", "MAIN_APP_STYLE", "OHLCV_VOLUME", "OHLCV_VOLUME_PROFILE"}:

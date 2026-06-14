@@ -6,6 +6,7 @@ import threading
 import time
 from datetime import date, datetime, time as dt_time
 from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 
@@ -49,6 +50,8 @@ from options_auto.intelligence.low_latency_decision_engine import LowLatencyDeci
 from options_auto.intelligence.master_governor import MasterGovernor
 from options_auto.intelligence.market_cue_engine import MarketCueEngine
 from options_auto.intelligence.missed_trade_learning import MissedTradeLearning
+from options_auto.intelligence.news_event_provider import PulseNewsProvider
+from options_auto.intelligence.news_event_router import NewsEventRouter
 from options_auto.intelligence.options_greeks_risk_engine import OptionsGreeksRiskEngine
 from options_auto.intelligence.position_manager import PositionManager
 from options_auto.intelligence.professional_discipline import ProfessionalDisciplineEngine
@@ -84,6 +87,8 @@ class OptionsAutoTerminalService:
         self.paper_broker = PaperBroker(self.settings["paper_starting_balance"])
         self.paper_lifecycle = PaperLifecycleEngine(self.paper_broker)
         self.market_cue_engine = MarketCueEngine()
+        self.news_event_provider = PulseNewsProvider(cache_path=os.path.join(self.result_root(), "news_event_cache.json"))
+        self.news_event_router = NewsEventRouter()
         self.regime_classifier = RegimeClassifier()
         self.strike_selector = StrikeSelector()
         self.data_quality = DataQualityEngine()
@@ -107,6 +112,7 @@ class OptionsAutoTerminalService:
         self.reconciliation = ReconciliationEngine()
         self.real_controller = RealExecutionController(self.real_api_manager, self.reconciliation)
         self.real_lifecycle = RealOrderLifecycleEngine(self.real_controller)
+        self.real_pending_approval: dict[str, Any] | None = None
         self.shadow_engine = ShadowModeEngine()
         self.telegram_safety = TelegramSafety()
         self.performance_monitor = PerformanceMonitor(
@@ -149,6 +155,11 @@ class OptionsAutoTerminalService:
         self._last_event_scan_epoch = 0.0
         self._reference_cache: dict[str, Any] = {}
         self._feature_cache: dict[str, Any] = {"key": "", "features": {}, "hits": 0, "misses": 0}
+        self._latest_news_event_signal: dict[str, Any] = self._default_news_event_signal("REFRESH_PENDING")
+        self._latest_news_provider_result: dict[str, Any] = {}
+        self._news_event_refreshing = False
+        self._news_event_refresh_lock = threading.Lock()
+        self._news_event_last_schedule_epoch = 0.0
         self._last_main_app_live_connected: bool | None = None
         self._last_main_app_paper_connected: bool | None = None
         self._live_disconnect_active = False
@@ -178,6 +189,7 @@ class OptionsAutoTerminalService:
                 "session": self.session.to_dict(),
                 "paper_account": self.paper_broker.snapshot(),
                 "paper_lifecycle": self.paper_lifecycle.snapshot(),
+                "real_pending_approval": self.real_pending_approval,
                 "real_safety": self.real_controller.snapshot(),
                 "logs": self.logger.tail(100),
                 "result_root": self.result_root(),
@@ -186,6 +198,8 @@ class OptionsAutoTerminalService:
                 "adaptive": self.live_adaptive.snapshot(),
                 "performance": self.performance_monitor.snapshot(),
                 "fii_dii": self.latest_fii_dii_status(),
+                "news_event_signal": self._news_event_signal_locked(self.settings, {}),
+                "news_provider": dict(self._latest_news_provider_result or {}),
                 "index_ticks": self.index_ticks[-80:],
                 "live_index_candles": self.live_index_candles.snapshot(),
                 "contract_lock": self.locked_contract_manager.snapshot(),
@@ -247,6 +261,7 @@ class OptionsAutoTerminalService:
         self.real_api_manager.client = None
         if was_real_runtime:
             self.real_controller.enter_safe_mode("MAIN_APP", reason)
+        self.real_pending_approval = None
         self.real_controller.state.last_preflight = self._connection_preflight_result_locked("REAL_DISCONNECTED", reason)
         if was_real_runtime or str(self.session.status or "").upper().startswith("REAL"):
             self.session.status = "REAL_DISCONNECTED"
@@ -276,6 +291,7 @@ class OptionsAutoTerminalService:
             self._live_scan_mode == MODE_REAL
             or self._options_ws_mode == MODE_REAL
             or status.startswith("REAL")
+            or bool(self.real_pending_approval)
             or self._real_entry_or_position_active_locked()
             or self.real_controller.state.last_preflight
         )
@@ -314,11 +330,14 @@ class OptionsAutoTerminalService:
                 "session": self.session.to_dict(),
                 "paper_account": self.paper_broker.snapshot(),
                 "paper_lifecycle": self.paper_lifecycle.snapshot(),
+                "real_pending_approval": self.real_pending_approval,
                 "real_safety": self.real_controller.snapshot(),
                 "ready_trade_plan_cache": self.ready_plan_cache.snapshot(),
                 "adaptive": self.live_adaptive.snapshot(),
                 "performance": self.performance_monitor.snapshot(),
                 "fii_dii": self.latest_fii_dii_status(),
+                "news_event_signal": self._news_event_signal_locked(self.settings, {}),
+                "news_provider": dict(self._latest_news_provider_result or {}),
                 "index_ticks": self.index_ticks[-80:],
                 "live_index_candles": self.live_index_candles.snapshot(),
                 "contract_lock": self.locked_contract_manager.snapshot(),
@@ -495,6 +514,7 @@ class OptionsAutoTerminalService:
             self.real_lifecycle.broker_open_positions = list(real_state.get("broker_open_positions") or [])
             self.real_lifecycle.last_reconciliation = dict(real_state.get("last_reconciliation") or real_state.get("reconciliation") or {})
             self.real_lifecycle.history = list(real_state.get("history") or [])
+        self.real_pending_approval = dict(payload.get("real_pending_approval") or {}) or None
         self._options_ws_order_updates = list(payload.get("websocket_order_updates") or [])[-200:]
         self._real_broker_cache = dict(payload.get("real_broker_cache") or self._real_broker_cache)
         self._runtime_state_loaded_from = path
@@ -548,6 +568,7 @@ class OptionsAutoTerminalService:
             "contract_lock": self.locked_contract_manager.snapshot(),
             "paper_account": self.paper_broker.snapshot(),
             "paper_lifecycle": self.paper_lifecycle.snapshot(),
+            "real_pending_approval": self.real_pending_approval,
             "real_order_lifecycle": {**self.real_lifecycle.snapshot(), "trade_plan": dict(self.real_lifecycle.trade_plan or {})},
             "websocket": self._live_scan_state_locked().get("websocket") or {},
             "websocket_order_updates": list(self._options_ws_order_updates[-200:]),
@@ -687,6 +708,8 @@ class OptionsAutoTerminalService:
         precomputed_features = self._cached_index_features(index_history, mode)
         if precomputed_features:
             market_cue_payload = {**market_cue_payload, "precomputed_index_features": precomputed_features}
+        news_event_signal = self._news_event_signal_locked(settings, market_cue_payload, precomputed_features, payload.get("feed_health") or payload.get("options_data_health") or {})
+        market_cue_payload = {**market_cue_payload, "news_event_signal": news_event_signal}
         decision_start = time.perf_counter()
         decision = evaluate_options_auto_decision(
             mode=mode,
@@ -702,6 +725,7 @@ class OptionsAutoTerminalService:
         self._record_latency_started("options_auto.decision_eval", decision_start, {"mode": mode, "candidate_count": len(instruments)})
         if live_data:
             decision.update(live_data.get("diagnostics") or {})
+        decision["news_event_signal"] = news_event_signal
         selected_contract = dict(decision.get("selected_contract") or {})
         final_selected_symbol = str(selected_contract.get("tradingsymbol") or "")
         decision["final_selected_contract_symbol"] = final_selected_symbol
@@ -1742,7 +1766,7 @@ class OptionsAutoTerminalService:
                 self.session.status = "PAPER_SCANNING"
         else:
             live_scan_action = self._real_live_scan_action_locked(result, payload)
-            if self.session.status != "REAL_ENTRY_ORDER_OPEN":
+            if self.session.status not in {"REAL_ENTRY_ORDER_OPEN", "REAL_APPROVAL_PENDING"}:
                 self.session.status = "REAL_DRY_RUN_SCANNING" if live_scan_action.get("dry_run") else "REAL_SCANNING"
         result["live_scan_action"] = live_scan_action
         self.session.last_decision = {**dict(self.session.last_decision or {}), "live_scan_action": live_scan_action}
@@ -1867,17 +1891,76 @@ class OptionsAutoTerminalService:
             "final_validation": final_validation,
         }
 
+    def _create_real_pending_approval_locked(self, decision: dict[str, Any], payload: dict[str, Any], reason: str) -> dict[str, Any]:
+        if not decision.get("allowed"):
+            raise ValueError("Cannot create real approval for a blocked Options Auto decision.")
+        timeout = max(5, int(self.settings.get("approval_timeout_seconds") or 30))
+        now = time.time()
+        approval = {
+            "approval_id": f"OA-REAL-{uuid4().hex[:10].upper()}",
+            "status": "PENDING",
+            "mode": MODE_REAL,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at_epoch": now,
+            "expires_at_epoch": now + timeout,
+            "timeout_seconds": timeout,
+            "reason": reason,
+            "trade_plan": dict(decision.get("trade_plan") or {}),
+            "selected_contract": dict(decision.get("selected_contract") or {}),
+            "decision": dict(decision or {}),
+            "payload": dict(payload or {}),
+            "orders_sent": 0,
+        }
+        self.real_pending_approval = approval
+        self.session.status = "REAL_APPROVAL_PENDING"
+        self.session.record_safety_event("Real Options Auto approval pending", {"approval_id": approval["approval_id"], "orders_sent": 0})
+        self.logger.log("WARN", "Options Auto real approval pending", approval_id=approval["approval_id"], reason=reason)
+        self._persist_runtime_state_locked("real_approval_pending")
+        return dict(approval)
+
+    def _real_pending_approval_active_locked(self) -> bool:
+        pending = self.real_pending_approval or {}
+        if not pending:
+            return False
+        expires = float(pending.get("expires_at_epoch") or 0.0)
+        if expires and time.time() > expires:
+            self.session.record_safety_event("Real Options Auto approval expired", {"approval_id": pending.get("approval_id")})
+            self.real_pending_approval = None
+            if self.session.status == "REAL_APPROVAL_PENDING":
+                self.session.status = "REAL_SCANNING"
+            self._persist_runtime_state_locked("real_approval_expired")
+            return False
+        return True
+
+    def _real_pending_or_error_locked(self, approval_id: str | None = None) -> dict[str, Any]:
+        if not self._real_pending_approval_active_locked():
+            raise ValueError("No Options Auto real approval is pending.")
+        pending = dict(self.real_pending_approval or {})
+        if approval_id and approval_id != pending.get("approval_id"):
+            raise ValueError("Real approval id does not match the pending approval.")
+        return pending
+
     def _real_live_scan_action_locked(self, decision: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
         dry_run = bool(self.settings.get("dry_run_real_only") or not self.settings.get("real_orders_enabled"))
         auto_enabled = bool(self.settings.get("real_auto_entry_enabled"))
+        ask_permission = bool(self.settings.get("ask_permission_before_entry", True))
         action = {
             "action": "REAL_SCAN_ONLY",
             "dry_run": dry_run,
             "orders_sent": 0,
             "real_auto_entry_enabled": auto_enabled,
+            "ask_permission_before_entry": ask_permission,
             "reason": "Real engine is scanning. No valid setup yet.",
         }
         self._clear_stale_real_lifecycle_if_flat_locked(payload)
+        if self._real_pending_approval_active_locked():
+            action.update({
+                "action": "REAL_APPROVAL_PENDING",
+                "setup_found": True,
+                "reason": "A real entry approval is already pending. No new real order will be sent until it is approved or rejected.",
+                "approval": self.real_pending_approval,
+            })
+            return action
         if self._real_entry_or_position_active_locked():
             action.update({
                 "action": "HOLD",
@@ -1896,12 +1979,19 @@ class OptionsAutoTerminalService:
                 })
                 self.session.record_safety_event("Real Options Auto setup found in dry-run", {"orders_sent": 0})
                 return action
-            if not auto_enabled:
+            if ask_permission or not auto_enabled:
+                approval_reason = (
+                    "Ask approval is enabled. Real setup is waiting for manual approval."
+                    if ask_permission
+                    else "Real auto entry is disabled. Real setup is waiting for manual approval."
+                )
+                pending = self._create_real_pending_approval_locked(decision, payload, approval_reason)
                 action.update({
+                    "action": "REAL_APPROVAL_PENDING",
                     "setup_found": True,
-                    "reason": "real_auto_entry_enabled is false. Real scanner remains decision-only.",
+                    "approval": pending,
+                    "reason": approval_reason,
                 })
-                self.session.record_safety_event("Real Options Auto setup found decision-only", {"orders_sent": 0})
                 return action
             preflight = self.real_preflight_check({
                 **payload,
@@ -2520,6 +2610,94 @@ class OptionsAutoTerminalService:
         self.logger.log("INFO", "Options Auto paper approval rejected", approval_id=result.get("approval_id"))
         self._persist_runtime_state_locked("paper_approval_rejected")
         return {**result, "paper_lifecycle": self.paper_lifecycle.snapshot(), "session": self.session.to_dict()}
+
+    def approve_real_entry(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            payload = dict(payload or {})
+            pending = self._real_pending_or_error_locked(payload.get("approval_id"))
+            client = self.kite_client_provider("LIVE")
+            if not client:
+                self.real_pending_approval = None
+                blocked = self._blocked_real_order(["Real Money Zerodha is not connected."])
+                self._persist_runtime_state_locked("real_approval_blocked_disconnected")
+                return {**blocked, "approval": pending, "real_pending_approval": None, "message": "Real approval cancelled because LIVE Zerodha is disconnected."}
+            base_payload = {**dict(pending.get("payload") or {}), **payload, "mode": MODE_REAL}
+            settings = self._real_capability_settings(
+                {**self.settings, **dict((pending.get("payload") or {}).get("settings") or {}), **dict(payload.get("settings") or {}), "mode": MODE_REAL},
+                MODE_REAL,
+                client,
+                base_payload,
+            )
+            base_payload["settings"] = settings
+            self._configure_locked(settings, kite_profile=base_payload.get("kite_profile") or {}, preserve_session=True, return_status=False)
+            self.real_api_manager.client = client
+            preflight = self.real_preflight_check({
+                **base_payload,
+                "settings": settings,
+                "market_open": base_payload.get("market_open", True),
+                "instruments_valid": base_payload.get("instruments_valid", True),
+            })
+            if not preflight.get("allowed"):
+                return {
+                    "allowed": False,
+                    "real_order_sent": False,
+                    "orders_sent": 0,
+                    "approval": pending,
+                    "real_pending_approval": self.real_pending_approval,
+                    "preflight": preflight,
+                    "blockers": preflight.get("blockers") or ["Real preflight failed."],
+                    "session": self.session.to_dict(),
+                    "message": "Manual approval received, but real preflight blocked order placement.",
+                }
+            decision = dict(pending.get("decision") or {})
+            if not decision.get("allowed"):
+                decision = self._evaluate_current_config_locked(base_payload, MODE_REAL)
+            if not decision.get("allowed"):
+                return {
+                    "allowed": False,
+                    "real_order_sent": False,
+                    "orders_sent": 0,
+                    "approval": pending,
+                    "real_pending_approval": self.real_pending_approval,
+                    "preflight": preflight,
+                    "decision": decision,
+                    "blockers": decision.get("blockers") or ["Decision pipeline blocked real order."],
+                    "session": self.session.to_dict(),
+                    "message": "Manual approval received, but the decision is no longer allowed.",
+                }
+            submit_payload = {
+                **base_payload,
+                "decision": decision,
+                "trade_plan": decision.get("trade_plan") or {},
+                "market_open": base_payload.get("market_open", True),
+                "instruments_valid": base_payload.get("instruments_valid", True),
+            }
+            result = self._submit_real_entry_from_decision_locked(submit_payload, decision, preflight, start_scanner=False)
+            if result.get("real_order_sent"):
+                self.real_pending_approval = None
+                self.session.record_safety_event("Real Options Auto manual approval sent entry order", {"approval_id": pending.get("approval_id"), "orders_sent": 1})
+                self._persist_runtime_state_locked("real_approval_order_sent")
+                return {**result, "approval": {**pending, "status": "APPROVED"}, "real_pending_approval": None}
+            return {**result, "approval": pending, "real_pending_approval": self.real_pending_approval}
+
+    def reject_real_entry(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            payload = dict(payload or {})
+            pending = self._real_pending_or_error_locked(payload.get("approval_id"))
+            self.real_pending_approval = None
+            if self.session.status == "REAL_APPROVAL_PENDING":
+                self.session.status = "REAL_SCANNING" if self._live_scan_mode == MODE_REAL else "REAL_APPROVAL_REJECTED"
+            self.session.record_safety_event("Real Options Auto approval rejected", {"approval_id": pending.get("approval_id"), "orders_sent": 0})
+            self.logger.log("INFO", "Options Auto real approval rejected", approval_id=pending.get("approval_id"))
+            self._persist_runtime_state_locked("real_approval_rejected")
+            return {
+                "status": "REJECTED",
+                "approval_id": pending.get("approval_id"),
+                "real_order_sent": False,
+                "orders_sent": 0,
+                "real_pending_approval": None,
+                "session": self.session.to_dict(),
+            }
 
     def process_paper_market(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
@@ -3966,6 +4144,115 @@ class OptionsAutoTerminalService:
         elif self.latest_fii_dii_snapshot:
             cue_payload["fii_dii_status"] = self.latest_fii_dii_status(phase)
         return cue_payload
+
+    def _news_event_signal_locked(
+        self,
+        settings: dict[str, Any],
+        payload: dict[str, Any] | None = None,
+        index_features: dict[str, Any] | None = None,
+        feed_health: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        settings = normalize_settings({**dict(self.settings or {}), **dict(settings or {})})
+        payload = dict(payload or {})
+        explicit_signal = payload.get("news_event_signal") or payload.get("news_event")
+        if isinstance(explicit_signal, dict) and explicit_signal:
+            signal = {**explicit_signal, "provider": explicit_signal.get("provider") or settings.get("news_event_provider") or "MANUAL"}
+            self._latest_news_event_signal = dict(signal)
+            return dict(signal)
+        if not bool(settings.get("news_event_enabled", True)):
+            signal = self._default_news_event_signal("DISABLED", "News/event scanning is disabled in Options Auto settings.")
+            self._latest_news_event_signal = signal
+            return dict(signal)
+        if str(settings.get("news_event_provider") or "ZERODHA_PULSE").upper() == "DISABLED":
+            signal = self._default_news_event_signal("DISABLED", "News/event provider is disabled in Options Auto settings.")
+            self._latest_news_event_signal = signal
+            return dict(signal)
+
+        now = time.time()
+        ttl = max(5.0, float(settings.get("news_event_cache_ttl_seconds") or settings.get("news_refresh_ttl_seconds") or 300))
+        cached = dict(self._latest_news_event_signal or {})
+        fetched_epoch = float(cached.get("fetched_at_epoch") or 0.0)
+        if cached and fetched_epoch > 0 and now - fetched_epoch <= ttl:
+            return dict(cached)
+
+        context = {
+            "market_cue": payload,
+            "index_features": dict(index_features or payload.get("precomputed_index_features") or payload.get("index_features") or {}),
+            "feed_health": dict(feed_health or payload.get("feed_health") or payload.get("options_data_health") or {}),
+            "market_confirmation": bool(payload.get("market_confirmation")),
+        }
+        self._schedule_news_event_refresh(settings, context)
+        if cached and bool(settings.get("news_event_use_stale_cache", True)):
+            stale = dict(cached)
+            stale["stale"] = True
+            stale["cache_status"] = stale.get("cache_status") or "STALE"
+            if str(stale.get("status") or "").upper() == "NEWS_EVENT_SHOCK":
+                stale["would_block"] = False
+                stale["reason"] = f"{stale.get('reason') or 'Cached news shock'} Stale cache is report-only until refreshed."
+            return stale
+        return self._default_news_event_signal("REFRESH_PENDING", "Zerodha Pulse refresh is running in the background.")
+
+    def _schedule_news_event_refresh(self, settings: dict[str, Any], market_context: dict[str, Any]) -> None:
+        now = time.time()
+        if now - float(self._news_event_last_schedule_epoch or 0.0) < 5.0:
+            return
+        with self._news_event_refresh_lock:
+            if self._news_event_refreshing:
+                return
+            self._news_event_refreshing = True
+            self._news_event_last_schedule_epoch = now
+        worker = threading.Thread(
+            target=self._refresh_news_event_worker,
+            args=(dict(settings or {}), dict(market_context or {})),
+            daemon=True,
+        )
+        worker.start()
+
+    def _refresh_news_event_worker(self, settings: dict[str, Any], market_context: dict[str, Any]) -> None:
+        provider_result: dict[str, Any] = {}
+        signal: dict[str, Any] = {}
+        try:
+            if str(settings.get("news_event_provider") or "ZERODHA_PULSE").upper() != "ZERODHA_PULSE":
+                signal = self._default_news_event_signal("DISABLED", f"News provider {settings.get('news_event_provider')} is not enabled.")
+            else:
+                result = self.news_event_provider.fetch(settings)
+                provider_result = result.to_dict()
+                signal = self.news_event_router.route(provider_result, settings, market_context=market_context).to_dict()
+        except Exception as exc:
+            provider_result = {"provider": settings.get("news_event_provider") or "ZERODHA_PULSE", "status": "FETCH_FAILED", "error": str(exc)}
+            signal = self._default_news_event_signal("FETCH_FAILED", str(exc))
+        finally:
+            with self._lock:
+                if provider_result:
+                    self._latest_news_provider_result = dict(provider_result)
+                if signal:
+                    self._latest_news_event_signal = dict(signal)
+                self.logger.log("INFO", "Options Auto news event signal refreshed", status=signal.get("status"), score=signal.get("score"))
+            with self._news_event_refresh_lock:
+                self._news_event_refreshing = False
+
+    def _default_news_event_signal(self, status: str, reason: str = "") -> dict[str, Any]:
+        return {
+            "provider": "ZERODHA_PULSE",
+            "status": status,
+            "score": 0.0,
+            "severity": "NONE",
+            "event_type": "NONE",
+            "would_block": False,
+            "market_confirmation": False,
+            "market_confirmed": False,
+            "confirmed_by_market": False,
+            "reason": reason or "No Zerodha Pulse news event signal is available yet.",
+            "matched_headlines": [],
+            "matched_keywords": [],
+            "newest_item_age_minutes": None,
+            "fetched_at": "",
+            "fetched_at_epoch": 0.0,
+            "cache_status": "",
+            "error": "",
+            "item_count": 0,
+            "stale": False,
+        }
 
     def _cached_index_features(self, index_history: pd.DataFrame, mode: str) -> dict[str, Any]:
         if index_history is None or index_history.empty or not bool(self.settings.get("incremental_feature_cache_enabled", True)):

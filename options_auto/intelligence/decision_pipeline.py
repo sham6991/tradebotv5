@@ -75,6 +75,7 @@ def evaluate_options_auto_decision(
     available_capital = _available_capital(mode, settings, account_state)
     settings["available_capital"] = available_capital
     news_score = _number(cue_payload.get("news_score"), market_cue.components.get("news", 0.0))
+    news_event_signal = dict(cue_payload.get("news_event_signal") or cue_payload.get("news_event") or {})
     context = {
         "selected_side": selected_side,
         "regime": regime.to_dict(),
@@ -332,6 +333,7 @@ def evaluate_options_auto_decision(
         "explanation": explanation,
         "explainability": explainability,
         "freshness": freshness,
+        "news_event_signal": news_event_signal,
         "decision_snapshot": decision_snapshot,
         "real_execution_enabled": real_mode,
         "real_execution_reason": (

@@ -114,9 +114,18 @@
                 <p id="oa-fii-dii-note" class="oa-muted">No FII/DII uploaded. Premarket cue treats it as neutral.</p>
               </article>
 
+              <article class="oa-card oa-news-event-card">
+                <div class="oa-card-head">
+                  <h2>News Shock</h2>
+                  <span id="oa-news-event-badge" class="oa-status-badge oa-badge-grey">Waiting</span>
+                </div>
+                <div id="oa-news-event-panel" class="oa-summary-grid"></div>
+                <p id="oa-news-event-reason" class="oa-muted">No Zerodha Pulse news signal yet.</p>
+              </article>
+
               <article class="oa-card">
-              <div class="oa-card-head">
-                <h2>Regime</h2>
+                <div class="oa-card-head">
+                  <h2>Regime</h2>
                 <span id="oa-regime-side" class="oa-status-badge oa-badge-grey">WAIT</span>
               </div>
               <div class="oa-metric-grid">
@@ -455,6 +464,17 @@
                 <button type="button" id="oa-real-kill" class="oa-button oa-button-danger">Kill Switch</button>
               </div>
             </article>
+            <article class="oa-card">
+              <div class="oa-card-head">
+                <h2>Real Approval</h2>
+                <span id="oa-real-approval-badge" class="oa-status-badge oa-badge-grey">No Pending Approval</span>
+              </div>
+              <div id="oa-real-approval-card" class="oa-plan-body"></div>
+              <div class="oa-button-row">
+                <button type="button" id="oa-real-approve-entry" class="oa-button oa-button-primary">Approve Real Entry</button>
+                <button type="button" id="oa-real-reject-entry" class="oa-button">Reject</button>
+              </div>
+            </article>
             <article class="oa-card oa-danger-zone">
               <h2>Emergency</h2>
               <button type="button" id="oa-real-emergency" class="oa-button oa-button-danger oa-wide-button">Emergency Exit Plan</button>
@@ -563,6 +583,26 @@
                 <label><input id="oa-auto-settings" type="checkbox"> Auto entry</label>
                 <label><input id="oa-ask-settings" type="checkbox"> Ask approval</label>
                 <label><input id="oa-require-fii-dii" type="checkbox"> Require FII/DII upload for pre-market?</label>
+              </div>
+            </details>
+
+            <details class="oa-collapsible">
+              <summary>News Event</summary>
+              <div class="oa-form-grid">
+                <label>Provider
+                  <select id="oa-news-event-provider">
+                    <option value="ZERODHA_PULSE">Zerodha Pulse</option>
+                    <option value="DISABLED">Disabled</option>
+                  </select>
+                </label>
+                <label>Cache TTL Seconds <input id="oa-news-cache-ttl" type="number" min="30" step="30"></label>
+                <label>Warning Score <input id="oa-news-warning-score" type="number" min="0" max="100" step="1"></label>
+                <label>Shock Score <input id="oa-news-shock-score" type="number" min="0" max="100" step="1"></label>
+              </div>
+              <div class="oa-toggle-row">
+                <label><input id="oa-news-event-enabled" type="checkbox"> Enable news signal</label>
+                <label><input id="oa-news-market-confirm" type="checkbox"> Require market confirmation</label>
+                <label><input id="oa-news-show-ui" type="checkbox"> Show on dashboard</label>
               </div>
             </details>
 

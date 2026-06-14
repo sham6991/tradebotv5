@@ -24,6 +24,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-blackbox-panel"', html)
         self.assertIn('id="oa-market-context-panel"', html)
         self.assertIn('id="oa-trade-candidate-panel"', html)
+        self.assertIn('id="oa-news-event-panel"', html)
+        self.assertIn('id="oa-real-approval-card"', html)
         self.assertEqual(html.count('data-index-tick-panel'), 3)
         self.assertEqual(html.count('data-contract-lock-card'), 3)
         self.assertEqual(html.count('data-contract-lock-badge'), 3)
@@ -92,6 +94,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
             "resetPaperBalance",
             "runRealPreflight",
             "startRealEngine",
+            "approveRealEntry",
+            "rejectRealEntry",
             "runRealReconcile",
             "runRealDryRun",
             "stopNewEntries",

@@ -69,6 +69,15 @@ class OptionsAutoTerminalService:
         self.logger = OptionsAutoLogger()
         self._settings_state_loaded_from = ""
         self._settings_state_last_saved_at = ""
+        self._settings_state_load_warning = ""
+        self._settings_state_quarantine_path = ""
+        self._runtime_state_loaded_from = ""
+        self._runtime_state_last_saved_at = ""
+        self._runtime_state_last_save_epoch = 0.0
+        self._runtime_state_last_hash = ""
+        self._runtime_state_skipped_count = 0
+        self._runtime_state_load_warning = ""
+        self._runtime_state_quarantine_path = ""
         self.settings = self._load_persisted_settings(default_settings())
         self.mode_guard = ModeGuard(mode=normalize_mode(self.settings.get("mode")))
         self.session = OptionsAutoSessionState(self.mode_guard)
@@ -342,14 +351,78 @@ class OptionsAutoTerminalService:
     def _settings_state_path(self) -> str:
         return os.path.join(self.result_root(), "settings.json")
 
-    def _load_persisted_settings(self, base_settings: dict[str, Any]) -> dict[str, Any]:
-        path = self._settings_state_path()
+    def _state_quarantine_path(self, path: str) -> str:
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+        base = f"{path}.corrupt-{stamp}"
+        candidate = base
+        index = 1
+        while os.path.exists(candidate):
+            candidate = f"{base}-{index}"
+            index += 1
+        return candidate
+
+    def _quarantine_state_file(self, path: str, state_name: str, error: Exception) -> str:
+        quarantine_path = ""
+        try:
+            if os.path.exists(path):
+                quarantine_path = self._state_quarantine_path(path)
+                os.replace(path, quarantine_path)
+        except OSError as exc:
+            self.logger.log(
+                "WARN",
+                f"Options Auto {state_name} state quarantine failed",
+                path=path,
+                error=str(exc),
+                original_error=str(error),
+            )
+            return ""
+        if quarantine_path:
+            self.logger.log(
+                "WARN",
+                f"Options Auto {state_name} state quarantined",
+                path=path,
+                quarantine_path=quarantine_path,
+                error=str(error),
+            )
+        return quarantine_path
+
+    def _load_json_state_file(self, path: str, state_name: str) -> dict[str, Any] | None:
         if not os.path.exists(path):
-            return base_settings
+            return None
         try:
             with open(path, "r", encoding="utf-8") as handle:
                 payload = json.load(handle)
-        except (OSError, ValueError, json.JSONDecodeError):
+            if not isinstance(payload, dict):
+                raise ValueError(f"{state_name} state must be a JSON object")
+            return payload
+        except (OSError, UnicodeDecodeError, ValueError, json.JSONDecodeError) as exc:
+            quarantine_path = self._quarantine_state_file(path, state_name, exc)
+            warning = f"{state_name} state quarantined after load failure: {exc}"
+            if state_name == "settings":
+                self._settings_state_load_warning = warning
+                self._settings_state_quarantine_path = quarantine_path
+            else:
+                self._runtime_state_load_warning = warning
+                self._runtime_state_quarantine_path = quarantine_path
+            return None
+
+    def _atomic_write_json_state_file(self, path: str, payload: dict[str, Any]) -> None:
+        tmp_path = f"{path}.tmp-{os.getpid()}-{threading.get_ident()}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2, default=str)
+            os.replace(tmp_path, path)
+        finally:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+    def _load_persisted_settings(self, base_settings: dict[str, Any]) -> dict[str, Any]:
+        path = self._settings_state_path()
+        payload = self._load_json_state_file(path, "settings")
+        if not payload:
             return base_settings
         settings_state = dict((payload or {}).get("settings") or payload or {})
         if not settings_state:
@@ -366,20 +439,15 @@ class OptionsAutoTerminalService:
                 "reason": reason,
                 "settings": dict(self.settings),
             }
-            with open(self._settings_state_path(), "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, default=str)
+            self._atomic_write_json_state_file(self._settings_state_path(), payload)
             self._settings_state_last_saved_at = payload["saved_at"]
         except (OSError, TypeError, ValueError) as exc:
             self.logger.log("WARN", "Options Auto settings persistence failed", error=str(exc), reason=reason)
 
     def _load_runtime_state(self) -> None:
         path = self._runtime_state_path()
-        if not os.path.exists(path):
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as handle:
-                payload = json.load(handle)
-        except (OSError, ValueError, json.JSONDecodeError):
+        payload = self._load_json_state_file(path, "runtime")
+        if not payload:
             return
         settings_state = dict(payload.get("settings") or {})
         if settings_state:
@@ -424,6 +492,8 @@ class OptionsAutoTerminalService:
             self.real_lifecycle.warnings = list(real_state.get("warnings") or [])
             self.real_lifecycle.safe_mode = bool(real_state.get("safe_mode"))
             self.real_lifecycle.emergency_flatten_required = bool(real_state.get("emergency_flatten_required"))
+            self.real_lifecycle.broker_open_positions = list(real_state.get("broker_open_positions") or [])
+            self.real_lifecycle.last_reconciliation = dict(real_state.get("last_reconciliation") or real_state.get("reconciliation") or {})
             self.real_lifecycle.history = list(real_state.get("history") or [])
         self._options_ws_order_updates = list(payload.get("websocket_order_updates") or [])[-200:]
         self._real_broker_cache = dict(payload.get("real_broker_cache") or self._real_broker_cache)
@@ -444,8 +514,7 @@ class OptionsAutoTerminalService:
                     self._runtime_state_skipped_count += 1
                     self._record_latency_started("options_auto.runtime_persist", start, {"reason": reason, "skipped": True})
                     return
-            with open(self._runtime_state_path(), "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, indent=2, default=str)
+            self._atomic_write_json_state_file(self._runtime_state_path(), payload)
             self._runtime_state_last_saved_at = payload["saved_at"]
             self._runtime_state_last_save_epoch = time.time()
             self._runtime_state_last_hash = snapshot_hash
@@ -460,8 +529,12 @@ class OptionsAutoTerminalService:
             "settings_path": self._settings_state_path(),
             "settings_loaded_from": self._settings_state_loaded_from,
             "settings_last_saved_at": self._settings_state_last_saved_at,
+            "settings_load_warning": self._settings_state_load_warning,
+            "settings_quarantine_path": self._settings_state_quarantine_path,
             "loaded_from": self._runtime_state_loaded_from,
             "last_saved_at": self._runtime_state_last_saved_at,
+            "runtime_load_warning": self._runtime_state_load_warning,
+            "runtime_quarantine_path": self._runtime_state_quarantine_path,
             "skipped_noncritical_writes": self._runtime_state_skipped_count,
             "min_interval_seconds": float(self.settings.get("options_auto_runtime_persist_min_interval_seconds") or 2.0),
         }
@@ -629,6 +702,16 @@ class OptionsAutoTerminalService:
         self._record_latency_started("options_auto.decision_eval", decision_start, {"mode": mode, "candidate_count": len(instruments)})
         if live_data:
             decision.update(live_data.get("diagnostics") or {})
+        selected_contract = dict(decision.get("selected_contract") or {})
+        final_selected_symbol = str(selected_contract.get("tradingsymbol") or "")
+        decision["final_selected_contract_symbol"] = final_selected_symbol
+        if decision.get("locked_contract_symbols") is not None:
+            decision["contract_lock_vs_selection"] = {
+                "locked_contract_symbols": list(decision.get("locked_contract_symbols") or []),
+                "final_selected_contract_symbol": final_selected_symbol,
+                "final_selected_side": decision.get("final_selected_side") or decision.get("selected_side"),
+                "contract_selected": bool(selected_contract),
+            }
         self._record_index_tick_locked(decision, mode)
         blockers = decision.get("blockers") or []
         if mode in {MODE_PAPER, MODE_REAL} and self.settings.get("ready_plan_cache_enabled"):
@@ -850,6 +933,16 @@ class OptionsAutoTerminalService:
 
         active_trade = bool(self.session.active_trades or getattr(self.paper_lifecycle, "active_trades", []))
         current_lock = self.locked_contract_manager.current(underlying, expiry)
+        if active_trade and not current_lock:
+            blocker = "Active trade is open but the matching contract lock is unavailable; refusing to reselect contracts until the trade exits."
+            self.locked_contract_manager.blocked(blocker)
+            return {
+                "blocked": True,
+                "blockers": [blocker],
+                "warnings": warnings,
+                "next_action": "Exit or reconcile the active trade before selecting a new CE/PE lock.",
+                "diagnostics": {**diagnostics, "contract_lock": self.locked_contract_manager.snapshot()},
+            }
         if not current_lock or self.locked_contract_manager.should_reselect(settings, active_trade=active_trade):
             selection = self._select_and_lock_major_contracts(
                 client=client,
@@ -885,7 +978,7 @@ class OptionsAutoTerminalService:
         self._ensure_options_websocket_locked(client, mode, underlying, index_token, contracts, settings)
         quote_result = self._locked_contract_quote_result(client, contracts, settings, source)
         valid_quote_count = int(quote_result.get("valid_quote_count") or 0)
-        selected_symbols = [contract.get("tradingsymbol") for contract in contracts if contract.get("tradingsymbol")]
+        locked_symbols = [contract.get("tradingsymbol") for contract in contracts if contract.get("tradingsymbol")]
         diagnostics.update({
             "atm_strike": _round_to_step(float(spot.get("spot") or 0), config.get("strike_step") or major_step),
             "major_floor_strike": (current_lock.get("major_selection") or {}).get("floor_major"),
@@ -895,7 +988,9 @@ class OptionsAutoTerminalService:
             "contracts_found": len(contracts),
             "contracts_requested": len(contracts),
             "missing_contracts": [],
-            "selected_contract_symbols": selected_symbols,
+            "locked_contract_symbols": locked_symbols,
+            "selected_contract_symbols": locked_symbols,
+            "selected_contract_symbols_legacy_note": "Legacy field contains locked CE/PE symbols. Use locked_contract_symbols for lock candidates and final_selected_contract_symbol for the final trade.",
             "contract_lock": current_lock,
             "contract_lock_status": current_lock.get("status"),
             "margin_hop_history": current_lock.get("margin_hop_history") or [],
@@ -910,7 +1005,9 @@ class OptionsAutoTerminalService:
             "options_data_health": {
                 **diagnostics["options_data_health"],
                 "contract_lock_status": current_lock.get("status"),
-                "selected_contracts": selected_symbols,
+                "locked_contracts": locked_symbols,
+                "selected_contracts": locked_symbols,
+                "selected_contracts_legacy_note": "Legacy field contains locked CE/PE symbols, not the final selected trade.",
                 "candidate_count": len(contracts),
                 "contracts_found": len(contracts),
                 "valid_quote_count": valid_quote_count,
@@ -998,6 +1095,7 @@ class OptionsAutoTerminalService:
             initial_strike=int(major["ce_strike"]),
             hop_direction=1,
             major_step=major_step,
+            spot_value=spot_value,
             lots=lots,
             available_margin=available,
             max_hops=max_hops,
@@ -1012,6 +1110,7 @@ class OptionsAutoTerminalService:
             initial_strike=int(major["pe_strike"]),
             hop_direction=-1,
             major_step=major_step,
+            spot_value=spot_value,
             lots=lots,
             available_margin=available,
             max_hops=max_hops,
@@ -1063,6 +1162,7 @@ class OptionsAutoTerminalService:
         initial_strike: int,
         hop_direction: int,
         major_step: int,
+        spot_value: float,
         lots: int,
         available_margin: float,
         max_hops: int,
@@ -1106,12 +1206,18 @@ class OptionsAutoTerminalService:
                 "quantity": quantity,
                 "premium": premium,
                 "requested_quote_keys": quote_result.get("requested_quote_keys") or [],
+                "distance_pct": _distance_pct(strike, spot_value),
             }
             quote_blocker = self._contract_quote_blocker(quote, settings)
             if quote_blocker:
                 entry.update({"status": "BLOCKED", "reason": quote_blocker})
                 hop_history.append(entry)
                 return {"blockers": [quote_blocker], "hop_history": hop_history}
+            scalp_blocker = self._expiry_scalp_distance_blocker(strike, spot_value, expiry, settings)
+            if scalp_blocker:
+                entry.update({"status": "BLOCKED", "reason": scalp_blocker})
+                hop_history.append(entry)
+                return {"blockers": [scalp_blocker], "hop_history": hop_history}
             margin = self._margin_requirement(premium, quantity, lots, settings)
             entry.update(margin)
             if margin["total_required"] <= available_margin:
@@ -1212,6 +1318,26 @@ class OptionsAutoTerminalService:
             return "Quote is stale."
         return ""
 
+    def _expiry_scalp_distance_blocker(self, strike: int | float, spot_value: float, expiry: Any, settings: dict[str, Any]) -> str:
+        if not bool(settings.get("expiry_scalp_enabled") or settings.get("expiry_scalping_mode")):
+            return ""
+        expiry_text = _expiry_text(expiry)
+        try:
+            expiry_date = datetime.fromisoformat(expiry_text).date()
+        except ValueError:
+            return ""
+        if expiry_date != date.today():
+            return ""
+        distance_pct = _distance_pct(strike, spot_value)
+        max_distance = max(0.0, _number(settings.get("expiry_scalp_max_distance_pct"), 0.75))
+        if distance_pct <= max_distance:
+            return ""
+        return (
+            "Expiry scalp requires ATM/near-ATM contracts; "
+            f"strike {int(float(strike or 0))} is {distance_pct:.2f}% from spot {float(spot_value or 0):.2f} "
+            f"(max {max_distance:.2f}%)."
+        )
+
     def _margin_requirement(self, premium: float, quantity: int, lots: int, settings: dict[str, Any]) -> dict[str, float]:
         required_cash = float(premium or 0) * int(quantity or 0)
         charges = float(settings.get("estimated_charges_per_lot") or settings.get("estimated_total_charges") or 40.0) * int(lots or 0)
@@ -1264,6 +1390,20 @@ class OptionsAutoTerminalService:
             "market_cue": {},
             "regime": {"recommended_side": SIDE_WAIT, "regime": "blocked_by_data", "no_trade_reason": blockers[0]},
             "selected_side": SIDE_WAIT,
+            "intended_side": SIDE_WAIT,
+            "final_selected_side": SIDE_WAIT,
+            "side_selection": {
+                "intended_side": SIDE_WAIT,
+                "final_selected_side": SIDE_WAIT,
+                "source": "blocked_by_data",
+                "explicit_side": "",
+                "regime_side": SIDE_WAIT,
+                "market_cue_side": SIDE_WAIT,
+                "simple_ohlcv_side": SIDE_WAIT,
+                "selected_contract_type": "",
+                "contract_selected": False,
+                "side_contract_mismatch": False,
+            },
             "selected_contract": {},
             "selection": {"side": SIDE_WAIT, "selected": None, "score": 0.0, "candidates": [], "blockers": blockers},
             "trade_score": {"score": 0.0, "breakdown": {}, "weights": {}},
@@ -1282,7 +1422,14 @@ class OptionsAutoTerminalService:
             "warnings": warnings,
             "explanation": blockers[0],
             "next_action": next_action,
-            "decision_snapshot": {"allowed": False, "blockers": blockers, "governor_state": "BLOCKED_BY_DATA"},
+            "decision_snapshot": {
+                "allowed": False,
+                "blockers": blockers,
+                "governor_state": "BLOCKED_BY_DATA",
+                "selected_side": SIDE_WAIT,
+                "intended_side": SIDE_WAIT,
+                "final_selected_side": SIDE_WAIT,
+            },
             "real_execution_enabled": mode == MODE_REAL,
             "real_execution_reason": "Real execution blocked until Options Auto market data is available." if mode == MODE_REAL else REAL_EXECUTION_DISABLED_REASON,
             **diagnostics,
@@ -2352,11 +2499,13 @@ class OptionsAutoTerminalService:
         trade_plan = payload.get("trade_plan") or self.session.last_decision.get("trade_plan") or {}
         result = self.real_controller.reconcile(self.session.orders, broker_orders, positions, trade_plan)
         lifecycle = self.real_lifecycle.reconcile_positions(broker_orders, positions)
+        position_sync = self._sync_real_option_positions_locked({**payload, "broker_orders": broker_orders, "positions": positions})
         self.session.record_safety_event("Real reconciliation checked", {"state": result["state"], "blockers": result["blockers"]})
         if lifecycle.get("state") == UNPROTECTED_POSITION:
             self.session.status = "UNPROTECTED_REAL_POSITION"
         result["session"] = self.session.to_dict()
         result["real_order_lifecycle"] = lifecycle
+        result["position_sync"] = position_sync
         self.logger.log("INFO", "Options Auto real reconciliation checked", ok=result["ok"], blockers=result["blockers"])
         return result
 
@@ -2371,6 +2520,7 @@ class OptionsAutoTerminalService:
         lifecycle = self.real_lifecycle.monitor_oco(broker_orders, adapter=adapter, positions=positions)
         if positions is not None:
             lifecycle = self.real_lifecycle.reconcile_positions(broker_orders, positions)
+            self._sync_real_option_positions_locked({**payload, "broker_orders": broker_orders, "positions": positions})
         if lifecycle.get("state") == UNPROTECTED_POSITION:
             self.session.status = "UNPROTECTED_REAL_POSITION"
         self._persist_runtime_state_locked("real_lifecycle_poll")
@@ -2739,6 +2889,7 @@ class OptionsAutoTerminalService:
         if self._should_fetch_backtest_history(payload, candles, options):
             candles, options, source_metadata = self._load_backtest_history(payload, self.settings)
         result = self.backtest_engine.run(candles, options, self.settings)
+        result["market_context_scenarios"] = self._backtest_market_context_scenarios(candles, options, self.settings) if self._backtest_scenario_compare_enabled(payload, self.settings) else {}
         result["data_source"] = source_metadata.get("data_source")
         result["data_source_label"] = source_metadata.get("data_source_label")
         result["source_metadata"] = source_metadata
@@ -2759,6 +2910,43 @@ class OptionsAutoTerminalService:
         result["report"] = report
         self.logger.log("INFO", "Options Auto backtest completed", rows=result["rows"])
         return {**result, "session": self.session.to_dict()}
+
+    def _backtest_scenario_compare_enabled(self, payload: dict[str, Any], settings: dict[str, Any]) -> bool:
+        if payload.get("backtest_compare_market_context_scenarios") not in ("", None):
+            return bool(payload.get("backtest_compare_market_context_scenarios"))
+        return bool(settings.get("backtest_compare_market_context_scenarios"))
+
+    def _backtest_market_context_scenarios(
+        self,
+        candles: pd.DataFrame,
+        options: list[pd.DataFrame],
+        settings: dict[str, Any],
+    ) -> dict[str, Any]:
+        scenarios = {
+            "BASELINE": {
+                "market_context_enabled": False,
+                "market_context_enforcement_enabled": False,
+            },
+            "REPORT_ONLY": {
+                "market_context_enabled": True,
+                "market_context_enforcement_enabled": False,
+            },
+            "ENFORCED": {
+                "market_context_enabled": True,
+                "market_context_enforcement_enabled": True,
+            },
+        }
+        results: dict[str, Any] = {}
+        for name, overrides in scenarios.items():
+            scenario_settings = normalize_settings({
+                **dict(settings or {}),
+                **overrides,
+                "mode": MODE_BACKTEST,
+                "backtest_compare_market_context_scenarios": False,
+            })
+            scenario = self.backtest_engine.run(candles, options, scenario_settings)
+            results[name] = _backtest_scenario_summary(name, scenario, scenario_settings)
+        return results
 
     def _should_fetch_backtest_history(self, payload: dict[str, Any], candles: pd.DataFrame, options: list[pd.DataFrame]) -> bool:
         source = str(payload.get("data_source") or payload.get("source") or "").strip().lower()
@@ -3572,16 +3760,9 @@ class OptionsAutoTerminalService:
         if mode != MODE_REAL:
             return settings
         if client:
-            explicit_dry_run = "dry_run_real_only" in payload or "dry_run_real_only" in dict(payload.get("settings") or {})
-            explicit_real_orders = "real_orders_enabled" in payload or "real_orders_enabled" in dict(payload.get("settings") or {})
-            explicit_real_auto = "real_auto_entry_enabled" in payload or "real_auto_entry_enabled" in dict(payload.get("settings") or {})
             settings["real_orders_enabled"] = bool(settings.get("real_orders_enabled"))
             settings["dry_run_real_only"] = bool(settings.get("dry_run_real_only"))
-            settings["real_auto_entry_enabled"] = bool(settings.get("real_auto_entry_enabled")) if explicit_real_auto else False
-            if not explicit_real_orders:
-                settings["real_orders_enabled"] = False
-            if not explicit_dry_run and not explicit_real_orders:
-                settings["dry_run_real_only"] = True
+            settings["real_auto_entry_enabled"] = bool(settings.get("real_auto_entry_enabled"))
             if settings.get("dry_run_real_only"):
                 settings["real_orders_enabled"] = False
         return settings
@@ -3854,9 +4035,11 @@ class OptionsAutoTerminalService:
         starting_balance = _number(getattr(self.paper_broker, "starting_balance", None), 0.0)
         available_balance = _number(getattr(self.paper_broker, "available_balance", None), starting_balance)
         reserved_balance = _number(getattr(self.paper_broker, "reserved_balance", None), 0.0)
+        ledger = list(getattr(self.paper_broker, "ledger", []) or [])
+        meaningful_ledger = [row for row in ledger if str((row or {}).get("type") or "").upper() != "OPENING_BALANCE"]
         return (
             not list(getattr(self.paper_broker, "orders", []) or [])
-            and not list(getattr(self.paper_broker, "ledger", []) or [])
+            and not meaningful_ledger
             and abs(available_balance - starting_balance) < 0.01
             and abs(reserved_balance) < 0.01
         )
@@ -4177,6 +4360,13 @@ def _round_to_step(value: float, step: float) -> float:
     return round(float(value) / step) * step
 
 
+def _distance_pct(strike: int | float, spot_value: int | float) -> float:
+    spot = _number(spot_value)
+    if spot <= 0:
+        return 100.0
+    return round(abs(_number(strike) - spot) / spot * 100.0, 4)
+
+
 def _token_int(value: Any) -> int:
     if isinstance(value, dict):
         value = value.get("instrument_token") or value.get("token")
@@ -4285,4 +4475,23 @@ def _contract_summary(contract: dict[str, Any]) -> dict[str, Any]:
         "margin_required_estimate": contract.get("margin_required_estimate"),
         "hop_count": contract.get("hop_count"),
         "hop_reason": contract.get("hop_reason"),
+    }
+
+
+def _backtest_scenario_summary(name: str, result: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
+    metrics = dict(result.get("metrics") or {})
+    return {
+        "name": name,
+        "settings": {
+            "market_context_enabled": bool(settings.get("market_context_enabled")),
+            "market_context_enforcement_enabled": bool(settings.get("market_context_enforcement_enabled")),
+            "entry_dependency_mode": settings.get("entry_dependency_mode"),
+        },
+        "rows": result.get("rows", 0),
+        "option_frames": result.get("option_frames", 0),
+        "orders_placed": result.get("orders_placed", 0),
+        "real_orders_placed": result.get("real_orders_placed", 0),
+        "metrics": metrics,
+        "zero_trade_reason": result.get("zero_trade_reason") or "",
+        "blocker_counts": dict(result.get("blocker_counts") or {}),
     }

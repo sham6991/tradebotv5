@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from options_auto.intelligence.exit_manager import ExitManager
@@ -110,27 +111,29 @@ class OptionsAutoExitManagerTests(unittest.TestCase):
         self.assertIn("Averaging down", result["blockers"][0])
 
     def test_paper_market_process_applies_theta_exit_without_real_orders(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
-        service.execute_paper_plan(sample_payload())
-        service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
+            service.execute_paper_plan(sample_payload())
+            service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
 
-        result = service.process_paper_market({"market": {"ltp": 41, "high": 41, "low": 41, "theta_risk_score": 95}})
+            result = service.process_paper_market({"market": {"ltp": 41, "high": 41, "low": 41, "theta_risk_score": 95}})
 
-        self.assertEqual(result["exit_updates"][0]["decision"]["action"], "THETA_EXIT")
-        self.assertEqual(result["session"]["status"], "PAPER_IDLE")
-        self.assertEqual(result["paper_account"]["orders"][-1]["transaction_type"], "SELL")
+            self.assertEqual(result["exit_updates"][0]["decision"]["action"], "THETA_EXIT")
+            self.assertEqual(result["session"]["status"], "PAPER_IDLE")
+            self.assertEqual(result["paper_account"]["orders"][-1]["transaction_type"], "SELL")
 
     def test_paper_market_process_can_move_sl_to_breakeven(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
-        payload = sample_payload()
-        payload["settings"] = {**payload["settings"], "number_of_lots": 2}
-        service.execute_paper_plan(payload)
-        service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
+            payload = sample_payload()
+            payload["settings"] = {**payload["settings"], "number_of_lots": 2}
+            service.execute_paper_plan(payload)
+            service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
 
-        result = service.process_paper_market({"market": {"ltp": 49, "high": 49, "low": 49}})
+            result = service.process_paper_market({"market": {"ltp": 49, "high": 49, "low": 49}})
 
-        self.assertEqual(result["exit_updates"][0]["decision"]["action"], "PARTIAL_EXIT")
-        self.assertGreaterEqual(result["snapshot"]["active_trades"][0]["stoploss"], 40)
+            self.assertEqual(result["exit_updates"][0]["decision"]["action"], "PARTIAL_EXIT")
+            self.assertGreaterEqual(result["snapshot"]["active_trades"][0]["stoploss"], 40)
 
 
 if __name__ == "__main__":

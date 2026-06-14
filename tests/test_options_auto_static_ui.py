@@ -73,6 +73,49 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("Real Money Zerodha", js)
         self.assertNotIn("Kite not connected", js)
 
+    def test_state_changing_post_actions_refresh_ui_summary(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        self.assertIn('"/api/options-auto/ui-summary"', js)
+        self.assertIn("async function refreshUiSummaryAfterMutation", js)
+
+        for function_name in (
+            "runBacktest",
+            "runPaperStart",
+            "stopPaperEngine",
+            "stopEngine",
+            "killSwitch",
+            "requestPaperApproval",
+            "approvePaper",
+            "rejectPaper",
+            "executePaper",
+            "processPaperMarket",
+            "resetPaperBalance",
+            "runRealPreflight",
+            "startRealEngine",
+            "runRealReconcile",
+            "runRealDryRun",
+            "stopNewEntries",
+            "runSafeMode",
+            "runEmergencyPlan",
+            "saveSettings",
+        ):
+            match = re.search(rf"async function {function_name}\(\) \{{(?P<body>.*?)\n\}}", js, re.DOTALL)
+            self.assertIsNotNone(match, function_name)
+            self.assertIn("refreshUiSummaryAfterMutation", match.group("body"), function_name)
+
+    def test_clear_actions_do_not_leave_stale_live_result(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        for function_name in ("stopPaperEngine", "stopEngine", "killSwitch", "rejectPaper", "resetPaperBalance"):
+            match = re.search(rf"async function {function_name}\(\) \{{(?P<body>.*?)\n\}}", js, re.DOTALL)
+            self.assertIsNotNone(match, function_name)
+            self.assertIn("clearLastResult: true", match.group("body"), function_name)
+
+        backtest = re.search(r"async function runBacktest\(\) \{(?P<body>.*?)\n\}", js, re.DOTALL)
+        self.assertIsNotNone(backtest)
+        self.assertNotIn("state.lastResult = result", backtest.group("body"))
+        self.assertIn("clearLastResult: true", backtest.group("body"))
+
     def test_raw_json_controls_stay_in_debug_tab(self):
         html = (ROOT / "web_static" / "options_auto.html").read_text(encoding="utf-8")
         debug_index = html.index('id="oa-tab-debug"')
@@ -111,9 +154,21 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("major_strike_step", body)
         self.assertIn("entry_dependency_mode", body)
         self.assertIn("atm_scan_strike_span: span", body)
+        self.assertIn("backtest_compare_market_context_scenarios", body)
         self.assertIn("underlying", body)
         self.assertIn("interval", body)
         self.assertNotIn("sampleReplayCandles()", body)
+
+    def test_backtest_renders_scenarios_and_missing_data_assumptions(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+        render = re.search(r"function renderBacktestResults\(result = state\.lastBacktest\) \{(?P<body>.*?)\n\}", js, re.DOTALL)
+
+        self.assertIsNotNone(render)
+        body = render.group("body")
+        self.assertIn("market_context_scenarios", body)
+        self.assertIn("historical_data_assumptions", body)
+        self.assertIn("Synthetic Fields", body)
+        self.assertIn("Scenario Compare", body)
 
     def test_backtest_trade_table_and_date_picker_contracts_are_static(self):
         js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")

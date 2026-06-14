@@ -323,6 +323,119 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
             self.assertEqual(restored.settings["buy_score_threshold"], 63.0)
             self.assertTrue(restored.settings["auto_entry_enabled"])
 
+    def test_start_real_engine_follows_saved_real_settings(self):
+        client = StreamingOptionsZerodha("LIVE")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            service.configure({
+                "mode": MODE_REAL,
+                "expiry": _expiry_text(),
+                "confirm_real_mode": True,
+                "static_ip_confirmed": True,
+                "real_orders_enabled": True,
+                "real_auto_entry_enabled": True,
+                "dry_run_real_only": False,
+                "premium_expansion_required": False,
+            })
+            restored = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+
+            result = restored.start_real_engine({
+                "kite_profile": {"user_id": "REAL1"},
+                "broker_orders": [],
+                "positions": [],
+                "market_open": True,
+                "instruments_valid": True,
+            })
+
+            self.assertTrue(result["real_engine_started"], result.get("blockers"))
+            self.assertTrue(restored.settings["real_orders_enabled"])
+            self.assertTrue(restored.settings["real_auto_entry_enabled"])
+            self.assertFalse(restored.settings["dry_run_real_only"])
+            self.assertTrue(result["preflight"]["allowed"], result["preflight"].get("blockers"))
+            self.assertEqual(client.limit_orders, [])
+            restored.stop_live_scan({"mode": MODE_REAL})
+
+    def test_real_preflight_follows_saved_real_settings(self):
+        client = StreamingOptionsZerodha("LIVE")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            service.configure({
+                "mode": MODE_REAL,
+                "confirm_real_mode": True,
+                "static_ip_confirmed": True,
+                "real_orders_enabled": True,
+                "real_auto_entry_enabled": True,
+                "dry_run_real_only": False,
+            })
+            restored = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+
+            result = restored.real_preflight_check({
+                "mode": MODE_REAL,
+                "kite_profile": {"user_id": "REAL1"},
+                "broker_orders": [],
+                "positions": [],
+                "market_open": True,
+                "instruments_valid": True,
+            })
+
+            self.assertTrue(result["allowed"], result.get("blockers"))
+            self.assertTrue(restored.settings["real_orders_enabled"])
+            self.assertTrue(restored.settings["real_auto_entry_enabled"])
+            self.assertFalse(restored.settings["dry_run_real_only"])
+            self.assertEqual(client.limit_orders, [])
+
+    def test_start_paper_follows_saved_entry_settings(self):
+        client = StreamingOptionsZerodha("PAPER")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+            service.configure({
+                "mode": MODE_PAPER,
+                "expiry": _expiry_text(),
+                "auto_entry_enabled": True,
+                "ask_permission_before_entry": False,
+                "premium_expansion_required": False,
+            })
+            restored = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "PAPER" else None)
+
+            result = restored.start_paper({"broker_orders": [], "positions": []})
+
+            self.assertTrue(restored.settings["auto_entry_enabled"])
+            self.assertFalse(restored.settings["ask_permission_before_entry"])
+            status_settings = restored.status()["settings"]
+            self.assertEqual(status_settings["auto_entry_enabled"], True)
+            self.assertEqual(status_settings["ask_permission_before_entry"], False)
+            self.assertEqual(restored.session.status, "PAPER_SCANNING")
+            restored.stop_live_scan({"mode": MODE_PAPER})
+
+    def test_start_real_engine_payload_can_keep_saved_real_settings_in_dry_run(self):
+        client = StreamingOptionsZerodha("LIVE")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            service.configure({
+                "mode": MODE_REAL,
+                "expiry": _expiry_text(),
+                "confirm_real_mode": True,
+                "static_ip_confirmed": True,
+                "real_orders_enabled": True,
+                "real_auto_entry_enabled": True,
+                "dry_run_real_only": False,
+            })
+
+            result = service.start_real_engine({
+                "settings": {"dry_run_real_only": True},
+                "kite_profile": {"user_id": "REAL1"},
+                "broker_orders": [],
+                "positions": [],
+                "market_open": True,
+                "instruments_valid": True,
+            })
+
+            self.assertFalse(result["allowed"])
+            self.assertTrue(service.settings["dry_run_real_only"])
+            self.assertFalse(service.settings["real_orders_enabled"])
+            self.assertTrue(service.settings["real_auto_entry_enabled"])
+            self.assertEqual(client.limit_orders, [])
+
     def test_configure_does_not_reset_established_paper_account(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             service = OptionsAutoTerminalService(temp_dir)
@@ -355,7 +468,40 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
             self.assertEqual(result["paper_account"]["available_balance"], 18000)
             self.assertEqual(restored.paper_broker.starting_balance, 18000)
             self.assertEqual(restored.paper_broker.available_balance, 18000)
-            self.assertFalse(restored.paper_broker.ledger)
+            self.assertEqual(restored.paper_broker.ledger[0]["type"], "OPENING_BALANCE")
+            self.assertEqual(restored.paper_broker.ledger[0]["amount"], 18000.0)
+
+    def test_corrupt_settings_state_is_quarantined_and_defaults_are_used(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = os.path.join(temp_dir, "options_auto")
+            os.makedirs(state_dir, exist_ok=True)
+            settings_path = os.path.join(state_dir, "settings.json")
+            with open(settings_path, "wb") as handle:
+                handle.write(b"\x00\x00{not valid json")
+
+            service = OptionsAutoTerminalService(temp_dir)
+            snapshot = service.status()["runtime_persistence"]
+
+            self.assertEqual(service.settings["underlying"], "NIFTY")
+            self.assertFalse(os.path.exists(settings_path))
+            self.assertTrue(os.path.exists(snapshot["settings_quarantine_path"]))
+            self.assertIn("quarantined", snapshot["settings_load_warning"].lower())
+
+    def test_corrupt_runtime_state_is_quarantined_and_ignored(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            state_dir = os.path.join(temp_dir, "options_auto")
+            os.makedirs(state_dir, exist_ok=True)
+            runtime_path = os.path.join(state_dir, "runtime_state.json")
+            with open(runtime_path, "wb") as handle:
+                handle.write(b"\x00\x00{not valid json")
+
+            service = OptionsAutoTerminalService(temp_dir)
+            snapshot = service.status()["runtime_persistence"]
+
+            self.assertEqual(service.session.status, "IDLE")
+            self.assertFalse(os.path.exists(runtime_path))
+            self.assertTrue(os.path.exists(snapshot["runtime_quarantine_path"]))
+            self.assertIn("quarantined", snapshot["runtime_load_warning"].lower())
 
     def test_paper_loss_exit_persists_balance_for_next_session_and_trade(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -10,8 +10,8 @@ class ProfessionalDisciplineEngine:
         warnings = []
         score = 100.0
         if decision.get("chase_detected"):
-            blockers.append("FOMO/chase filter rejected the setup.")
-            score -= 35
+            warnings.append("Entry timing already rejected a chase setup; discipline score penalized without adding a duplicate blocker.")
+            score -= 20
         if int(risk_state.get("consecutive_losses") or 0) > 0 and decision.get("aggressiveness") == "high":
             blockers.append("Revenge-trade guard blocks high aggression after a loss.")
             score -= 30
@@ -28,4 +28,3 @@ class ProfessionalDisciplineEngine:
             "blockers": blockers,
             "warnings": warnings,
         }
-

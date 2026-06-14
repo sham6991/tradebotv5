@@ -195,6 +195,11 @@ class OptionsAutoWebRoutes:
         feed_stale = bool(data_health.get("stale") or data_health.get("feed_stale"))
         protection_state = str(lifecycle.get("protected_state") or "FLAT").upper()
         lifecycle_state = str(lifecycle.get("state") or "IDLE").upper()
+        session_active_trades = list(session.get("active_trades") or [])
+        broker_open_positions = _broker_open_positions_from_lifecycle(lifecycle) if trade_mode == "REAL" else []
+        broker_position_open = bool(broker_open_positions)
+        position_open = broker_position_open or (session_started and bool(session_active_trades))
+        active_instrument = _first_position_symbol(broker_open_positions) if broker_position_open else _first_position_symbol(session_active_trades) if session_started else ""
         blockers = []
         if mode == "REAL" and not real_connected:
             blockers.append("Real money locked")
@@ -206,8 +211,13 @@ class OptionsAutoWebRoutes:
             blockers.append("Options feed is stale")
         if not (lock.get("ce") and lock.get("pe")):
             blockers.append("Contracts are not locked")
-        if session_started and ("FAILED" in protection_state or "UNPROTECTED" in lifecycle_state or "RECONCILIATION" in protection_state):
+        if broker_position_open and not session_started:
+            blockers.append("Broker-open real position exists while scanner is stopped")
+        if (session_started or broker_position_open) and ("FAILED" in protection_state or "UNPROTECTED" in lifecycle_state or "RECONCILIATION" in protection_state):
             blockers.append("Position protection requires manual attention")
+        protection_failed = any("protection" in item.lower() for item in blockers)
+        protection_active = (session_started or broker_position_open) and protection_state == "PROTECTIVE_EXIT_ACTIVE"
+        oco_active = (session_started or broker_position_open) and lifecycle_state == "OCO_ACTIVE"
         return {
             "mode": mode,
             "real_money_state": "ARMED" if mode == "REAL" and real_connected else "LOCKED",
@@ -217,13 +227,14 @@ class OptionsAutoWebRoutes:
             "session_started": session_started,
             "session_state": session_state,
             "selected_mode_connected": selected_connected,
-            "position": "OPEN" if session_started and (session.get("active_trades") or []) else "FLAT",
-            "protection": "FAILED" if blockers and any("protection" in item.lower() for item in blockers) else "PROTECTED" if session_started and protection_state == "PROTECTIVE_EXIT_ACTIVE" else "INACTIVE",
-            "oco": "ACTIVE" if session_started and lifecycle_state == "OCO_ACTIVE" else "INACTIVE",
+            "position": "OPEN" if position_open else "FLAT",
+            "protection": "FAILED" if protection_failed else "PROTECTED" if protection_active else "INACTIVE",
+            "oco": "ACTIVE" if oco_active else "INACTIVE",
             "kill_switch": bool((status.get("real_safety") or {}).get("safe_mode")),
             "can_trade": not blockers,
             "blockers": blockers,
-            "active_instrument": (((session.get("active_trades") or [{}])[0] or {}).get("tradingsymbol") or "") if session_started else "",
+            "active_instrument": active_instrument,
+            "broker_open_positions": broker_open_positions,
             "session_pnl": status.get("paper_account", {}).get("realized_pnl") or 0,
             "last_update": status.get("session", {}).get("updated_at") or "",
             "settings": settings,
@@ -293,6 +304,21 @@ class OptionsAutoWebRoutes:
             action = "real trading" if requested_mode == "LIVE" else "paper trading"
             return [f"Connect {self.app_state.auth_label(requested_mode)} before Options Auto {action}."]
         return []
+
+
+def _broker_open_positions_from_lifecycle(lifecycle: dict) -> list[dict]:
+    positions = lifecycle.get("broker_open_positions")
+    if not positions:
+        reconciliation = lifecycle.get("reconciliation") or lifecycle.get("last_reconciliation") or {}
+        positions = reconciliation.get("open_positions") or []
+    return [dict(item) for item in positions if isinstance(item, dict)]
+
+
+def _first_position_symbol(rows: list[dict]) -> str:
+    if not rows:
+        return ""
+    first = rows[0] or {}
+    return str(first.get("tradingsymbol") or first.get("symbol") or first.get("instrument") or "")
 
 
 SENSITIVE_KEYS = {"access_token", "api_secret", "request_token", "enctoken", "authorization"}

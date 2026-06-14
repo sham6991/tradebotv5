@@ -23,8 +23,9 @@ class OptionsAutoBacktestEngine:
         settings = normalize_settings({**dict(settings or {}), "mode": MODE_BACKTEST})
         index_frame = _normalize_frame(index_candles)
         option_frames = [_prepare_option_frame(frame, index) for index, frame in enumerate(option_candles or [])]
+        historical_data_assumptions = _historical_data_assumptions(index_frame, option_frames)
         if index_frame.empty:
-            return self._empty_result(settings, option_frames)
+            return self._empty_result(settings, option_frames, historical_data_assumptions)
 
         decisions: list[dict[str, Any]] = []
         trades: list[dict[str, Any]] = []
@@ -202,7 +203,7 @@ class OptionsAutoBacktestEngine:
                 "net_pnl": exit_decision["net_pnl"],
             })
 
-        result = self._result(settings, index_frame, option_frames, decisions, trades)
+        result = self._result(settings, index_frame, option_frames, decisions, trades, historical_data_assumptions)
         result["starting_available_margin"] = round(starting_margin, 2)
         result["ending_available_margin"] = round(available_margin, 2)
         result["margin_ledger"] = margin_ledger
@@ -351,10 +352,20 @@ class OptionsAutoBacktestEngine:
             "exit_index": index,
         }
 
-    def _result(self, settings: dict[str, Any], index_frame: pd.DataFrame, option_frames: list[pd.DataFrame], decisions: list[dict[str, Any]], trades: list[dict[str, Any]]) -> dict[str, Any]:
+    def _result(
+        self,
+        settings: dict[str, Any],
+        index_frame: pd.DataFrame,
+        option_frames: list[pd.DataFrame],
+        decisions: list[dict[str, Any]],
+        trades: list[dict[str, Any]],
+        historical_data_assumptions: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         winning_trades = len([trade for trade in trades if trade.get("net_pnl", 0) > 0])
         losing_trades = len([trade for trade in trades if trade.get("net_pnl", 0) < 0])
         total_pnl = sum(float(trade.get("net_pnl") or 0) for trade in trades)
+        gross_pnl = sum(float(trade.get("gross_pnl") or 0) for trade in trades)
+        charges = sum(float(trade.get("charges") or 0) for trade in trades)
         total_trades = len(trades)
         blocker_counts = _blocker_counts(decisions)
         return {
@@ -366,6 +377,7 @@ class OptionsAutoBacktestEngine:
             "trades": trades,
             "decision_rows_checked": len(decisions),
             "blocker_counts": blocker_counts,
+            "historical_data_assumptions": historical_data_assumptions or {},
             "zero_trade_reason": "" if trades else _zero_trade_reason(decisions, blocker_counts),
             "metrics": {
                 "total_trades": total_trades,
@@ -373,14 +385,22 @@ class OptionsAutoBacktestEngine:
                 "losing_trades": losing_trades,
                 "win_rate": round(winning_trades / total_trades * 100, 2) if total_trades else 0,
                 "total_pnl": round(total_pnl, 2),
+                "gross_pnl": round(gross_pnl, 2),
+                "charges": round(charges, 2),
+                "net_pnl": round(total_pnl, 2),
                 "avg_pnl_per_trade": round(total_pnl / total_trades, 2) if total_trades else 0,
             },
             "orders_placed": total_trades,
             "real_orders_placed": 0,
         }
 
-    def _empty_result(self, settings: dict[str, Any], option_frames: list[pd.DataFrame] | None = None) -> dict[str, Any]:
-        return self._result(settings, pd.DataFrame(), option_frames or [], [], [])
+    def _empty_result(
+        self,
+        settings: dict[str, Any],
+        option_frames: list[pd.DataFrame] | None = None,
+        historical_data_assumptions: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        return self._result(settings, pd.DataFrame(), option_frames or [], [], [], historical_data_assumptions)
 
 
 def _normalize_frame(frame: pd.DataFrame | list[dict[str, Any]] | None) -> pd.DataFrame:
@@ -426,10 +446,12 @@ def _historical_quote_proxy(row: pd.Series, close: float, tick_size: float, lot_
     bid = _safe_float(row.get("bid"))
     ask = _safe_float(row.get("ask"))
     synthetic = False
+    synthetic_fields: list[str] = []
     if close > 0 and (bid <= 0 or ask <= 0 or ask < bid):
         bid = max(tick_size, close - tick_size)
         ask = close + tick_size
         synthetic = True
+        synthetic_fields.extend(["bid", "ask", "spread"])
     bid_qty = _safe_float(row.get("bid_qty"))
     ask_qty = _safe_float(row.get("ask_qty"))
     if bid_qty <= 0 or ask_qty <= 0:
@@ -437,10 +459,15 @@ def _historical_quote_proxy(row: pd.Series, close: float, tick_size: float, lot_
         bid_qty = bid_qty if bid_qty > 0 else depth
         ask_qty = ask_qty if ask_qty > 0 else depth
         synthetic = True
+        if _safe_float(row.get("bid_qty")) <= 0:
+            synthetic_fields.append("bid_qty")
+        if _safe_float(row.get("ask_qty")) <= 0:
+            synthetic_fields.append("ask_qty")
     oi = _safe_float(row.get("oi"))
     if oi <= 0 and volume > 0:
         oi = max(volume * 10.0, 500000.0)
         synthetic = True
+        synthetic_fields.append("oi")
     return {
         "bid": round(bid, 2),
         "ask": round(ask, 2),
@@ -449,7 +476,59 @@ def _historical_quote_proxy(row: pd.Series, close: float, tick_size: float, lot_
         "volume": volume,
         "oi": oi,
         "synthetic": synthetic,
+        "synthetic_fields": list(dict.fromkeys(synthetic_fields)),
     }
+
+
+def _historical_data_assumptions(index_frame: pd.DataFrame, option_frames: list[pd.DataFrame]) -> dict[str, Any]:
+    total_option_rows = sum(len(frame) for frame in option_frames if not frame.empty)
+    tracked_fields = ["bid", "ask", "bid_qty", "ask_qty", "oi"]
+    available_counts = {field: 0 for field in tracked_fields}
+    for frame in option_frames:
+        if frame.empty:
+            continue
+        for field in tracked_fields:
+            if field in frame:
+                available_counts[field] += int(frame[field].apply(lambda value: _safe_float(value) > 0).sum())
+    unavailable_fields = [field for field in tracked_fields if total_option_rows and available_counts[field] == 0]
+    partially_available_fields = [
+        field for field in tracked_fields
+        if total_option_rows and 0 < available_counts[field] < total_option_rows
+    ]
+    synthetic_fields = [
+        field for field in tracked_fields
+        if total_option_rows and available_counts[field] < total_option_rows
+    ]
+    news_available = _historical_news_available(index_frame, option_frames)
+    if not news_available:
+        unavailable_fields.append("news")
+    return {
+        "quote_source": "historical_ohlcv_plus_recorded_option_fields",
+        "option_rows": total_option_rows,
+        "available_field_counts": available_counts,
+        "unavailable_fields": list(dict.fromkeys(unavailable_fields)),
+        "partially_available_fields": partially_available_fields,
+        "synthetic_fields": list(dict.fromkeys(synthetic_fields)),
+        "synthetic_quote_proxy_used": bool(synthetic_fields),
+        "missing_data_policy": {
+            "bid_ask_spread": "Recorded bid/ask are used when present; otherwise close +/- one tick is used as a historical proxy.",
+            "depth": "Recorded bid_qty/ask_qty are used when present; otherwise depth is estimated from option volume and lot size.",
+            "oi": "Recorded OI is used when present; otherwise OI is estimated from option volume for historical-only scoring.",
+            "news": "Historical news is UNAVAILABLE unless supplied in historical rows; current Zerodha Pulse news is not applied to old candles.",
+        },
+    }
+
+
+def _historical_news_available(index_frame: pd.DataFrame, option_frames: list[pd.DataFrame]) -> bool:
+    news_columns = {"news_score", "news_sentiment", "news_headline", "headline"}
+    frames = [index_frame] + list(option_frames or [])
+    for frame in frames:
+        if frame.empty:
+            continue
+        for column in news_columns.intersection(set(frame.columns)):
+            if frame[column].notna().any():
+                return True
+    return False
 
 
 def _safe_float(value: Any, default: float = 0.0) -> float:

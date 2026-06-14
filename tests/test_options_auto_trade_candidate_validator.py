@@ -58,8 +58,8 @@ class OptionsAutoTradeCandidateValidatorTests(unittest.TestCase):
         )
 
         self.assertFalse(result["allowed"])
-        self.assertEqual(result["stage"], "LIQUIDITY_BLOCKED")
-        self.assertEqual(result["blockers"], ["Spread too wide."])
+        self.assertEqual(result["stage"], "QUOTE_INVALID")
+        self.assertEqual(result["blockers"], ["Quote spread is too wide."])
 
     def test_depth_too_low_blocks(self):
         result = self.validate(selected_contract=contract(total_depth=0, bid_qty=0, ask_qty=0))
@@ -67,6 +67,16 @@ class OptionsAutoTradeCandidateValidatorTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertEqual(result["stage"], "LIQUIDITY_BLOCKED")
         self.assertIn("Depth too low.", result["blockers"])
+
+    def test_contract_side_must_match_selected_side(self):
+        result = self.validate(
+            selected_side="CE",
+            selected_contract=contract(tradingsymbol="NIFTY26JUN22500PE", option_type="PE"),
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertEqual(result["stage"], "CONTRACT_INVALID")
+        self.assertIn("Selected contract side PE does not match intended side CE.", result["blockers"])
 
     def test_min_volume_and_oi_settings_block_candidate(self):
         result = self.validate(

@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from options_auto.data.fii_dii_loader import parse_fii_dii_csv_text
@@ -45,16 +46,17 @@ class OptionsAutoMarketCueWorkflowTests(unittest.TestCase):
         self.assertEqual(afternoon["fii_dii_status"]["status"], "IGNORED")
 
     def test_service_upload_status_feeds_premarket_cue(self):
-        service = OptionsAutoTerminalService("results")
-        upload = service.upload_fii_dii_csv({
-            "file_name": "flows.csv",
-            "csv_text": "Category,Buy,Sell,Net\nFII,5000,1000,4000\nDII,1000,500,500\nTotal turnover,,,90000\n",
-        })
-        cue = service.premarket_market_cue({"phase": "PREMARKET", "global_cue_score": 20, "previous_day_trend_score": 20})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            upload = service.upload_fii_dii_csv({
+                "file_name": "flows.csv",
+                "csv_text": "Category,Buy,Sell,Net\nFII,5000,1000,4000\nDII,1000,500,500\nTotal turnover,,,90000\n",
+            })
+            cue = service.premarket_market_cue({"phase": "PREMARKET", "global_cue_score": 20, "previous_day_trend_score": 20})
 
-        self.assertEqual(upload["status"], "OK")
-        self.assertEqual(cue["fii_dii_status"]["score"], 50.0)
-        self.assertEqual(cue["market_cue"]["components"]["fii_dii"], 50.0)
+            self.assertEqual(upload["status"], "OK")
+            self.assertEqual(cue["fii_dii_status"]["score"], 50.0)
+            self.assertEqual(cue["market_cue"]["components"]["fii_dii"], 50.0)
 
     def test_demo_data_is_blocked_for_paper_and_allowed_only_when_explicit(self):
         blocked = DataQualityEngine().validate_quote({"ltp": 142.4, "demo_data": True}, {"mode": "PAPER"}).to_dict()

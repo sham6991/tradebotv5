@@ -55,10 +55,6 @@ class EntryTimingEngine:
         if close_position < 55:
             warnings.append("Candle confirmation is not near the strong close zone.")
 
-        spread_pct = _number(option_quote.get("spread_pct"))
-        if spread_pct > _number(settings.get("max_spread_pct"), 0.6):
-            blockers.append("Spread too wide.")
-
         return {
             "allowed": not blockers,
             "state": "TIMING_OK" if not blockers else "BLOCKED_BY_TIMING",

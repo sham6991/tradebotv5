@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from options_auto.execution.paper_broker import PaperBroker
@@ -51,6 +52,61 @@ def sample_payload():
 
 
 class OptionsAutoPaperLifecycleTests(unittest.TestCase):
+    def test_paper_ledger_opening_balance(self):
+        broker = PaperBroker(20000)
+
+        self.assertEqual(broker.ledger[0]["type"], "OPENING_BALANCE")
+        self.assertEqual(broker.ledger[0]["amount"], 20000.0)
+        self.assertEqual(broker.ledger[0]["balance"], 20000.0)
+        self.assertEqual(broker.ledger[0]["reserved_balance"], 0.0)
+
+    def test_paper_ledger_buy_reserved_and_filled_release(self):
+        broker = PaperBroker(20000)
+
+        order = broker.place_limit_buy("NIFTY26JUN22500CE", 10, 100)
+        filled = broker.fill_limit_buy(order["order_id"], 98)
+        types = [row["type"] for row in broker.ledger]
+
+        self.assertEqual(filled["average_price"], 98.0)
+        self.assertIn("BUY_RESERVED", types)
+        self.assertIn("BUY_FILLED", types)
+        self.assertIn("BUY_RELEASED", types)
+        self.assertEqual(broker.available_balance, 19020.0)
+        self.assertEqual(broker.reserved_balance, 0.0)
+
+    def test_paper_ledger_cancel_release(self):
+        broker = PaperBroker(20000)
+
+        order = broker.place_limit_buy("NIFTY26JUN22500CE", 10, 100)
+        status = broker.cancel_order(order["order_id"])
+        types = [row["type"] for row in broker.ledger]
+
+        self.assertEqual(status, "CANCELLED")
+        self.assertIn("BUY_RESERVED", types)
+        self.assertIn("CANCEL_RELEASE", types)
+        self.assertEqual(broker.available_balance, 20000.0)
+        self.assertEqual(broker.reserved_balance, 0.0)
+
+    def test_paper_ledger_sell_exit_charges_and_invariant(self):
+        lifecycle = PaperLifecycleEngine(PaperBroker(20000))
+        pending = lifecycle.create_pending(allowed_decision(), timeout_seconds=10, now_epoch=100)
+        lifecycle.approve(pending["approval_id"], now_epoch=105)
+        lifecycle.process_market({"ltp": 39.5, "high": 41, "low": 39.5, "now_epoch": 106})
+        lifecycle.process_market({"ltp": 53, "high": 53, "low": 50, "now_epoch": 107})
+        snapshot = lifecycle.broker.snapshot()
+        types = [row["type"] for row in snapshot["ledger"]]
+
+        self.assertIn("SELL_EXIT", types)
+        self.assertIn("ENTRY_CHARGES", types)
+        self.assertIn("EXIT_CHARGES", types)
+        self.assertEqual(snapshot["charges"], 40.0)
+        self.assertEqual(
+            snapshot["realized_pnl"],
+            round(snapshot["available_balance"] + snapshot["reserved_balance"] - snapshot["opening_balance"], 2),
+        )
+        self.assertEqual(len(lifecycle.active_trades), 0)
+        self.assertEqual(len(lifecycle.closed_trades), 1)
+
     def test_approval_expires_without_order(self):
         lifecycle = PaperLifecycleEngine(PaperBroker(20000))
         pending = lifecycle.create_pending(allowed_decision(), timeout_seconds=10, now_epoch=100)
@@ -106,17 +162,18 @@ class OptionsAutoPaperLifecycleTests(unittest.TestCase):
         self.assertGreater(lifecycle.broker.available_balance, 20000)
 
     def test_service_paper_approval_approve_and_process_flow(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
-        pending = service.request_paper_approval(sample_payload())
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
+            pending = service.request_paper_approval(sample_payload())
 
-        approved = service.approve_paper({"approval_id": pending["approval"]["approval_id"]})
-        filled = service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
-        processed = service.process_paper_market({"market": {"ltp": 31, "high": 35, "low": 31}})
+            approved = service.approve_paper({"approval_id": pending["approval"]["approval_id"]})
+            filled = service.process_paper_market({"market": {"ltp": 39.5, "high": 41, "low": 39.5}})
+            processed = service.process_paper_market({"market": {"ltp": 31, "high": 35, "low": 31}})
 
-        self.assertEqual(approved["status"], "ENTRY_PENDING")
-        self.assertEqual(filled["updates"][0]["action"], "ENTRY_FILLED")
-        self.assertEqual(processed["updates"][0]["action"], "SL_FILLED")
-        self.assertEqual(processed["session"]["status"], "PAPER_IDLE")
+            self.assertEqual(approved["status"], "ENTRY_PENDING")
+            self.assertEqual(filled["updates"][0]["action"], "ENTRY_FILLED")
+            self.assertEqual(processed["updates"][0]["action"], "SL_FILLED")
+            self.assertEqual(processed["session"]["status"], "PAPER_IDLE")
 
 
 if __name__ == "__main__":

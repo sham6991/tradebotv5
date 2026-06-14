@@ -1,4 +1,5 @@
 import time
+import tempfile
 import unittest
 
 from options_auto.core.mode_guard import ModeGuard
@@ -97,8 +98,13 @@ def auto_order(order_id, tradingsymbol="NIFTY26JUN22500CE", transaction_type="BU
 
 
 class OptionsAutoRealSafetyTests(unittest.TestCase):
+    def _service(self, kite_client_provider=None):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        return OptionsAutoTerminalService(temp_dir.name, kite_client_provider=kite_client_provider)
+
     def test_paper_mode_real_preflight_is_blocked_without_static_ip_check(self):
-        service = OptionsAutoTerminalService("results")
+        service = self._service()
 
         result = service.real_preflight_check({"mode": "PAPER", "settings": {"mode": "PAPER"}})
 
@@ -108,11 +114,11 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
 
     def test_real_preflight_requires_static_ip_only_in_real_mode(self):
         client = FakeRealClient()
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
 
         blocked = service.real_preflight_check({
             "mode": "REAL",
-            "settings": {"mode": "REAL", "confirm_real_mode": True, "real_orders_enabled": True},
+            "settings": {"mode": "REAL", "confirm_real_mode": True, "real_orders_enabled": True, "dry_run_real_only": False},
             "kite_profile": {"user_id": "REAL1"},
             "broker_orders": [],
             "positions": [],
@@ -122,7 +128,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         })
         allowed = service.real_preflight_check({
             "mode": "REAL",
-            "settings": {"mode": "REAL", "confirm_real_mode": True, "real_orders_enabled": True, "static_ip_confirmed": True},
+            "settings": {"mode": "REAL", "confirm_real_mode": True, "real_orders_enabled": True, "dry_run_real_only": False, "static_ip_confirmed": True},
             "kite_profile": {"user_id": "REAL1"},
             "broker_orders": [],
             "positions": [],
@@ -136,7 +142,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
 
     def test_real_preflight_does_not_enable_live_orders_from_connection_only(self):
         client = FakeRealClient()
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
 
         result = service.real_preflight_check({
             "mode": "REAL",
@@ -155,7 +161,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
 
     def test_real_preflight_respects_explicit_dry_run_override(self):
         client = FakeRealClient()
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
 
         result = service.real_preflight_check({
             "mode": "REAL",
@@ -173,7 +179,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
 
     def test_real_preflight_blocks_when_real_orders_disabled_even_without_dry_run(self):
         client = FakeRealClient()
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
 
         result = service.real_preflight_check({
             "mode": "REAL",
@@ -198,7 +204,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
 
     def test_start_real_engine_does_not_force_enable_real_flags(self):
         client = FakeRealClient()
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
 
         result = service.start_real_engine({
             "settings": {
@@ -289,7 +295,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
             orders=[{**auto_order("TARGET1", transaction_type="SELL", status="OPEN", order_type="LIMIT"), "exchange": "NFO"}],
             positions=[{"tradingsymbol": "NIFTY26JUN22500CE", "exchange": "NFO", "product": "NRML", "quantity": 50, "net_quantity": 50, "last_price": 112.4}],
         )
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
 
         result = service.kill_switch({
             "mode": "REAL",
@@ -340,7 +346,7 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
             "pnl": 130.0,
         }
         client = FakeRealClient(orders=[target, stoploss], positions={"net": [position]})
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
 
         result = service.stop_live_scan({"mode": "REAL"})
 
@@ -352,9 +358,55 @@ class OptionsAutoRealSafetyTests(unittest.TestCase):
         self.assertEqual(trade["stoploss_order_id"], "SL1")
         self.assertTrue(trade["position_protected"])
 
+    def test_reconciliation_detects_broker_open_position_when_local_flat(self):
+        target = auto_order("TARGET1", transaction_type="SELL", order_type="LIMIT")
+        stoploss = auto_order("SL1", transaction_type="SELL", order_type="SL", status="TRIGGER PENDING")
+        target.update({"exchange": "NFO", "price": 148.95})
+        stoploss.update({"exchange": "NFO", "price": 137.4, "trigger_price": 137.45})
+        position = {
+            "tradingsymbol": "NIFTY26JUN22500CE",
+            "exchange": "NFO",
+            "product": "NRML",
+            "quantity": 50,
+            "average_price": 142.4,
+            "last_price": 145.0,
+            "pnl": 130.0,
+        }
+        client = FakeRealClient(orders=[target, stoploss], positions={"net": [position]})
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
+        service.session.orders = [target, stoploss]
+
+        result = service.real_reconcile({"broker_orders": [target, stoploss], "positions": {"net": [position]}})
+
+        lifecycle = result["real_order_lifecycle"]
+        self.assertTrue(result["ok"], result["blockers"])
+        self.assertEqual(lifecycle["broker_open_positions"][0]["tradingsymbol"], "NIFTY26JUN22500CE")
+        self.assertEqual(result["session"]["active_trades"][0]["tradingsymbol"], "NIFTY26JUN22500CE")
+        self.assertEqual(result["session"]["status"], "REAL_POSITION_ACTIVE")
+
+    def test_unprotected_position_blocks_new_entries_after_lifecycle_reconcile(self):
+        position = {"tradingsymbol": "NIFTY26JUN22500CE", "exchange": "NFO", "quantity": 50}
+        client = FakeRealClient(orders=[], positions={"net": [position]})
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
+
+        reconcile = service.real_reconcile({"broker_orders": [], "positions": {"net": [position]}})
+        preflight = service.real_preflight_check({
+            "mode": "REAL",
+            "settings": {"mode": "REAL", "confirm_real_mode": True, "real_orders_enabled": True, "dry_run_real_only": False, "static_ip_confirmed": True},
+            "kite_profile": {"user_id": "REAL1"},
+            "broker_orders": [],
+            "positions": {"net": [position]},
+            "market_open": True,
+            "instruments_valid": True,
+        })
+
+        self.assertEqual(reconcile["real_order_lifecycle"]["state"], "UNPROTECTED_POSITION")
+        self.assertFalse(preflight["allowed"])
+        self.assertIn("Safe Mode is active", "; ".join(preflight["blockers"]))
+
     def test_guarded_real_order_sends_buy_limit_only_after_preflight_and_final_validation(self):
         client = FakeRealClient(margin=100000)
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda mode: client if mode == "LIVE" else None)
+        service = self._service(lambda mode: client if mode == "LIVE" else None)
         service.low_latency_engine = FakeFinalValidationEngine()
         now_epoch = time.time()
         decision = {

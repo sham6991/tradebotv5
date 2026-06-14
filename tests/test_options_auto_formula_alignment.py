@@ -293,7 +293,6 @@ class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
         self.assertFalse(result["allowed"])
         self.assertIn("Deep OTM disabled.", blockers)
         self.assertIn("Liquidity score too low.", blockers)
-        self.assertIn("Spread too wide.", blockers)
         self.assertIn("Option premium is not confirming index direction.", blockers)
 
     def test_high_score_cannot_bypass_governor_risk_blocker(self):

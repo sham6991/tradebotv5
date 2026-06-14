@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from options_auto.core.watchdog import WatchdogService
@@ -47,14 +48,15 @@ class OptionsAutoWatchdogHealthTests(unittest.TestCase):
         self.assertIn("Active position is not protected.", result["blockers"])
 
     def test_health_endpoint_returns_scores_and_slow_task_state(self):
-        service = OptionsAutoTerminalService("results")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
 
-        result = service.health_status({"mode": "PAPER", "memory_pct": 90, "latency_log": {"decision_latency_ms": 2000}})
+            result = service.health_status({"mode": "PAPER", "memory_pct": 90, "latency_log": {"decision_latency_ms": 2000}})
 
-        self.assertEqual(result["watchdog"]["mode"], "NORMAL")
-        self.assertTrue(result["slow_tasks_paused"])
-        self.assertIn("decision_latency_ms latency is high.", result["watchdog"]["warnings"])
-        self.assertIn("daily_readiness_score", result["watchdog"])
+            self.assertEqual(result["watchdog"]["mode"], "NORMAL")
+            self.assertTrue(result["slow_tasks_paused"])
+            self.assertIn("decision_latency_ms latency is high.", result["watchdog"]["warnings"])
+            self.assertIn("daily_readiness_score", result["watchdog"])
 
 
 if __name__ == "__main__":

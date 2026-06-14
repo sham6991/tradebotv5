@@ -190,8 +190,6 @@ class StrikeSelector:
             blockers.append("Invalid bid/ask spread.")
         if float(candidate.get("ask") or 0) < float(candidate.get("bid") or 0):
             blockers.append("Invalid bid/ask spread.")
-        if float(candidate.get("spread_pct") or 100) > float(settings.get("max_spread_pct") or 0.6):
-            blockers.append("Spread too wide.")
         if int(float(candidate.get("bid_qty") or 0)) + int(float(candidate.get("ask_qty") or 0)) < int(settings.get("min_depth_qty") or 1):
             blockers.append("Depth too low.")
         if settings.get("strict_liquidity_filter") and not candidate.get("depth_present"):

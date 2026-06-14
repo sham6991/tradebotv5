@@ -63,6 +63,8 @@ class RealOrderLifecycleEngine:
     safe_mode: bool = False
     protected_state: str = FLAT
     emergency_flatten_required: bool = False
+    broker_open_positions: list[dict[str, Any]] = field(default_factory=list)
+    last_reconciliation: dict[str, Any] = field(default_factory=dict)
 
     def submit_entry(self, entry_order: dict[str, Any], trade_plan: dict[str, Any], settings: dict[str, Any] | None = None) -> dict[str, Any]:
         self.entry_order = dict(entry_order or {})
@@ -327,6 +329,8 @@ class RealOrderLifecycleEngine:
 
     def reconcile_positions(self, broker_orders: list[dict[str, Any]] | None = None, positions: list[dict[str, Any]] | dict[str, Any] | None = None) -> dict[str, Any]:
         result = self.controller.reconcile([self.entry_order, self.target_order, self.stoploss_order], broker_orders, positions, self.trade_plan)
+        self.last_reconciliation = dict(result or {})
+        self.broker_open_positions = [dict(position) for position in result.get("open_positions") or [] if isinstance(position, dict)]
         if result.get("unprotected_positions"):
             self.protected_state = RECONCILIATION_REQUIRED
             self.mark_unprotected("Unprotected real position detected. New entries stopped. Check broker terminal immediately.")
@@ -354,6 +358,8 @@ class RealOrderLifecycleEngine:
             "safe_mode": self.safe_mode,
             "protected_state": self.protected_state,
             "emergency_flatten_required": self.emergency_flatten_required,
+            "broker_open_positions": list(self.broker_open_positions),
+            "last_reconciliation": dict(self.last_reconciliation),
             "history": list(self.history[-100:]),
         }
 

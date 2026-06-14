@@ -62,14 +62,15 @@ class OptionsAutoPhaseEngineTests(unittest.TestCase):
         self.assertEqual(result["state"], "BLOCKED_BY_RISK")
 
     def test_paper_execute_plan_simulates_local_order_only(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22520, option_price=40))
 
-        result = service.execute_paper_plan(sample_payload())
+            result = service.execute_paper_plan(sample_payload())
 
-        self.assertTrue(result["allowed"])
-        self.assertEqual(result["paper_order"]["status"], "OPEN")
-        self.assertEqual(result["pending_entry"]["status"], "ENTRY_PENDING")
-        self.assertTrue(str(result["paper_order"]["order_id"]).startswith("PAPER-"))
+            self.assertTrue(result["allowed"])
+            self.assertEqual(result["paper_order"]["status"], "OPEN")
+            self.assertEqual(result["pending_entry"]["status"], "ENTRY_PENDING")
+            self.assertTrue(str(result["paper_order"]["order_id"]).startswith("PAPER-"))
 
     def test_backtest_broker_ignores_same_candle_target_but_allows_stop(self):
         candles = pd.DataFrame([

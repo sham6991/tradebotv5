@@ -54,10 +54,12 @@ def evaluate_options_auto_decision(
     regime = RegimeClassifier().classify(index_features, market_cue.to_dict())
     entry_dependency_mode = resolve_entry_dependency_mode(settings)
     simple_mode = simple_ohlcv_entry_enabled(settings)
-    selected_side = _selected_side(cue_payload, market_cue.to_dict(), regime.to_dict())
+    explicit_side = _explicit_side(cue_payload)
+    selected_side, selected_side_source = _selected_side_with_source(cue_payload, market_cue.to_dict(), regime.to_dict())
     simple_side = resolve_simple_ohlcv_side(index_features, settings) if simple_mode else {}
     if simple_mode and simple_side.get("side") in {SIDE_CE, SIDE_PE}:
         selected_side = str(simple_side["side"])
+        selected_side_source = "simple_ohlcv"
 
     market_context = MarketContextRouter().route(
         market_cue=market_cue.to_dict(),
@@ -85,11 +87,21 @@ def evaluate_options_auto_decision(
         "time_of_day_score": cue_payload.get("time_of_day_score"),
         "entry_dependency_mode": entry_dependency_mode,
         "simple_ohlcv_side": simple_side,
+        "selected_side_source": selected_side_source,
     }
 
     spot = _number(cue_payload.get("spot"), _number(cue_payload.get("index_ltp"), index_features.get("close", 0.0)))
     selection = StrikeSelector().select(list(option_candidates or []), dict(quotes or {}), spot, selected_side, settings, context)
     selected = dict(selection.selected or {})
+    side_selection = _side_selection_summary(
+        intended_side=selected_side,
+        source=selected_side_source,
+        explicit_side=explicit_side,
+        market_cue=market_cue.to_dict(),
+        regime=regime.to_dict(),
+        simple_side=simple_side,
+        selected=selected,
+    )
     selection_blockers = list(selection.blockers)
     position_blockers: list[str] = []
     warnings: list[str] = []
@@ -255,6 +267,7 @@ def evaluate_options_auto_decision(
         governor,
         market_context,
         trade_candidate_validation,
+        side_selection,
         blockers,
         allowed,
         trade_plan,
@@ -268,7 +281,10 @@ def evaluate_options_auto_decision(
         "regime": regime.to_dict(),
         "market_context": market_context,
         "market_playbook": market_context,
-        "selected_side": selected_side if selected else SIDE_WAIT,
+        "selected_side": selected_side,
+        "intended_side": selected_side,
+        "final_selected_side": side_selection["final_selected_side"],
+        "side_selection": side_selection,
         "selected_contract": selected,
         "selection": selection.to_dict(),
         "trade_score": trade_score,
@@ -334,16 +350,59 @@ def _legacy_features(payload: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def _selected_side(payload: dict[str, Any], market_cue: dict[str, Any], regime: dict[str, Any]) -> str:
+    return _selected_side_with_source(payload, market_cue, regime)[0]
+
+
+def _selected_side_with_source(payload: dict[str, Any], market_cue: dict[str, Any], regime: dict[str, Any]) -> tuple[str, str]:
     explicit = str(payload.get("side") or "").upper()
     if explicit in {SIDE_CE, SIDE_PE, SIDE_WAIT}:
-        return explicit
+        return explicit, "explicit"
     regime_side = str(regime.get("recommended_side") or SIDE_WAIT).upper()
     cue_side = str(market_cue.get("recommended_side") or SIDE_WAIT).upper()
     if regime_side in {SIDE_CE, SIDE_PE}:
-        return regime_side
+        return regime_side, "regime"
     if cue_side in {SIDE_CE, SIDE_PE}:
-        return cue_side
-    return SIDE_WAIT
+        return cue_side, "market_cue"
+    return SIDE_WAIT, "none"
+
+
+def _explicit_side(payload: dict[str, Any]) -> str:
+    explicit = str((payload or {}).get("side") or "").upper()
+    return explicit if explicit in {SIDE_CE, SIDE_PE, SIDE_WAIT} else ""
+
+
+def _contract_side(selected: dict[str, Any]) -> str:
+    side = str((selected or {}).get("option_type") or (selected or {}).get("instrument_type") or "").upper()
+    return side if side in {SIDE_CE, SIDE_PE} else ""
+
+
+def _side_selection_summary(
+    *,
+    intended_side: str,
+    source: str,
+    explicit_side: str,
+    market_cue: dict[str, Any],
+    regime: dict[str, Any],
+    simple_side: dict[str, Any],
+    selected: dict[str, Any],
+) -> dict[str, Any]:
+    contract_side = _contract_side(selected)
+    contract_selected = bool(selected)
+    final_side = contract_side if contract_selected and contract_side else SIDE_WAIT
+    intended = str(intended_side or SIDE_WAIT).upper()
+    mismatch = bool(contract_selected and contract_side and intended in {SIDE_CE, SIDE_PE} and contract_side != intended)
+    return {
+        "intended_side": intended,
+        "final_selected_side": final_side,
+        "source": source or "none",
+        "explicit_side": explicit_side or "",
+        "regime_side": str((regime or {}).get("recommended_side") or SIDE_WAIT).upper(),
+        "market_cue_side": str((market_cue or {}).get("recommended_side") or SIDE_WAIT).upper(),
+        "simple_ohlcv_side": str((simple_side or {}).get("side") or SIDE_WAIT).upper(),
+        "selected_contract_type": contract_side,
+        "contract_selected": contract_selected,
+        "side_contract_mismatch": mismatch,
+    }
 
 
 def _decision_snapshot(
@@ -363,6 +422,7 @@ def _decision_snapshot(
     governor: dict[str, Any],
     market_context: dict[str, Any],
     trade_candidate_validation: dict[str, Any],
+    side_selection: dict[str, Any],
     blockers: list[str],
     allowed: bool,
     trade_plan: dict[str, Any],
@@ -383,6 +443,9 @@ def _decision_snapshot(
         "regime": regime,
         "market_context": market_context,
         "selected_side": selected_side,
+        "intended_side": selected_side,
+        "final_selected_side": side_selection.get("final_selected_side"),
+        "side_selection": side_selection,
         "selected_contract": selected,
         "expiry": selected.get("expiry"),
         "strike": selected.get("strike"),

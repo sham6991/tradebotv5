@@ -72,6 +72,9 @@ class TradeCandidateValidator:
         warnings.extend(timing.get("warnings") or [])
 
         contract_blockers = self._contract_blockers(selected)
+        contract_side = str(selected.get("option_type") or selected.get("instrument_type") or "").upper()
+        if contract_side in {SIDE_CE, SIDE_PE} and side in {SIDE_CE, SIDE_PE} and contract_side != side:
+            contract_blockers.append(f"Selected contract side {contract_side} does not match intended side {side}.")
         if contract_blockers:
             blockers.extend(contract_blockers)
             return self._result(False, "CONTRACT_INVALID", selected, blockers, warnings, settings, data_quality, theta, score, timing)
@@ -119,8 +122,6 @@ class TradeCandidateValidator:
         for item in data_quality.get("blockers") or []:
             text = str(item or "")
             if not text:
-                continue
-            if "spread" in text.lower():
                 continue
             blockers.append(text)
         return blockers

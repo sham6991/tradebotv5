@@ -10,7 +10,9 @@ from options_auto.data.persistent_instrument_cache import PersistentInstrumentCa
 from options_auto.execution.blackbox_recorder import BlackboxRecorder
 from options_auto.execution.real_execution_controller import RealExecutionController
 from options_auto.execution.real_order_lifecycle import (
+    ENTRY_CANCELLED,
     ENTRY_ORDER_OPEN,
+    ENTRY_REJECTED,
     OCO_ACTIVE,
     PROTECTION_PENDING,
     PROTECTIVE_EXIT_ACTIVE,
@@ -172,6 +174,42 @@ def fast_settings(**overrides):
 
 
 class OptionsAutoIndustryHardeningTests(unittest.TestCase):
+    def test_entry_rejection_does_not_create_active_trade(self):
+        engine = RealOrderLifecycleEngine(RealExecutionController())
+        engine.submit_entry(entry_order(), trade_plan(), {})
+
+        snapshot = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "REJECTED",
+            "quantity": 65,
+            "filled_quantity": 0,
+            "status_message": "price outside circuit",
+        }])
+
+        self.assertEqual(snapshot["state"], ENTRY_REJECTED)
+        self.assertEqual(snapshot["protected_state"], "FLAT")
+        self.assertEqual(snapshot["fill"], {})
+        self.assertEqual(snapshot["target_order"], {})
+        self.assertEqual(snapshot["stoploss_order"], {})
+        self.assertIn("price outside circuit", "; ".join(snapshot["blockers"]))
+
+    def test_cancelled_entry_not_active(self):
+        engine = RealOrderLifecycleEngine(RealExecutionController())
+        engine.submit_entry(entry_order(), trade_plan(), {})
+
+        snapshot = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "CANCELLED",
+            "quantity": 65,
+            "filled_quantity": 0,
+        }])
+
+        self.assertEqual(snapshot["state"], ENTRY_CANCELLED)
+        self.assertEqual(snapshot["protected_state"], "FLAT")
+        self.assertEqual(snapshot["fill"], {})
+        self.assertEqual(snapshot["target_order"], {})
+        self.assertEqual(snapshot["stoploss_order"], {})
+
     def test_real_lifecycle_waits_for_fill_before_target_and_sl(self):
         engine = RealOrderLifecycleEngine(RealExecutionController())
         engine.submit_entry(entry_order(), trade_plan(), {})
@@ -341,6 +379,26 @@ class OptionsAutoIndustryHardeningTests(unittest.TestCase):
         ], adapter=adapter, positions=[{"tradingsymbol": "NIFTY26JUN23500CE", "quantity": 0}])
 
         self.assertEqual(adapter.cancelled, [filled["stoploss_order"]["order_id"]])
+        self.assertEqual(verified["protected_state"], FLAT_CONFIRMED)
+
+    def test_stoploss_fill_cancels_target(self):
+        engine = RealOrderLifecycleEngine(RealExecutionController())
+        adapter = FakeProtectionAdapter()
+        engine.submit_entry(entry_order(), trade_plan(), {})
+        filled = engine.poll_entry_status([{
+            "order_id": "ENTRY1",
+            "status": "COMPLETE",
+            "quantity": 65,
+            "filled_quantity": 65,
+            "average_price": 100.0,
+        }], adapter=adapter)
+
+        verified = engine.monitor_oco([
+            {**filled["target_order"], "status": "CANCELLED"},
+            {**filled["stoploss_order"], "status": "COMPLETE"},
+        ], adapter=adapter, positions=[{"tradingsymbol": "NIFTY26JUN23500CE", "quantity": 0}])
+
+        self.assertEqual(adapter.cancelled, [filled["target_order"]["order_id"]])
         self.assertEqual(verified["protected_state"], FLAT_CONFIRMED)
 
     def test_target_fill_cancel_not_verified_requires_manual_reconciliation(self):

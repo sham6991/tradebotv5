@@ -72,10 +72,11 @@ class FakeOptionsAutoService:
 
 
 class SummaryOnlyOptionsAutoService:
-    def __init__(self, mode="REAL", live_scan=None, session=None):
+    def __init__(self, mode="REAL", live_scan=None, session=None, real_order_lifecycle=None):
         self.mode = mode
         self.live_scan = live_scan or {}
         self.session = session if session is not None else {"active_trades": [], "last_decision": {}}
+        self.real_order_lifecycle = real_order_lifecycle or {"state": "IDLE", "protected_state": "FLAT"}
 
     def status(self):
         raise AssertionError("ui-summary must not call full status when lightweight summary exists")
@@ -89,7 +90,7 @@ class SummaryOnlyOptionsAutoService:
             "stale_diagnostics": {"last_tick_at": "2026-06-13T10:00:00", "reason": "healthy"},
             "options_live_feed": {"health": {"stale": False}},
             "contract_lock": {"lock": {"ce": {"tradingsymbol": "NIFTY26JUN23500CE"}, "pe": {"tradingsymbol": "NIFTY26JUN23400PE"}}},
-            "real_order_lifecycle": {"state": "IDLE", "protected_state": "FLAT"},
+            "real_order_lifecycle": self.real_order_lifecycle,
             "real_safety": {"safe_mode": False},
             "paper_account": {},
             "latency": {"options_auto.ui_summary": {"count": 1, "p95_ms": 1.0}},
@@ -219,6 +220,25 @@ class OptionsAutoWebRoutesTests(unittest.TestCase):
         self.assertIn("Session not started", result["blockers"])
         self.assertEqual(result["position"], "FLAT")
         self.assertEqual(result["active_instrument"], "")
+
+    def test_scanner_stopped_does_not_hide_broker_position(self):
+        routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=False, live_connected=True), "results")
+        routes.service = SummaryOnlyOptionsAutoService(
+            mode="REAL",
+            real_order_lifecycle={
+                "state": "OCO_ACTIVE",
+                "protected_state": "PROTECTIVE_EXIT_ACTIVE",
+                "broker_open_positions": [{"tradingsymbol": "NIFTY26JUN23500CE", "quantity": 50}],
+            },
+        )
+
+        result = routes.handle_get(FakeHandler(), "/api/options-auto/ui-summary", None)
+
+        self.assertFalse(result["session_started"])
+        self.assertEqual(result["position"], "OPEN")
+        self.assertEqual(result["active_instrument"], "NIFTY26JUN23500CE")
+        self.assertEqual(result["protection"], "PROTECTED")
+        self.assertIn("Broker-open real position exists while scanner is stopped", result["blockers"])
 
     def test_options_auto_ui_summary_preserves_paper_connection_status(self):
         routes = OptionsAutoWebRoutes(FakeAppState(paper_connected=True, live_connected=False), "results")

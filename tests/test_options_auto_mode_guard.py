@@ -1,3 +1,4 @@
+import tempfile
 import unittest
 
 from options_auto.constants import REAL_EXECUTION_DISABLED_REASON
@@ -22,16 +23,17 @@ class OptionsAutoModeGuardTests(unittest.TestCase):
         self.assertEqual(guard.audit_log[-1].reason, REAL_EXECUTION_DISABLED_REASON)
 
     def test_service_real_dry_run_does_not_enable_real_orders(self):
-        service = OptionsAutoTerminalService("results", kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540))
-        result = service.real_dry_run({"settings": {"confirm_real_mode": True, "static_ip_confirmed": True, "premium_expansion_required": False}, "spot": 22500})
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: FakeOptionsZerodha(spot=22540))
+            result = service.real_dry_run({"settings": {"confirm_real_mode": True, "static_ip_confirmed": True, "premium_expansion_required": False}, "spot": 22500})
 
-        self.assertTrue(result["real_execution_enabled"])
-        self.assertIn("guarded", result["real_execution_reason"])
-        self.assertEqual(result["session"]["status"], "REAL_DRY_RUN_SCANNING")
-        self.assertTrue(result["live_scan"]["running"])
-        self.assertEqual(result["orders_sent"], 0)
-        self.assertIn("scanner started", result["message"])
-        service.stop_live_scan({"mode": "REAL"})
+            self.assertTrue(result["real_execution_enabled"])
+            self.assertIn("guarded", result["real_execution_reason"])
+            self.assertEqual(result["session"]["status"], "REAL_DRY_RUN_SCANNING")
+            self.assertTrue(result["live_scan"]["running"])
+            self.assertEqual(result["orders_sent"], 0)
+            self.assertIn("scanner started", result["message"])
+            service.stop_live_scan({"mode": "REAL"})
 
 
 if __name__ == "__main__":

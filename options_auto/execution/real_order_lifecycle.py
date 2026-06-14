@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -177,34 +178,42 @@ class RealOrderLifecycleEngine:
             # Options Auto intentionally submits target before stoploss.
             # Do not reorder without explicit user approval.
             # Reliability hardening verifies broker state after this sequence.
-            target_response = adapter.place_target_sell_limit(
-                target_request["tradingsymbol"],
-                int(target_request["quantity"]),
-                float(target_request["price"]),
-                target_request.get("exchange") or "NFO",
-                target_request.get("product") or "NRML",
-                target_request.get("tag") or "OPTIONS_AUTO",
+            target_response = self._place_protection_leg_with_retries(
+                "target",
+                settings,
+                lambda: adapter.place_target_sell_limit(
+                    target_request["tradingsymbol"],
+                    int(target_request["quantity"]),
+                    float(target_request["price"]),
+                    target_request.get("exchange") or "NFO",
+                    target_request.get("product") or "NRML",
+                    target_request.get("tag") or "OPTIONS_AUTO",
+                ),
             )
             if target_response.get("ok"):
-                self.target_order.update({"order_id": target_response.get("value") or target_response.get("order_id"), "status": "SUBMITTED", "submitted_at": iso_now()})
+                self.target_order.update({"order_id": target_response.get("value") or target_response.get("order_id"), "status": "SUBMITTED", "submitted_at": iso_now(), "attempts": target_response.get("attempts")})
             else:
-                self.target_order.update({"status": "FAILED", "error": target_response.get("error")})
+                self.target_order.update({"status": "FAILED", "error": target_response.get("error"), "attempts": target_response.get("attempts")})
                 self.warnings.append("Target placement failed; protective SL must remain supervised.")
 
-            sl_response = adapter.place_stoploss_sell_sl_limit(
-                stop_request["tradingsymbol"],
-                int(stop_request["quantity"]),
-                float(stop_request["trigger_price"]),
-                float(stop_request["price"]),
-                stop_request.get("exchange") or "NFO",
-                stop_request.get("product") or "NRML",
-                stop_request.get("tag") or "OPTIONS_AUTO",
+            sl_response = self._place_protection_leg_with_retries(
+                "stoploss",
+                settings,
+                lambda: adapter.place_stoploss_sell_sl_limit(
+                    stop_request["tradingsymbol"],
+                    int(stop_request["quantity"]),
+                    float(stop_request["trigger_price"]),
+                    float(stop_request["price"]),
+                    stop_request.get("exchange") or "NFO",
+                    stop_request.get("product") or "NRML",
+                    stop_request.get("tag") or "OPTIONS_AUTO",
+                ),
             )
             if sl_response.get("ok"):
-                self.stoploss_order.update({"order_id": sl_response.get("value") or sl_response.get("order_id"), "status": "SUBMITTED", "submitted_at": iso_now()})
+                self.stoploss_order.update({"order_id": sl_response.get("value") or sl_response.get("order_id"), "status": "SUBMITTED", "submitted_at": iso_now(), "attempts": sl_response.get("attempts")})
                 self.state = PROTECTION_PENDING
             else:
-                self.stoploss_order.update({"status": "FAILED", "error": sl_response.get("error")})
+                self.stoploss_order.update({"status": "FAILED", "error": sl_response.get("error"), "attempts": sl_response.get("attempts")})
                 self.mark_unprotected("Stoploss placement failed.")
         else:
             self.target_order.update({"status": "READY_TO_SUBMIT"})
@@ -387,6 +396,29 @@ class RealOrderLifecycleEngine:
             return False
         timeout = float(settings.get("real_entry_timeout_seconds") or 30)
         return now >= submitted + timedelta(seconds=timeout)
+
+    def _place_protection_leg_with_retries(self, role: str, settings: dict[str, Any], submit) -> dict[str, Any]:
+        retries = max(0, _int(settings.get("real_protection_retry_count"), 0))
+        delay = max(0.0, _number(settings.get("real_protection_retry_delay_seconds"), 0.0))
+        attempts = 0
+        last_response: dict[str, Any] = {}
+        for attempt in range(retries + 1):
+            attempts = attempt + 1
+            try:
+                response = dict(submit() or {})
+            except Exception as exc:
+                response = {"ok": False, "error": str(exc)}
+            response["attempts"] = attempts
+            last_response = response
+            if response.get("ok"):
+                if attempts > 1:
+                    self.warnings.append(f"Protective {role} order succeeded after {attempts} attempts.")
+                return response
+            if attempt < retries and delay > 0:
+                time.sleep(delay)
+        if attempts > 1:
+            self.warnings.append(f"Protective {role} order failed after {attempts} attempts.")
+        return last_response or {"ok": False, "error": f"Protective {role} order failed.", "attempts": attempts}
 
     def _find_order(self, broker_orders: list[dict[str, Any]] | None, order_id: Any) -> dict[str, Any]:
         if not order_id:

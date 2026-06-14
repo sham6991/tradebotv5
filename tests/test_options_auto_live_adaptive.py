@@ -271,6 +271,30 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         self.assertAlmostEqual(trending["new_stoploss"], 144.75)
         self.assertIsNone(slowing["new_target"])
 
+    def test_expiry_scalp_extension_setting_controls_target_extension(self):
+        engine = LiveAdaptiveEngine()
+        blocked = engine.evaluate_active_trade(
+            trade(stoploss=142.45, days_to_expiry=0),
+            quote(ltp=148.2),
+            index_features(),
+            option_features(),
+            {"recommended_side": "CE"},
+            {"regime": "strong_bullish", "recommended_side": "CE"},
+            settings(expiry_scalp_extension_enabled=False),
+        )
+        allowed = engine.evaluate_active_trade(
+            trade(stoploss=142.45, days_to_expiry=0),
+            quote(ltp=148.2),
+            index_features(),
+            option_features(),
+            {"recommended_side": "CE"},
+            {"regime": "strong_bullish", "recommended_side": "CE"},
+            settings(expiry_scalp_extension_enabled=True),
+        )
+
+        self.assertIsNone(blocked["new_target"])
+        self.assertEqual(allowed["action"], "MODIFY_TARGET")
+
     def test_ce_and_pe_early_exit_after_three_invalidations(self):
         engine = LiveAdaptiveEngine()
         ce = engine.evaluate_active_trade(
@@ -315,6 +339,14 @@ class OptionsAutoLiveAdaptiveTests(unittest.TestCase):
         self.assertEqual(high["level"], "HIGH")
         self.assertEqual(high["scan_interval_seconds"], 1)
         self.assertTrue(high["allow_target_extension"])
+
+    def test_aggressive_mode_min_score_controls_high_aggression_threshold(self):
+        engine = LiveAdaptiveEngine()
+        default_high = engine.aggression(index_features(), option_features(), {"cue": "strong_bullish", "recommended_side": "CE"}, {"regime": "strong_bullish", "recommended_side": "CE"}, settings(), {}, {"score": 100, "session_health": 100, "bot_health": 100})
+        stricter = engine.aggression(index_features(), option_features(), {"cue": "strong_bullish", "recommended_side": "CE"}, {"regime": "strong_bullish", "recommended_side": "CE"}, settings(aggressive_mode_min_score=101), {}, {"score": 100, "session_health": 100, "bot_health": 100})
+
+        self.assertEqual(default_high["level"], "HIGH")
+        self.assertEqual(stricter["level"], "MEDIUM")
 
     def test_slow_lane_task_does_not_run_inside_fast_validation(self):
         engine = LowLatencyDecisionEngine()

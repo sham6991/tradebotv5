@@ -438,6 +438,8 @@ class ZerodhaClient:
         on_reconnect=None,
         on_noreconnect=None,
         on_order_update=None,
+        reconnect_max_attempts=None,
+        reconnect_backoff_seconds=None,
     ):
         self.ticker = self._create_ticker(
             instrument_tokens,
@@ -448,6 +450,8 @@ class ZerodhaClient:
             on_reconnect=on_reconnect,
             on_noreconnect=on_noreconnect,
             on_order_update=on_order_update,
+            reconnect_max_attempts=reconnect_max_attempts,
+            reconnect_backoff_seconds=reconnect_backoff_seconds,
         )
         return self.ticker
 
@@ -462,6 +466,8 @@ class ZerodhaClient:
         on_reconnect=None,
         on_noreconnect=None,
         on_order_update=None,
+        reconnect_max_attempts=None,
+        reconnect_backoff_seconds=None,
     ):
         name = str(name or "default")
         self.stop_named_ticker(name)
@@ -474,6 +480,8 @@ class ZerodhaClient:
             on_reconnect=on_reconnect,
             on_noreconnect=on_noreconnect,
             on_order_update=on_order_update,
+            reconnect_max_attempts=reconnect_max_attempts,
+            reconnect_backoff_seconds=reconnect_backoff_seconds,
         )
         if not hasattr(self, "_named_tickers"):
             self._named_tickers = {}
@@ -490,6 +498,8 @@ class ZerodhaClient:
         on_reconnect=None,
         on_noreconnect=None,
         on_order_update=None,
+        reconnect_max_attempts=None,
+        reconnect_backoff_seconds=None,
     ):
         if KiteTicker is None:
             _load_kiteconnect()
@@ -504,6 +514,11 @@ class ZerodhaClient:
 
         tokens = [int(token) for token in instrument_tokens]
         ticker = KiteTicker(self.api_key, self.access_token)
+        ticker.options_auto_reconnect_policy = _apply_ticker_reconnect_policy(
+            ticker,
+            reconnect_max_attempts=reconnect_max_attempts,
+            reconnect_backoff_seconds=reconnect_backoff_seconds,
+        )
 
         def handle_connect(ws, response):
             ws.subscribe(tokens)
@@ -566,3 +581,41 @@ class ZerodhaClient:
         if value == "SELL":
             return self.kite.TRANSACTION_TYPE_SELL
         raise ValueError("transaction_type must be BUY or SELL.")
+
+
+def _apply_ticker_reconnect_policy(ticker, reconnect_max_attempts=None, reconnect_backoff_seconds=None):
+    policy = {
+        "requested_max_attempts": reconnect_max_attempts,
+        "requested_backoff_seconds": reconnect_backoff_seconds,
+        "applied": {},
+        "unsupported": [],
+    }
+    if reconnect_max_attempts not in ("", None):
+        applied = _set_first_supported_attr(
+            ticker,
+            ("reconnect_max_tries", "reconnect_max_attempts", "max_reconnect_attempts"),
+            int(float(reconnect_max_attempts)),
+        )
+        if applied:
+            policy["applied"][applied[0]] = applied[1]
+        else:
+            policy["unsupported"].append("reconnect_max_attempts")
+    if reconnect_backoff_seconds not in ("", None):
+        applied = _set_first_supported_attr(
+            ticker,
+            ("reconnect_max_delay", "reconnect_backoff_seconds", "max_reconnect_delay"),
+            int(float(reconnect_backoff_seconds)),
+        )
+        if applied:
+            policy["applied"][applied[0]] = applied[1]
+        else:
+            policy["unsupported"].append("reconnect_backoff_seconds")
+    return policy
+
+
+def _set_first_supported_attr(target, names, value):
+    for name in names:
+        if hasattr(target, name):
+            setattr(target, name, value)
+            return name, value
+    return None

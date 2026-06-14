@@ -16,6 +16,27 @@ class ProtectionAdapter:
         return {"ok": True, "value": "SL1"}
 
 
+class FlakyProtectionAdapter:
+    def __init__(self):
+        self.target_attempts = 0
+        self.stoploss_attempts = 0
+        self.call_order = []
+
+    def place_target_sell_limit(self, tradingsymbol, quantity, price, exchange, product, tag):
+        self.target_attempts += 1
+        self.call_order.append("target")
+        if self.target_attempts == 1:
+            return {"ok": False, "error": "temporary target failure"}
+        return {"ok": True, "value": "TARGET2"}
+
+    def place_stoploss_sell_sl_limit(self, tradingsymbol, quantity, trigger_price, price, exchange, product, tag):
+        self.stoploss_attempts += 1
+        self.call_order.append("stoploss")
+        if self.stoploss_attempts == 1:
+            return {"ok": False, "error": "temporary stop failure"}
+        return {"ok": True, "value": "SL2"}
+
+
 def ready_plan():
     return {
         "status": "READY",
@@ -146,6 +167,26 @@ class OptionsAutoBrokerRiskHardeningTests(unittest.TestCase):
         self.assertTrue(snapshot["protection_sla"]["breached"])
         self.assertIn("Protective stoploss was not broker-confirmed", "; ".join(snapshot["blockers"]))
         self.assertTrue(controller.state.safe_mode)
+
+    def test_real_protection_retry_settings_retry_target_and_stoploss(self):
+        engine = RealOrderLifecycleEngine(RealExecutionController())
+        adapter = FlakyProtectionAdapter()
+        engine.submit_entry(
+            {"order_id": "ENTRY1", "tradingsymbol": "NIFTY26JUN23500CE", "quantity": 65, "price": 100.0, "status": "OPEN"},
+            trade_plan(),
+            {},
+        )
+
+        snapshot = engine.poll_entry_status(
+            [{"order_id": "ENTRY1", "status": "COMPLETE", "quantity": 65, "filled_quantity": 65, "average_price": 100.0}],
+            settings={"real_protection_retry_count": 1, "real_protection_retry_delay_seconds": 0},
+            adapter=adapter,
+        )
+
+        self.assertEqual(adapter.call_order, ["target", "target", "stoploss", "stoploss"])
+        self.assertEqual(snapshot["target_order"]["attempts"], 2)
+        self.assertEqual(snapshot["stoploss_order"]["attempts"], 2)
+        self.assertEqual(snapshot["protected_state"], "PROTECTIVE_EXIT_PLACING")
 
 
 if __name__ == "__main__":

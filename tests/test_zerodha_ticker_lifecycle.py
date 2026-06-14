@@ -18,6 +18,8 @@ class FakeTicker:
         self.on_error = None
         self.on_reconnect = None
         self.on_noreconnect = None
+        self.reconnect_max_tries = 50
+        self.reconnect_max_delay = 60
         self.subscribed = []
         self.mode = None
         self.closed = False
@@ -110,6 +112,20 @@ class ZerodhaTickerLifecycleTests(unittest.TestCase):
         self.assertTrue(named.closed)
         self.assertFalse(default.closed)
         self.assertIs(client.ticker, default)
+
+    def test_reconnect_policy_is_applied_to_kite_ticker(self):
+        client = self.client()
+
+        ticker = client.start_ticker(
+            [256265],
+            on_ticks=lambda ticks: None,
+            reconnect_max_attempts=7,
+            reconnect_backoff_seconds=3,
+        )
+
+        self.assertEqual(ticker.reconnect_max_tries, 7)
+        self.assertEqual(ticker.reconnect_max_delay, 3)
+        self.assertEqual(ticker.options_auto_reconnect_policy["applied"]["reconnect_max_tries"], 7)
 
 
 if __name__ == "__main__":

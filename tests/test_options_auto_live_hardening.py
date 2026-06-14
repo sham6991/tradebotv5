@@ -226,6 +226,37 @@ class StreamingOptionsZerodha:
         return rows
 
 
+class ReconnectAwareStreamingOptionsZerodha(StreamingOptionsZerodha):
+    def start_named_ticker(
+        self,
+        name,
+        instrument_tokens,
+        on_ticks,
+        on_connect=None,
+        on_close=None,
+        on_error=None,
+        on_reconnect=None,
+        on_noreconnect=None,
+        on_order_update=None,
+        reconnect_max_attempts=None,
+        reconnect_backoff_seconds=None,
+    ):
+        result = super().start_named_ticker(
+            name,
+            instrument_tokens,
+            on_ticks,
+            on_connect=on_connect,
+            on_close=on_close,
+            on_error=on_error,
+            on_reconnect=on_reconnect,
+            on_noreconnect=on_noreconnect,
+            on_order_update=on_order_update,
+        )
+        self.started_tickers[str(name)]["reconnect_max_attempts"] = reconnect_max_attempts
+        self.started_tickers[str(name)]["reconnect_backoff_seconds"] = reconnect_backoff_seconds
+        return result
+
+
 def live_settings(mode):
     return {
         "mode": mode,
@@ -1137,6 +1168,63 @@ class OptionsAutoLiveHardeningTests(unittest.TestCase):
 
             entry_snapshot = next(order for order in merged["broker_orders"] if order.get("order_id") == entry["order_id"])
             self.assertEqual(entry_snapshot["status"], "OPEN")
+
+    def test_options_websocket_reconnect_settings_are_passed_when_supported(self):
+        client = ReconnectAwareStreamingOptionsZerodha("PAPER")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda _mode: client)
+            settings = {**service.settings, "websocket_reconnect_max_attempts": 8, "websocket_reconnect_backoff_seconds": 4}
+            contracts = [client.options[0], client.options[1]]
+
+            result = service._ensure_options_websocket_locked(client, MODE_PAPER, "NIFTY", 256265, contracts, settings)
+
+        ticker = client.started_tickers["options_auto_paper"]
+        self.assertTrue(result["started"])
+        self.assertEqual(ticker["reconnect_max_attempts"], 8)
+        self.assertEqual(ticker["reconnect_backoff_seconds"], 4)
+        self.assertEqual(result["reconnect_policy"]["supported_kwargs"], ["reconnect_max_attempts", "reconnect_backoff_seconds"])
+
+    def test_real_order_update_source_polling_only_ignores_websocket_updates(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            service.settings["real_order_update_source"] = "POLLING_ONLY"
+            entry = {"order_id": "REAL-1", "status": "OPEN", "filled_quantity": 0, "exchange_update_timestamp": "2026-06-07T10:00:05"}
+            client._orders = [dict(entry)]
+            service._options_ws_order_updates = [{**entry, "status": "COMPLETE", "filled_quantity": 50, "exchange_update_timestamp": "2026-06-07T10:00:10"}]
+
+            merged = service._real_live_broker_payload_locked({})
+
+        self.assertEqual(client.orders_calls, 1)
+        entry_snapshot = next(order for order in merged["broker_orders"] if order.get("order_id") == "REAL-1")
+        self.assertEqual(entry_snapshot["status"], "OPEN")
+
+    def test_real_order_update_source_websocket_only_avoids_orderbook_polling(self):
+        client = StreamingOptionsZerodha("REAL")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir, kite_client_provider=lambda mode: client if str(mode).upper() == "LIVE" else None)
+            service.settings["real_order_update_source"] = "WEBSOCKET_ONLY"
+            service._options_ws_order_updates = [{"order_id": "REAL-1", "status": "COMPLETE", "filled_quantity": 50}]
+
+            merged = service._real_live_broker_payload_locked({})
+
+        self.assertEqual(client.orders_calls, 0)
+        self.assertEqual(client.positions_calls, 1)
+        entry_snapshot = next(order for order in merged["broker_orders"] if order.get("order_id") == "REAL-1")
+        self.assertEqual(entry_snapshot["status"], "COMPLETE")
+        self.assertEqual(entry_snapshot["source"], "zerodha_websocket_order_update")
+
+    def test_news_event_debug_setting_adds_report_only_debug_payload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            signal = service._news_event_signal_locked(
+                {"news_event_debug": True},
+                {"news_event_signal": {"status": "NO_RELEVANT_NEWS", "score": 1, "matched_keywords": ["rbi"]}},
+            )
+
+        self.assertTrue(signal["debug_enabled"])
+        self.assertEqual(signal["debug"]["matched_keyword_count"], 1)
+        self.assertEqual(signal["debug"]["source"], "explicit_payload")
 
     def test_kite_api_manager_blocks_bursts_before_zerodha_limit_errors(self):
         api = KiteApiManager(limiter=RateLimiter(max_calls=3, per_seconds=1.0))

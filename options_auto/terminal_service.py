@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import threading
@@ -151,6 +152,7 @@ class OptionsAutoTerminalService:
         self._options_ws_roles: dict[int, str] = {}
         self._options_ws_started_at = ""
         self._options_ws_last_error = ""
+        self._options_ws_reconnect_policy: dict[str, Any] = {}
         self._options_ws_order_updates: list[dict[str, Any]] = []
         self._real_broker_cache: dict[str, Any] = {"orders": [], "positions": [], "updated_at_epoch": 0.0}
         self._last_event_scan_epoch = 0.0
@@ -558,6 +560,9 @@ class OptionsAutoTerminalService:
             "runtime_quarantine_path": self._runtime_state_quarantine_path,
             "skipped_noncritical_writes": self._runtime_state_skipped_count,
             "min_interval_seconds": float(self.settings.get("options_auto_runtime_persist_min_interval_seconds") or 2.0),
+            "async_requested": bool(self.settings.get("options_auto_runtime_persist_async_enabled")),
+            "async_active": False,
+            "async_reason": "Runtime state uses synchronous atomic writes so broker/order recovery snapshots are durable before the API response returns.",
         }
 
     def _runtime_state_payload_locked(self, reason: str = "") -> dict[str, Any]:
@@ -623,6 +628,8 @@ class OptionsAutoTerminalService:
             "websocket_connected": bool(self.options_live_feed.websocket_connected),
             "quote_polling_fallback": bool(self.options_live_feed.quote_polling_fallback),
             "real_broker_reconcile_poll_seconds": self.settings.get("real_broker_reconcile_poll_seconds"),
+            "real_entry_poll_seconds": self.settings.get("real_entry_poll_seconds"),
+            "real_order_update_source": _real_order_update_source(self.settings),
         }
 
     def configure(self, payload: dict[str, Any] | None = None, kite_profile: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -2151,6 +2158,7 @@ class OptionsAutoTerminalService:
                 "connected": self.options_live_feed.websocket_connected,
                 "started_at": self._options_ws_started_at,
                 "last_error": self._options_ws_last_error,
+                "reconnect_policy": dict(self._options_ws_reconnect_policy or {}),
                 "order_update_count": len(self._options_ws_order_updates),
             },
         }
@@ -2286,8 +2294,17 @@ class OptionsAutoTerminalService:
             with self._lock:
                 self._on_options_order_update_locked(order, client)
 
+        reconnect_policy = {
+            "max_attempts": int(_number(settings.get("websocket_reconnect_max_attempts"), 5)),
+            "backoff_seconds": _number(settings.get("websocket_reconnect_backoff_seconds"), 2),
+        }
+        reconnect_kwargs = {
+            "reconnect_max_attempts": reconnect_policy["max_attempts"],
+            "reconnect_backoff_seconds": reconnect_policy["backoff_seconds"],
+        }
         try:
             if hasattr(client, "start_named_ticker"):
+                supported_kwargs = _supported_call_kwargs(client.start_named_ticker, reconnect_kwargs)
                 client.start_named_ticker(
                     name,
                     list(tokens),
@@ -2298,8 +2315,11 @@ class OptionsAutoTerminalService:
                     on_reconnect=on_reconnect,
                     on_noreconnect=on_noreconnect,
                     on_order_update=on_order_update if settings.get("websocket_order_updates_enabled", True) else None,
+                    **supported_kwargs,
                 )
+                reconnect_policy["supported_kwargs"] = list(supported_kwargs.keys())
             elif hasattr(client, "start_ticker"):
+                supported_kwargs = _supported_call_kwargs(client.start_ticker, reconnect_kwargs)
                 client.start_ticker(
                     list(tokens),
                     on_ticks=on_ticks,
@@ -2309,7 +2329,9 @@ class OptionsAutoTerminalService:
                     on_reconnect=on_reconnect,
                     on_noreconnect=on_noreconnect,
                     on_order_update=on_order_update if settings.get("websocket_order_updates_enabled", True) else None,
+                    **supported_kwargs,
                 )
+                reconnect_policy["supported_kwargs"] = list(supported_kwargs.keys())
             else:
                 return {"started": False, "reason": "Connected Zerodha client does not expose ticker startup."}
         except Exception as exc:
@@ -2323,9 +2345,10 @@ class OptionsAutoTerminalService:
         self._options_ws_roles = roles
         self._options_ws_started_at = datetime.now().isoformat(timespec="seconds")
         self._options_ws_last_error = ""
+        self._options_ws_reconnect_policy = reconnect_policy
         self.options_live_feed.mark_websocket_connected(True)
-        self.logger.log("INFO", "Options Auto websocket subscribed", mode=mode, tokens=len(tokens), underlying=underlying)
-        return {"started": True, "tokens": list(tokens)}
+        self.logger.log("INFO", "Options Auto websocket subscribed", mode=mode, tokens=len(tokens), underlying=underlying, reconnect_policy=reconnect_policy)
+        return {"started": True, "tokens": list(tokens), "reconnect_policy": reconnect_policy}
 
     def _stop_options_websocket_locked(self, reason: str = "") -> None:
         if not self._options_ws_mode and not self._options_ws_tokens:
@@ -2346,6 +2369,7 @@ class OptionsAutoTerminalService:
         self._options_ws_tokens = ()
         self._options_ws_roles = {}
         self._options_ws_started_at = ""
+        self._options_ws_reconnect_policy = {}
 
     def _on_options_websocket_ticks_locked(self, client: Any, mode: str, underlying: str, ticks: Any) -> None:
         interval = self.settings.get("chart_interval") or "3minute"
@@ -2387,6 +2411,9 @@ class OptionsAutoTerminalService:
         row.setdefault("received_at", datetime.now().isoformat(timespec="seconds"))
         self._options_ws_order_updates.append(row)
         self._options_ws_order_updates = self._options_ws_order_updates[-200:]
+        if _real_order_update_source(self.settings) == "POLLING_ONLY":
+            self._persist_runtime_state_locked("websocket_order_update_ignored_by_settings")
+            return
         order_id = str(row.get("order_id") or row.get("id") or "")
         adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
         if order_id and order_id == str((self.real_lifecycle.entry_order or {}).get("order_id") or ""):
@@ -2484,6 +2511,7 @@ class OptionsAutoTerminalService:
     def _real_live_broker_payload_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         payload = dict(payload or {})
         client = self.kite_client_provider("LIVE")
+        update_source = _real_order_update_source(self.settings)
         if payload.get("broker_orders") is not None and payload.get("positions") is not None:
             broker_orders = list(payload.get("broker_orders") or [])
             positions = payload.get("positions") or []
@@ -2499,7 +2527,7 @@ class OptionsAutoTerminalService:
                 broker_orders = list(self._real_broker_cache.get("orders") or [])
                 positions = self._real_broker_cache.get("positions") or []
             else:
-                broker_orders = self._broker_orders(client, payload)
+                broker_orders = [] if update_source == "WEBSOCKET_ONLY" else self._broker_orders(client, payload)
                 positions = self._broker_positions(client, payload)
                 self._real_broker_cache = {
                     "orders": list(broker_orders or []),
@@ -2510,6 +2538,8 @@ class OptionsAutoTerminalService:
         return {**payload, "broker_orders": broker_orders, "positions": positions}
 
     def _merge_websocket_order_updates(self, broker_orders: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+        if _real_order_update_source(self.settings) == "POLLING_ONLY":
+            return [dict(order or {}) for order in list(broker_orders or [])]
         by_id: dict[str, dict[str, Any]] = {}
         for order in list(broker_orders or []):
             order_id = str((order or {}).get("order_id") or (order or {}).get("id") or "")
@@ -2808,7 +2838,9 @@ class OptionsAutoTerminalService:
     def real_lifecycle_poll(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         payload = dict(payload or {})
         client = self.kite_client_provider("LIVE")
-        broker_orders = self._merge_websocket_order_updates(self._broker_orders(client, payload))
+        update_source = _real_order_update_source(self.settings)
+        raw_orders = [] if update_source == "WEBSOCKET_ONLY" and payload.get("broker_orders") is None else self._broker_orders(client, payload)
+        broker_orders = self._merge_websocket_order_updates(raw_orders)
         positions = self._broker_positions(client, payload)
         adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
         lifecycle = self.real_lifecycle.poll_entry_status(broker_orders, settings=self.settings, adapter=adapter)
@@ -4115,14 +4147,17 @@ class OptionsAutoTerminalService:
         explicit_signal = payload.get("news_event_signal") or payload.get("news_event")
         if isinstance(explicit_signal, dict) and explicit_signal:
             signal = {**explicit_signal, "provider": explicit_signal.get("provider") or settings.get("news_event_provider") or "MANUAL"}
+            signal = self._with_news_event_debug(signal, settings, provider_result={}, market_context={"market_cue": payload, "source": "explicit_payload"})
             self._latest_news_event_signal = dict(signal)
             return dict(signal)
         if not bool(settings.get("news_event_enabled", True)):
             signal = self._default_news_event_signal("DISABLED", "News/event scanning is disabled in Options Auto settings.")
+            signal = self._with_news_event_debug(signal, settings, provider_result={}, market_context={"market_cue": payload})
             self._latest_news_event_signal = signal
             return dict(signal)
         if str(settings.get("news_event_provider") or "ZERODHA_PULSE").upper() == "DISABLED":
             signal = self._default_news_event_signal("DISABLED", "News/event provider is disabled in Options Auto settings.")
+            signal = self._with_news_event_debug(signal, settings, provider_result={}, market_context={"market_cue": payload})
             self._latest_news_event_signal = signal
             return dict(signal)
 
@@ -4131,7 +4166,7 @@ class OptionsAutoTerminalService:
         cached = dict(self._latest_news_event_signal or {})
         fetched_epoch = float(cached.get("fetched_at_epoch") or 0.0)
         if cached and fetched_epoch > 0 and now - fetched_epoch <= ttl:
-            return dict(cached)
+            return self._with_news_event_debug(cached, settings, provider_result=self._latest_news_provider_result, market_context={"market_cue": payload, "cache": "fresh"})
 
         context = {
             "market_cue": payload,
@@ -4147,8 +4182,8 @@ class OptionsAutoTerminalService:
             if str(stale.get("status") or "").upper() == "NEWS_EVENT_SHOCK":
                 stale["would_block"] = False
                 stale["reason"] = f"{stale.get('reason') or 'Cached news shock'} Stale cache is report-only until refreshed."
-            return stale
-        return self._default_news_event_signal("REFRESH_PENDING", "Zerodha Pulse refresh is running in the background.")
+            return self._with_news_event_debug(stale, settings, provider_result=self._latest_news_provider_result, market_context={**context, "cache": "stale"})
+        return self._with_news_event_debug(self._default_news_event_signal("REFRESH_PENDING", "Zerodha Pulse refresh is running in the background."), settings, provider_result={}, market_context=context)
 
     def _schedule_news_event_refresh(self, settings: dict[str, Any], market_context: dict[str, Any]) -> None:
         now = time.time()
@@ -4180,6 +4215,8 @@ class OptionsAutoTerminalService:
             provider_result = {"provider": settings.get("news_event_provider") or "ZERODHA_PULSE", "status": "FETCH_FAILED", "error": str(exc)}
             signal = self._default_news_event_signal("FETCH_FAILED", str(exc))
         finally:
+            if signal:
+                signal = self._with_news_event_debug(signal, settings, provider_result=provider_result, market_context=market_context)
             with self._lock:
                 if provider_result:
                     self._latest_news_provider_result = dict(provider_result)
@@ -4211,6 +4248,38 @@ class OptionsAutoTerminalService:
             "item_count": 0,
             "stale": False,
         }
+
+    def _with_news_event_debug(
+        self,
+        signal: dict[str, Any],
+        settings: dict[str, Any],
+        provider_result: dict[str, Any] | None = None,
+        market_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        result = dict(signal or {})
+        if not bool(settings.get("news_event_debug")):
+            result.pop("debug", None)
+            result["debug_enabled"] = False
+            return result
+        provider_result = dict(provider_result or {})
+        market_context = dict(market_context or {})
+        result["debug_enabled"] = True
+        result["debug"] = {
+            "provider_status": provider_result.get("status") or result.get("status") or "",
+            "provider_item_count": provider_result.get("item_count") or result.get("item_count") or 0,
+            "cache_status": result.get("cache_status") or market_context.get("cache") or "",
+            "matched_keyword_count": len(result.get("matched_keywords") or []),
+            "matched_headline_count": len(result.get("matched_headlines") or []),
+            "market_confirmation_required": bool(settings.get("news_event_require_market_confirmation")),
+            "market_confirmation": bool(
+                result.get("market_confirmation")
+                or result.get("market_confirmed")
+                or market_context.get("market_confirmation")
+            ),
+            "feed_data_mode": (market_context.get("feed_health") or {}).get("data_mode") or "",
+            "source": market_context.get("source") or "zerodha_pulse",
+        }
+        return result
 
     def _cached_index_features(self, index_history: pd.DataFrame, mode: str) -> dict[str, Any]:
         if index_history is None or index_history.empty or not bool(self.settings.get("incremental_feature_cache_enabled", True)):
@@ -4717,6 +4786,33 @@ def _int_setting(value: Any, default: int) -> int:
         return int(float(value))
     except (TypeError, ValueError):
         return int(default)
+
+
+def _supported_call_kwargs(func: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return {}
+    parameters = signature.parameters
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()):
+        return dict(kwargs)
+    return {key: value for key, value in kwargs.items() if key in parameters}
+
+
+def _real_order_update_source(settings: dict[str, Any] | None) -> str:
+    value = str((settings or {}).get("real_order_update_source") or "POLLING_AND_RECONCILIATION").strip().upper()
+    aliases = {
+        "POLLING": "POLLING_ONLY",
+        "ORDERBOOK": "POLLING_ONLY",
+        "WEBSOCKET": "WEBSOCKET_ONLY",
+        "WS": "WEBSOCKET_ONLY",
+        "BOTH": "POLLING_AND_RECONCILIATION",
+        "POLLING_AND_WEBSOCKET": "POLLING_AND_RECONCILIATION",
+    }
+    value = aliases.get(value, value)
+    if value not in {"POLLING_ONLY", "WEBSOCKET_ONLY", "POLLING_AND_RECONCILIATION"}:
+        return "POLLING_AND_RECONCILIATION"
+    return value
 
 
 def _parse_trade_day(value: Any) -> date:

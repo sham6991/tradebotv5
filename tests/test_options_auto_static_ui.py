@@ -75,6 +75,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn("syncSettingsToggles(\"paper\")", js)
         self.assertIn("syncSettingsToggles(\"settings\")", js)
         self.assertIn("Real Money Zerodha", js)
+        self.assertIn("Entry Poll", js)
+        self.assertIn("Order Updates", js)
         self.assertNotIn("Kite not connected", js)
 
     def test_state_changing_post_actions_refresh_ui_summary(self):

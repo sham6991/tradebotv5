@@ -777,3 +777,35 @@ python -B -m unittest tests.test_options_auto_broker_risk_hardening tests.test_o
 python -B -m unittest tests.test_options_auto_industry_hardening tests.test_options_auto_live_adaptive tests.test_options_auto_formula_alignment tests.test_options_auto_market_cue_workflow
 python -B -m unittest discover -s tests
 ```
+
+## 2026-06-14 Completed Improvement - Options Auto Runtime Settings Activation
+
+### Primary Goal
+
+Make important Options Auto defaults behavior-driving or explicitly report-only, so live operators do not rely on settings that silently do nothing.
+
+### Completion Notes
+
+- `websocket_reconnect_max_attempts` and `websocket_reconnect_backoff_seconds` are passed into Zerodha ticker startup when the connected client supports those kwargs, and the active reconnect policy is exposed in live scan websocket status.
+- `real_protection_retry_count` and `real_protection_retry_delay_seconds` now retry target and stoploss protective order placement while preserving the target-before-stoploss sequence.
+- `real_order_update_source` now controls whether lifecycle reconciliation uses polling only, websocket only, or polling plus websocket merge.
+- `real_entry_poll_seconds` is exposed through API budget/status and the Options Auto diagnostics panel as the intended lifecycle poll cadence.
+- `news_event_debug` now adds a report-only debug payload to the news event signal and shows a compact debug line in the dashboard when enabled.
+- `aggressive_mode_min_score` now controls the HIGH aggression threshold.
+- `expiry_scalp_extension_enabled` now gates target extension during expiry-scalp/same-day-expiry contexts.
+- `options_auto_runtime_persist_async_enabled` is no longer silent: runtime persistence status reports that async was requested but synchronous atomic writes remain active for recovery safety.
+
+### Guardrails
+
+- No main strategy scoring rewrite.
+- No change to target-before-stoploss placement order.
+- Default real order update mode remains polling plus reconciliation.
+- Runtime persistence remains atomic and synchronous unless a separately reviewed async persistence design is added later.
+
+### Verification Required
+
+```powershell
+python -B -m py_compile zerodha_client.py options_auto\terminal_service.py options_auto\execution\real_order_lifecycle.py options_auto\intelligence\live_adaptive_engine.py
+python -B -m unittest tests.test_zerodha_ticker_lifecycle tests.test_options_auto_broker_risk_hardening tests.test_options_auto_live_hardening tests.test_options_auto_live_adaptive tests.test_options_auto_static_ui tests.test_options_auto_ui_render_contract
+python -B -m unittest discover -s tests
+```

@@ -1219,6 +1219,7 @@ function renderNewsEventSignal(signal = {}) {
     metric("Newest Age", signal.newest_item_age_minutes !== null && signal.newest_item_age_minutes !== undefined ? `${signal.newest_item_age_minutes} min` : "-"),
     metric("Fetched", signal.fetched_at || "-"),
     metric("Cache", signal.cache_status || (signal.stale ? "STALE" : "-")),
+    signal.debug_enabled && signal.debug ? metric("Debug", `${signal.debug.provider_status || "-"} | items ${signal.debug.provider_item_count || 0} | feed ${signal.debug.feed_data_mode || "-"}`) : "",
     headlines.length ? `<div class="oa-news-headlines">${headlines.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>` : "",
   ].join(""));
   setText("#oa-news-event-reason", signal.reason || signal.error || "No Zerodha Pulse news signal yet.");
@@ -1318,7 +1319,9 @@ function renderIndustryDiagnostics() {
     metric("Reference Warm", referenceCache.warmed ? "YES" : "NO"),
     metric("Feature Cache", `${featureCache.hits || 0}/${featureCache.misses || 0}`),
     metric("Recent API Calls", Object.values(recentApiCalls).reduce((sum, value) => sum + Number(value || 0), 0)),
+    metric("Entry Poll", apiBudget.real_entry_poll_seconds ? `${apiBudget.real_entry_poll_seconds}s` : "-"),
     metric("Reconcile Poll", apiBudget.real_broker_reconcile_poll_seconds ? `${apiBudget.real_broker_reconcile_poll_seconds}s` : "-"),
+    metric("Order Updates", apiBudget.real_order_update_source || "-"),
   ].join(""));
 
   const currentReal = isCurrentRealProcessActive(result);

@@ -356,7 +356,8 @@ class LiveAdaptiveEngine:
         if int(risk_state.get("rejected_setups_recently") or 0) >= 2:
             score -= 20
         score = max(0.0, min(100.0, score))
-        if score >= 75:
+        high_threshold = _number(settings.get("aggressive_mode_min_score"), 75.0)
+        if score >= high_threshold:
             level = "HIGH"
         elif score >= 50:
             level = "MEDIUM"
@@ -430,6 +431,8 @@ class LiveAdaptiveEngine:
     def _target_extension(self, trade, quote, option_features, market_cue, regime, settings, trade_state, profit_points, target_distance) -> dict[str, Any]:
         if not settings.get("allow_target_extension", True):
             return {}
+        if _expiry_scalp_context(trade, settings) and not settings.get("expiry_scalp_extension_enabled", False):
+            return {}
         if trade_state != "WINNER_TRENDING":
             return {}
         ltp = _number(quote.get("ltp"), quote.get("last_price"))
@@ -501,6 +504,18 @@ def _quote_stale(quote: dict[str, Any], settings: dict[str, Any], now_epoch: flo
     if quote.get("timestamp_epoch") not in ("", None):
         return now_epoch - _number(quote.get("timestamp_epoch"), now_epoch) > _number(settings.get("quote_stale_seconds"), 3)
     return False
+
+
+def _expiry_scalp_context(trade: dict[str, Any], settings: dict[str, Any]) -> bool:
+    if bool(settings.get("expiry_scalp_enabled") or settings.get("expiry_scalping_mode") or settings.get("market_context_expiry_scalp_enabled")):
+        return True
+    days = trade.get("days_to_expiry")
+    if days in ("", None):
+        return False
+    try:
+        return int(float(days)) <= 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _partial_quantity(trade: dict[str, Any]) -> int:

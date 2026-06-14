@@ -733,3 +733,47 @@ python -B -m unittest tests.test_live_entry_active_candle
 python -B -m unittest tests.test_strategy_regression
 python -B -m unittest tests.test_order_manager
 ```
+
+## 2026-06-14 Planned Improvement - Options Auto Broker-Risk and Live Freshness Hardening
+
+### Primary Goal
+
+Harden Options Auto for live PAPER and REAL sessions without changing strategy scoring, CE/PE selection logic, entry dependency mode, or the existing Settings tab location.
+
+### Phase Plan
+
+- Phase 1: Live quote freshness guardrails.
+  - Unknown quote age must block PAPER/REAL entries.
+  - Backtest, debug, and diagnostic paths may still inspect untimestamped quotes.
+  - Do not convert missing timestamps into age zero.
+- Phase 2: Websocket role diagnostics.
+  - Locked INDEX/CE/PE subscriptions must expose missing tick roles explicitly.
+  - Dashboard health should distinguish missing, stale, and fresh roles.
+  - CE/PE tick tabs must be backed by the current locked contracts.
+- Phase 3: Real workflow wording clarity.
+  - Rename visible Real flow copy from engine to scanner where it can confuse users.
+  - Do not move real-order, dry-run, ask-permission, or auto-entry settings out of the single Settings tab.
+- Phase 4: Broker final-order risk checks.
+  - Before sending a real order, validate symbol, token, exchange, product, tick, quantity, lot multiple, broker freeze quantity, and margin evidence.
+  - Missing margin evidence must block final real order placement.
+- Phase 5: Protective-order SLA.
+  - Preserve the explicit target-before-stoploss placement sequence.
+  - Add a post-fill SLA that marks the position unprotected if the stoploss leg is not broker-confirmed quickly.
+  - Enter safe mode and stop new entries on unprotected real positions.
+
+### Guardrails
+
+- No strategy rewrite, no market context simplification, and no hidden threshold changes.
+- No moving Settings controls to another tab.
+- Prefer new helper modules and focused tests over overloading existing files.
+- Paper and real ask-permission/auto-entry paths must remain distinct from dry-run real mode.
+- Real orders remain blocked unless real mode is confirmed, dry-run is off, real orders are enabled, and broker preflight/final checks pass.
+
+### Verification Required
+
+```powershell
+python -B -m py_compile options_auto\execution\quote_freshness.py options_auto\data\feed_role_health.py options_auto\execution\real_order_checks.py options_auto\execution\protection_sla.py options_auto\execution\execution_safety.py options_auto\intelligence\low_latency_decision_engine.py options_auto\terminal_service.py options_auto\execution\real_order_lifecycle.py
+python -B -m unittest tests.test_options_auto_broker_risk_hardening tests.test_options_auto_live_feed_roles tests.test_options_auto_static_ui tests.test_options_auto_ui_render_contract
+python -B -m unittest tests.test_options_auto_industry_hardening tests.test_options_auto_live_adaptive tests.test_options_auto_formula_alignment tests.test_options_auto_market_cue_workflow
+python -B -m unittest discover -s tests
+```

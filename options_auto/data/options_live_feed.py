@@ -37,6 +37,10 @@ class OptionsLiveFeed:
                 self._token_roles[token] = role
                 self._contracts_by_token[token] = dict(contract or {})
         current_tokens = {role: token for token, role in self._token_roles.items()}
+        if self.subscribed_tokens:
+            self.health.mark_expected_roles(["INDEX", "CE", "PE"])
+        else:
+            self.health.mark_expected_roles([])
         for role in ("INDEX", "CE", "PE"):
             if previous_tokens.get(role) != current_tokens.get(role):
                 self.tick_buffers[role] = []

@@ -64,6 +64,7 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "min_volume": 0,
     "min_oi": 0,
     "quote_stale_seconds": 3.0,
+    "unknown_quote_age_blocks_live_entries": True,
     "market_cue_alignment_required": False,
     "market_context_enabled": True,
     "market_context_enforcement_enabled": False,
@@ -169,6 +170,8 @@ DEFAULT_OPTIONS_AUTO_SETTINGS: dict[str, Any] = {
     "real_entry_timeout_seconds": 30,
     "partial_fill_protect_immediately": True,
     "cancel_unfilled_entry_after_timeout": True,
+    "protection_confirm_sla_seconds": 5.0,
+    "max_real_order_freeze_quantity": 0,
     "real_protection_retry_count": 2,
     "real_protection_retry_delay_seconds": 1,
     "real_order_update_source": "POLLING_AND_RECONCILIATION",
@@ -305,6 +308,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "auto_expiry_switch",
         "expiry_scalping_mode",
         "aggressive_uses_simple_ohlcv_entry",
+        "unknown_quote_age_blocks_live_entries",
     ):
         settings[key] = _bool(settings.get(key), bool(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 
@@ -353,6 +357,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "quote_failure_backoff_seconds",
         "websocket_reconnect_backoff_seconds",
         "options_auto_runtime_persist_min_interval_seconds",
+        "protection_confirm_sla_seconds",
     ):
         settings[key] = _float(settings.get(key), float(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 
@@ -412,6 +417,7 @@ def normalize_settings(payload: dict[str, Any] | None) -> dict[str, Any]:
         "news_event_cache_ttl_seconds",
         "news_event_max_items",
         "news_event_stale_cache_max_minutes",
+        "max_real_order_freeze_quantity",
     ):
         settings[key] = _int(settings.get(key), int(DEFAULT_OPTIONS_AUTO_SETTINGS[key]))
 

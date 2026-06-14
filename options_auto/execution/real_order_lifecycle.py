@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from options_auto.core.clock import iso_now
+from options_auto.execution.protection_sla import evaluate_protection_sla
 from options_auto.execution.real_execution_controller import RealExecutionController
 
 
@@ -65,6 +66,7 @@ class RealOrderLifecycleEngine:
     emergency_flatten_required: bool = False
     broker_open_positions: list[dict[str, Any]] = field(default_factory=list)
     last_reconciliation: dict[str, Any] = field(default_factory=dict)
+    protection_sla: dict[str, Any] = field(default_factory=dict)
 
     def submit_entry(self, entry_order: dict[str, Any], trade_plan: dict[str, Any], settings: dict[str, Any] | None = None) -> dict[str, Any]:
         self.entry_order = dict(entry_order or {})
@@ -74,6 +76,7 @@ class RealOrderLifecycleEngine:
         self.fill = {}
         self.blockers = []
         self.warnings = []
+        self.protection_sla = {}
         self.state = ENTRY_ORDER_OPEN if self.entry_order.get("order_id") else ENTRY_ORDER_SENT
         self.protected_state = ENTRY_OPEN if self.entry_order.get("order_id") else ENTRY_REQUESTED
         self.emergency_flatten_required = False
@@ -161,6 +164,7 @@ class RealOrderLifecycleEngine:
             return self.snapshot()
         self.state = PROTECTION_PENDING
         self.protected_state = PROTECTIVE_EXIT_PLACING
+        self.fill.setdefault("protection_started_at", iso_now())
         protection = self.controller.protection_orders_from_fill(self.trade_plan, self.fill, settings)
         target_request = protection["target_order"]
         stop_request = protection["stoploss_order"]
@@ -224,7 +228,8 @@ class RealOrderLifecycleEngine:
             return self.mark_unprotected(f"Protective {role} order {status.lower()} in broker update.")
         return self.verify_protection_orders([self.target_order, self.stoploss_order])
 
-    def verify_protection_orders(self, broker_orders: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    def verify_protection_orders(self, broker_orders: list[dict[str, Any]] | None = None, settings: dict[str, Any] | None = None) -> dict[str, Any]:
+        settings = dict(settings or {})
         if broker_orders is None and (self.target_order.get("order_id") or self.stoploss_order.get("order_id")):
             self.state = PROTECTION_PENDING
             self.protected_state = RECONCILIATION_REQUIRED
@@ -258,6 +263,16 @@ class RealOrderLifecycleEngine:
             return self.snapshot()
         if failed_roles and _int(self.fill.get("filled_quantity")) > 0 and self.protected_state != FLAT:
             return self.mark_unprotected(f"Protective {'/'.join(failed_roles)} order failed in broker orderbook.")
+        sla = evaluate_protection_sla(
+            self.fill,
+            self.target_order,
+            self.stoploss_order,
+            self.protected_state,
+            settings,
+        )
+        self.protection_sla = sla.to_dict()
+        if sla.breached:
+            return self.mark_unprotected(sla.reason)
         if target_open and stop_open:
             self.state = OCO_ACTIVE
             self.protected_state = PROTECTIVE_EXIT_ACTIVE
@@ -360,6 +375,7 @@ class RealOrderLifecycleEngine:
             "emergency_flatten_required": self.emergency_flatten_required,
             "broker_open_positions": list(self.broker_open_positions),
             "last_reconciliation": dict(self.last_reconciliation),
+            "protection_sla": dict(self.protection_sla),
             "history": list(self.history[-100:]),
         }
 

@@ -556,7 +556,7 @@ class OptionsAutoUiRenderContractTests(unittest.TestCase):
             html = nodes["#oa-real-lifecycle-panel"].innerHTML;
             if (!nodes["#oa-real-lifecycle-badge"].textContent.includes("SESSION NOT STARTED")) throw new Error("Real lifecycle badge should show session not started: " + nodes["#oa-real-lifecycle-badge"].textContent);
             if (html.includes("REAL-OLD-ENTRY") || html.includes("REAL-OLD-TARGET") || html.includes("REAL-OLD-SL")) throw new Error("Stopped real lifecycle rendered stale order ids: " + html);
-            if (!html.includes("No current real engine session")) throw new Error("Stopped real lifecycle did not explain current state: " + html);
+            if (!html.includes("No current real scanner session")) throw new Error("Stopped real lifecycle did not explain current state: " + html);
             """
         )
 

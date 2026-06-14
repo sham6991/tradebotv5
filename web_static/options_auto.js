@@ -652,7 +652,7 @@ function renderRealWorkflow(canTrade, blockers = []) {
     ["Run real preflight", hasRealPreflightResult(preflight)],
     ["Run real dry run", state.status.session?.status === "REAL_DRY_RUN_SCANNING"],
     ["Arm real trading", connected && Boolean($("#oa-confirm-real")?.checked)],
-    ["Start real engine", state.status.live_scan?.running && state.status.live_scan?.mode === "REAL"],
+    ["Start real scanner", state.status.live_scan?.running && state.status.live_scan?.mode === "REAL"],
     ["Approve setup when required", !approval || approval.status !== "PENDING"],
     ["Monitor lifecycle", currentReal && Boolean(lifecycle.state)],
     ["Stop new entries if needed", true],
@@ -1342,7 +1342,7 @@ function renderIndustryDiagnostics() {
       metric("Stoploss Order", "-"),
       metric("Stoploss Status", "-"),
       metric("Stoploss Price", "-"),
-      metric("Last Event", "No current real engine session"),
+      metric("Last Event", "No current real scanner session"),
       metric("Blocker", realSession.message),
     ].join(""));
   } else {
@@ -1503,7 +1503,7 @@ function renderContractLockCards() {
     row("PE Margin", lock.pe?.margin_required_estimate !== undefined ? money(lock.pe.margin_required_estimate) : "-"),
     row("PE Reason", lock.pe?.hop_reason || "-"),
     row("Reselect In", lock.valid_until ? timeLeftText(lock.valid_until) : "-"),
-  ].join("") : `<p class="oa-empty-state">No live contract lock. Start Paper or Real engine to lock fresh CE/PE contracts.</p>`;
+  ].join("") : `<p class="oa-empty-state">No live contract lock. Start Paper or Real scanner to lock fresh CE/PE contracts.</p>`;
   $$("[data-contract-lock-card]").forEach(node => {
     node.innerHTML = body;
   });
@@ -2215,7 +2215,7 @@ async function startRealEngine() {
     }
     await refreshUiSummaryAfterMutation(result);
     renderAll();
-    setTabAlert("real", result.real_engine_started ? "Real engine started. It will scan and wait for manual approval when required." : result.message || "Real engine blocked.", result.real_engine_started ? "success" : "warning");
+    setTabAlert("real", result.real_engine_started ? "Real scanner started. It will scan and wait for manual approval when required." : result.message || "Real scanner blocked.", result.real_engine_started ? "success" : "warning");
   } catch (error) {
     setTabAlert("real", error.message, "danger");
   }
@@ -2318,8 +2318,8 @@ function renderRealPreflight(result = {}) {
     setText("#oa-real-mode-title", "Real trading ready after preflight.");
     setText("#oa-real-mode-copy", "Orders will be placed only after final validation, execution safety, OCO, and reconciliation checks.");
   } else {
-    setText("#oa-real-mode-title", "Real money connected. Run preflight, then start Real Engine.");
-    setText("#oa-real-mode-copy", "Until Real Engine is started, no current real order lifecycle is shown.");
+    setText("#oa-real-mode-title", "Real money connected. Run preflight, then start Real Scanner.");
+    setText("#oa-real-mode-copy", "Until Real Scanner is started, no current real order lifecycle is shown.");
   }
   const evidence = result.evidence || {};
   const checks = evidence.checks || {};
@@ -2368,7 +2368,7 @@ function renderRealApprovalCard() {
   const approval = realApprovalFromState();
   if (!approval || !approval.approval_id) {
     setBadge("#oa-real-approval-badge", "No Pending Approval", "grey");
-    setHtml("#oa-real-approval-card", `<p class="oa-empty-state">No real entry approval is pending. Start Real Engine to scan live data.</p>`);
+    setHtml("#oa-real-approval-card", `<p class="oa-empty-state">No real entry approval is pending. Start Real Scanner to scan live data.</p>`);
     return;
   }
   state.realPendingApprovalId = approval.approval_id || state.realPendingApprovalId;

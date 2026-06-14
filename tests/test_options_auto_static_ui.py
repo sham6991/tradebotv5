@@ -37,6 +37,8 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertIn('id="oa-real-stop-engine"', html)
         self.assertIn('id="oa-real-kill"', html)
         self.assertIn("REAL MONEY MODE - LIVE ZERODHA ORDERS ONLY AFTER PREFLIGHT", html)
+        self.assertIn("Start Real Scanner", html)
+        self.assertNotIn("Start Real Engine", html)
         self.assertNotIn("disabled in this build", html.lower())
 
     def test_entry_mode_ui_does_not_offer_profile_default(self):

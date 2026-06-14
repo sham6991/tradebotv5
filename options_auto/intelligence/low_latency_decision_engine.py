@@ -5,6 +5,7 @@ from typing import Any
 
 from options_auto.constants import SIDE_CE, SIDE_PE, SIDE_WAIT
 from options_auto.core.performance_monitor import PerformanceMonitor
+from options_auto.execution.quote_freshness import evaluate_quote_freshness
 from options_auto.core.task_priority import FAST_LANE_DISALLOWED_TASKS
 from options_auto.indicators.technicals import bid_ask_spread_pct
 from options_auto.intelligence.entry_timing_engine import round_to_tick
@@ -60,9 +61,9 @@ class LowLatencyDecisionEngine:
         if plan_age > max_age:
             blockers.append("Ready trade plan expired.")
 
-        quote_age = _quote_age(latest_quote, now_epoch)
-        if quote_age > _number(settings.get("quote_stale_seconds"), 3.0):
-            blockers.append("Quote stale.")
+        freshness = evaluate_quote_freshness(latest_quote, settings, now_epoch=now_epoch)
+        quote_age = freshness.age_seconds
+        blockers.extend(freshness.blockers)
         bid = _quote_bid(latest_quote)
         ask = _quote_ask(latest_quote)
         if bid <= 0 or ask <= 0 or ask < bid:
@@ -120,7 +121,7 @@ class LowLatencyDecisionEngine:
         latency_ms = self.performance_monitor.elapsed_ms(started)
         event = self.performance_monitor.record_latency("final_validation", latency_ms, {"side": side, "symbol": (plan.get("contract") or {}).get("tradingsymbol")})
         warnings.extend(event.get("warnings") or [])
-        if quote_age + latency_ms / 1000.0 > _number(settings.get("quote_stale_seconds"), 3.0):
+        if quote_age is not None and quote_age + latency_ms / 1000.0 > _number(settings.get("quote_stale_seconds"), 3.0):
             blockers.append("Quote became stale during validation.")
         blockers = list(dict.fromkeys(blockers))
         return {
@@ -166,15 +167,6 @@ def _max_plan_age(settings: dict[str, Any]) -> float:
     if profile == "CONSERVATIVE":
         return _number(settings.get("max_plan_age_seconds_conservative"), 8.0)
     return _number(settings.get("max_plan_age_seconds_balanced"), 5.0)
-
-
-def _quote_age(quote: dict[str, Any], now_epoch: float) -> float:
-    if quote.get("age_seconds") not in ("", None):
-        return _number(quote.get("age_seconds"), 9999.0)
-    timestamp = quote.get("timestamp_epoch") or quote.get("last_updated_epoch")
-    if timestamp in ("", None):
-        return 0.0
-    return max(0.0, now_epoch - _number(timestamp, now_epoch))
 
 
 def _quote_bid(quote: dict[str, Any]) -> float:

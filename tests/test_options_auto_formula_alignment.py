@@ -142,6 +142,7 @@ class OptionsAutoFormulaAlignmentTests(unittest.TestCase):
                 "relative_volume": 1.6,
                 "option_vwap": 140,
                 "option_atr14": 5,
+                "age_seconds": 0,
             }},
             market_cue_payload={
                 "phase": "LUNCH",

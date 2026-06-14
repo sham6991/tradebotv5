@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from options_auto.data.feed_role_health import evaluate_expected_roles
+
 
 WEBSOCKET_TICKS = "WEBSOCKET_TICKS"
 QUOTE_SNAPSHOT_POLLING = "QUOTE_SNAPSHOT_POLLING"
@@ -20,6 +22,7 @@ class OptionsFeedHealth:
         self.missing_candles: list[str] = []
         self.backfill_status = ""
         self.last_error = ""
+        self.expected_roles: list[str] = []
 
     def mark_mode(self, mode: str) -> None:
         self.data_mode = str(mode or QUOTE_SNAPSHOT_POLLING).upper()
@@ -29,6 +32,9 @@ class OptionsFeedHealth:
         if self.data_mode == DATA_STALE:
             self.data_mode = WEBSOCKET_TICKS
         self.last_error = ""
+
+    def mark_expected_roles(self, roles: list[str] | tuple[str, ...] | None) -> None:
+        self.expected_roles = [str(role or "").upper() for role in list(roles or []) if str(role or "").strip()]
 
     def mark_reconnecting(self, error: str = "") -> None:
         self.data_mode = RECONNECTING
@@ -47,21 +53,14 @@ class OptionsFeedHealth:
     def evaluate(self, settings: dict[str, Any] | None = None, now: datetime | None = None) -> dict[str, Any]:
         settings = dict(settings or {})
         now = now or datetime.now()
-        max_age = float(settings.get("max_tick_age_seconds") or settings.get("max_quote_age_seconds") or 3)
-        stale_labels = []
-        role_statuses = {}
-        for label, timestamp in self.last_ticks.items():
-            when = _dt(timestamp)
-            age = (now - when).total_seconds() if when else None
-            is_stale = bool(age is not None and age > max_age)
-            if is_stale:
-                stale_labels.append(label)
-            role_statuses[label] = {
-                "last_tick": timestamp,
-                "age_seconds": round(age, 3) if age is not None else None,
-                "fresh": bool(age is not None and age <= max_age),
-                "stale": is_stale,
-            }
+        roles = evaluate_expected_roles(
+            self.last_ticks,
+            settings,
+            expected_roles=self.expected_roles,
+            now=now,
+        )
+        stale_labels = list(roles["stale_labels"])
+        role_statuses = dict(roles["role_statuses"])
         stale = bool(stale_labels)
         mode = self.data_mode if self.data_mode == DISCONNECTED else DATA_STALE if stale else self.data_mode
         return {
@@ -72,6 +71,10 @@ class OptionsFeedHealth:
             "role_statuses": role_statuses,
             "feed_stale": stale,
             "stale_labels": stale_labels,
+            "missing_roles": list(roles["missing_roles"]),
+            "fresh_roles": list(roles["fresh_roles"]),
+            "expected_roles": list(roles["expected_roles"]),
+            "all_expected_roles_fresh": bool(roles["all_expected_roles_fresh"]),
             "reconnect_attempts": self.reconnect_attempts,
             "missing_candles": list(self.missing_candles),
             "backfill_status": self.backfill_status,

@@ -36,13 +36,14 @@ from options_auto.execution.kite_api_manager import KiteApiManager, RateLimiter
 from options_auto.execution.kite_order_adapter import KiteOrderAdapter
 from options_auto.execution.paper_broker import PaperBroker
 from options_auto.execution.paper_lifecycle import PaperLifecycleEngine
+from options_auto.execution.real_order_checks import build_real_entry_order_request
 from options_auto.execution.real_order_lifecycle import RealOrderLifecycleEngine, UNPROTECTED_POSITION
 from options_auto.execution.reconciliation import ReconciliationEngine
 from options_auto.execution.real_execution_controller import RealExecutionController, results_folder_writable
 from options_auto.data.fii_dii_loader import fii_dii_status_from_upload, parse_fii_dii_csv_text
 from options_auto.intelligence.adaptive_risk_engine import PositionSizer, RiskEngine
 from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
-from options_auto.intelligence.entry_timing_engine import EntryTimingEngine, round_to_tick
+from options_auto.intelligence.entry_timing_engine import EntryTimingEngine
 from options_auto.intelligence.exit_manager import ExitManager, build_long_option_trade_plan
 from options_auto.intelligence.feature_builder import build_index_features
 from options_auto.intelligence.live_adaptive_engine import LiveAdaptiveEngine
@@ -2811,7 +2812,7 @@ class OptionsAutoTerminalService:
         positions = self._broker_positions(client, payload)
         adapter = KiteOrderAdapter(self.real_api_manager, self.mode_guard) if client else None
         lifecycle = self.real_lifecycle.poll_entry_status(broker_orders, settings=self.settings, adapter=adapter)
-        lifecycle = self.real_lifecycle.verify_protection_orders(broker_orders)
+        lifecycle = self.real_lifecycle.verify_protection_orders(broker_orders, settings=self.settings)
         lifecycle = self.real_lifecycle.monitor_oco(broker_orders, adapter=adapter, positions=positions)
         if positions is not None:
             lifecycle = self.real_lifecycle.reconcile_positions(broker_orders, positions)
@@ -4063,50 +4064,7 @@ class OptionsAutoTerminalService:
         return settings
 
     def _real_entry_order_request(self, selected: dict[str, Any], trade_plan: dict[str, Any], preflight: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-        blockers = []
-        symbol = trade_plan.get("tradingsymbol") or selected.get("tradingsymbol")
-        exchange = trade_plan.get("exchange") or selected.get("exchange") or ("BFO" if "SENSEX" in str(symbol or "").upper() else "NFO")
-        token = selected.get("instrument_token") or selected.get("token") or trade_plan.get("instrument_token")
-        lot_size = int(_number(trade_plan.get("lot_size"), selected.get("lot_size")))
-        quantity = int(_number(trade_plan.get("quantity"), selected.get("quantity")))
-        tick = _number(trade_plan.get("tick_size"), selected.get("tick_size") or 0.05)
-        entry = round_to_tick(_number(trade_plan.get("entry_price")), tick)
-        product = str(trade_plan.get("product") or self.settings.get("order_product") or "NRML").upper()
-        margin = _number((preflight.get("evidence") or {}).get("checks", {}).get("available_margin"))
-        if not symbol:
-            blockers.append("Selected contract tradingsymbol is missing.")
-        if not token:
-            blockers.append("Selected contract instrument token is missing.")
-        if exchange not in {"NFO", "BFO"}:
-            blockers.append("Selected contract exchange must be NFO or BFO.")
-        if lot_size <= 0:
-            blockers.append("Selected contract lot size is invalid.")
-        if quantity <= 0:
-            blockers.append("Real order quantity is invalid.")
-        if lot_size > 0 and quantity % lot_size != 0:
-            blockers.append("Real order quantity must be a multiple of lot size.")
-        if tick <= 0:
-            blockers.append("Selected contract tick size is invalid.")
-        if entry <= 0:
-            blockers.append("Real order entry price is invalid.")
-        if product not in {"NRML", "MIS"}:
-            blockers.append("Real order product must be NRML or MIS.")
-        if margin and entry > 0 and quantity > 0 and margin < entry * quantity:
-            blockers.append("Available margin is insufficient for the entry order value.")
-        order_request = {
-            "tradingsymbol": symbol,
-            "exchange": exchange,
-            "instrument_token": token,
-            "transaction_type": "BUY",
-            "order_type": "LIMIT",
-            "quantity": quantity,
-            "price": entry,
-            "product": product,
-            "validity": "DAY",
-            "variety": "regular",
-            "tag": "OPTIONS_AUTO",
-        }
-        return order_request, list(dict.fromkeys(blockers))
+        return build_real_entry_order_request(selected, trade_plan, self.settings, preflight)
 
     def _blocked_real_order(
         self,
@@ -4538,8 +4496,12 @@ class OptionsAutoTerminalService:
                 "tick_size": selected.get("tick_size") or 0.05,
                 "premium_return_1": (selected.get("premium_momentum") or {}).get("premium_return_1"),
                 "option_atr14": selected.get("option_atr14") or selected.get("atr14"),
-                "age_seconds": payload.get("quote_age_seconds", 0),
             }
+            for key in ("age_seconds", "timestamp_epoch", "last_updated_epoch", "timestamp", "last_trade_time", "exchange_timestamp"):
+                if selected.get(key) not in ("", None):
+                    quote[key] = selected.get(key)
+            if "age_seconds" not in quote and payload.get("quote_age_seconds") not in ("", None):
+                quote["age_seconds"] = payload.get("quote_age_seconds")
         state = {
             "mode_guard_allowed": True,
             "governor_allowed": bool((decision.get("governor") or {}).get("allowed", decision.get("allowed"))),
@@ -4559,7 +4521,11 @@ class OptionsAutoTerminalService:
             str(selected.get("instrument_token") or ""),
             str(selected.get("token") or ""),
             str(selected.get("tradingsymbol") or "").upper(),
+            str(selected.get("quote_key") or ""),
         ]
+        exchange_symbol = f"{selected.get('exchange')}:{selected.get('tradingsymbol')}".upper()
+        if selected.get("exchange") and selected.get("tradingsymbol"):
+            keys.append(exchange_symbol)
         for key in keys:
             if key and key in quotes:
                 return dict(quotes[key] or {})

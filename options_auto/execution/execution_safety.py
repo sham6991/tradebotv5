@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from options_auto.constants import MODE_REAL, REAL_EXECUTION_DISABLED_REASON
+from options_auto.execution.quote_freshness import evaluate_quote_freshness
 
 
 @dataclass
@@ -39,13 +40,9 @@ class DataQualityEngine:
         spread_pct = float(quote.get("spread_pct") or 0)
         if spread_pct and spread_pct > float(settings.get("max_spread_pct") or 0.6):
             blockers.append("Quote spread is too wide.")
-        age = quote.get("age_seconds")
-        if age not in ("", None):
-            try:
-                if float(age) > float(settings.get("quote_stale_seconds") or 3):
-                    blockers.append("Quote is stale.")
-            except (TypeError, ValueError):
-                blockers.append("Quote age is invalid.")
+        freshness = evaluate_quote_freshness(quote, settings, now_epoch=now.timestamp() if now else None)
+        for blocker in freshness.blockers:
+            blockers.append("Quote is stale." if blocker == "Quote stale." else blocker)
         return SafetyDecision(not blockers, "DATA_OK" if not blockers else "BLOCKED_BY_DATA", blockers)
 
 

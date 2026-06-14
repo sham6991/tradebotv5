@@ -123,7 +123,9 @@ def evaluate_options_auto_decision(
                 "ltp": selected.get("ltp"),
                 "spread_pct": selected.get("spread_pct"),
                 "demo_data": selected.get("demo_data"),
-                "age_seconds": cue_payload.get("quote_age_seconds", selected.get("age_seconds", 0)),
+                "age_seconds": _first_present(cue_payload.get("quote_age_seconds"), selected.get("age_seconds")),
+                "timestamp_epoch": selected.get("timestamp_epoch") or selected.get("last_updated_epoch"),
+                "timestamp": selected.get("timestamp") or selected.get("exchange_timestamp"),
             },
             settings,
         ).to_dict()
@@ -823,6 +825,13 @@ def _epoch(value: Any) -> float:
         return datetime.fromisoformat(str(value)).timestamp()
     except (TypeError, ValueError):
         return time.time()
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value not in ("", None):
+            return value
+    return None
 
 
 def _number(value: Any, default: float = 0.0) -> float:

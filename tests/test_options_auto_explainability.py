@@ -1,4 +1,5 @@
 import unittest
+import tempfile
 
 import pandas as pd
 
@@ -8,6 +9,7 @@ from options_auto.intelligence.entry_timing_engine import EntryTimingEngine
 from options_auto.intelligence.master_governor import MasterGovernor
 from options_auto.intelligence.market_context_router import MarketContextRouter
 from options_auto.intelligence.trade_score_engine import TradeScoreEngine
+from options_auto.terminal_service import OptionsAutoTerminalService
 
 
 def index_rows(count=55):
@@ -158,6 +160,50 @@ class OptionsAutoExplainabilityTests(unittest.TestCase):
         self.assertEqual(governor["primary_block_stage"], "BLOCKED_BY_DATA")
         self.assertEqual(governor["primary_blocker"], "Quote LTP is unavailable.")
         self.assertEqual(governor["blocker_stages"][0]["stage"], "BLOCKED_BY_DATA")
+
+    def test_freshness_and_explainability_are_observability_only(self):
+        result = evaluate_options_auto_decision(
+            mode="PAPER",
+            settings=settings(),
+            index_history=pd.DataFrame(index_rows()),
+            option_candidates=[candidate()],
+            quotes={"1": {"ltp": 100, "bid": 99.95, "ask": 100.05, "bid_qty": 3000, "ask_qty": 3000, "volume": 100000, "oi": 1000000, "premium_return_1": 2, "premium_return_3": 5, "relative_volume": 2, "option_vwap": 99, "option_atr14": 5, "age_seconds": 0}},
+            market_cue_payload=cue_payload(signal_age_seconds=1),
+            risk_state={},
+            account_state={"available_capital": 20000},
+            timestamp="2026-06-04 12:00:00",
+        )
+
+        self.assertIn("freshness", result)
+        self.assertIn("explainability", result)
+        self.assertEqual(result["explainability"]["order_execution_impact"], "NONE_OBSERVABILITY_ONLY")
+        self.assertEqual(result["decision_snapshot"]["freshness"], result["freshness"])
+        self.assertEqual(result["decision_snapshot"]["explainability"], result["explainability"])
+        self.assertNotIn("Freshness", " ".join(result["blockers"]))
+        self.assertNotIn("Explainability", " ".join(result["blockers"]))
+        self.assertEqual(result["side_selection"]["side_contract_mismatch"], False)
+
+    def test_runtime_freshness_tags_do_not_mutate_decision_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            service = OptionsAutoTerminalService(temp_dir)
+            decision = {
+                "allowed": True,
+                "blockers": [],
+                "selected_side": "CE",
+                "trade_plan": {"tradingsymbol": "NIFTY26JUN22500CE"},
+                "freshness": {"tags": {}},
+                "explainability": {"order_execution_impact": "NONE_OBSERVABILITY_ONLY"},
+                "decision_snapshot": {},
+            }
+            before = {key: decision[key] for key in ("allowed", "blockers", "selected_side", "trade_plan")}
+
+            service._attach_runtime_observability_locked(decision, "PAPER")
+
+            after = {key: decision[key] for key in ("allowed", "blockers", "selected_side", "trade_plan")}
+            self.assertEqual(after, before)
+            self.assertIn("ready_trade_plan", decision["freshness"]["tags"])
+            self.assertIn("contract_lock", decision["freshness"]["tags"])
+            self.assertIn("feed_roles", decision["freshness"]["tags"])
 
 
 if __name__ == "__main__":

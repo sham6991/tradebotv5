@@ -717,6 +717,8 @@ class OptionsAutoTerminalService:
         if mode in {MODE_PAPER, MODE_REAL} and self.settings.get("ready_plan_cache_enabled"):
             ready_plan = self.ready_plan_cache.refresh_from_decision(decision, self.settings)
             decision["ready_trade_plan"] = ready_plan
+        if mode in {MODE_PAPER, MODE_REAL}:
+            self._attach_runtime_observability_locked(decision, mode)
         self.session.record_decision(decision)
         if mode == MODE_SHADOW:
             self.shadow_engine.record(decision)
@@ -753,6 +755,87 @@ class OptionsAutoTerminalService:
         self.index_ticks.append(tick)
         if len(self.index_ticks) > 200:
             self.index_ticks = self.index_ticks[-200:]
+
+    def _attach_runtime_observability_locked(self, decision: dict[str, Any], mode: str) -> None:
+        freshness = dict(decision.get("freshness") or {})
+        tags = dict(freshness.get("tags") or {})
+        now_epoch = time.time()
+        ready_plan = dict(decision.get("ready_trade_plan") or {})
+        last_refresh = _number(ready_plan.get("last_refreshed_epoch"))
+        valid_until = _number(ready_plan.get("valid_until_epoch"))
+        plan_age = now_epoch - last_refresh if last_refresh > 0 else None
+        plan_max_age = valid_until - last_refresh if valid_until > last_refresh > 0 else None
+        plan_fresh = None
+        if ready_plan:
+            plan_fresh = bool(ready_plan.get("status") == "READY" and valid_until >= now_epoch)
+        tags["ready_trade_plan"] = {
+            "label": "Ready Trade Plan",
+            "status": "FRESH" if plan_fresh is True else "STALE" if plan_fresh is False else "UNKNOWN",
+            "fresh": plan_fresh,
+            "age_seconds": round(plan_age, 3) if plan_age is not None else None,
+            "max_age_seconds": round(plan_max_age, 3) if plan_max_age is not None else None,
+            "source": "ready_plan_cache",
+            "timestamp": ready_plan.get("last_refreshed_at") or "",
+        }
+
+        lock = dict(decision.get("contract_lock") or {})
+        lock_until = _parse_dt_value(lock.get("valid_until"))
+        lock_fresh = None
+        if lock:
+            lock_fresh = not bool(lock_until and datetime.now() >= lock_until)
+        tags["contract_lock"] = {
+            "label": "Contract Lock",
+            "status": "FRESH" if lock_fresh is True else "STALE" if lock_fresh is False else "UNKNOWN",
+            "fresh": lock_fresh,
+            "source": "locked_contract_manager",
+            "timestamp": lock.get("locked_at") or "",
+            "valid_until": lock.get("valid_until") or "",
+            "ce": (lock.get("ce") or {}).get("tradingsymbol") if isinstance(lock.get("ce"), dict) else "",
+            "pe": (lock.get("pe") or {}).get("tradingsymbol") if isinstance(lock.get("pe"), dict) else "",
+        }
+
+        feed = (self.options_live_feed.snapshot(self.settings).get("health") or {})
+        role_statuses = dict(feed.get("role_statuses") or {})
+        fresh_roles = [role for role, item in role_statuses.items() if isinstance(item, dict) and item.get("fresh")]
+        stale_roles = [role for role, item in role_statuses.items() if isinstance(item, dict) and item.get("stale")]
+        feed_fresh = None
+        if role_statuses:
+            feed_fresh = not bool(feed.get("feed_stale") or stale_roles)
+        tags["feed_roles"] = {
+            "label": "Feed Roles",
+            "status": "FRESH" if feed_fresh is True else "STALE" if feed_fresh is False else "UNKNOWN",
+            "fresh": feed_fresh,
+            "source": feed.get("data_mode") or decision.get("data_mode") or "",
+            "fresh_roles": fresh_roles,
+            "stale_roles": stale_roles,
+            "last_index_tick": feed.get("last_index_tick") or "",
+            "last_ce_tick": feed.get("last_ce_tick") or "",
+            "last_pe_tick": feed.get("last_pe_tick") or "",
+        }
+        tags["scan_cycle"] = {
+            "label": "Scan Cycle",
+            "status": "CURRENT",
+            "fresh": True,
+            "source": "live_scan_loop",
+            "cycle_count": self._live_scan_cycle_count,
+            "last_cycle": self._live_scan_last_cycle,
+            "mode": mode,
+        }
+        freshness["tags"] = tags
+        freshness["summary"] = _freshness_summary(tags)
+        decision["freshness"] = freshness
+        explainability = dict(decision.get("explainability") or {})
+        explainability["freshness_summary"] = dict(freshness.get("summary") or {})
+        explainability["runtime_tags"] = {
+            "ready_trade_plan": tags["ready_trade_plan"]["status"],
+            "contract_lock": tags["contract_lock"]["status"],
+            "feed_roles": tags["feed_roles"]["status"],
+            "scan_cycle": self._live_scan_cycle_count,
+        }
+        decision["explainability"] = explainability
+        if isinstance(decision.get("decision_snapshot"), dict):
+            decision["decision_snapshot"]["freshness"] = freshness
+            decision["decision_snapshot"]["explainability"] = explainability
 
     def _trade_plan(self, selected: dict[str, Any], sizing: dict[str, Any], regime: dict[str, Any]) -> dict[str, Any]:
         return build_long_option_trade_plan(selected, sizing, regime, self.settings)
@@ -1384,6 +1467,36 @@ class OptionsAutoTerminalService:
         warnings = list(dict.fromkeys(live_data.get("warnings") or []))
         diagnostics = dict(live_data.get("diagnostics") or {})
         next_action = live_data.get("next_action") or diagnostics.get("next_action") or ""
+        freshness = {
+            "tags": {
+                "data_feed": {
+                    "label": "Data Feed",
+                    "status": "STALE" if diagnostics.get("options_data_health", {}).get("feed_stale") else "UNKNOWN",
+                    "fresh": False if diagnostics.get("options_data_health", {}).get("feed_stale") else None,
+                    "source": diagnostics.get("data_mode") or diagnostics.get("data_source") or "",
+                    "reason": blockers[0],
+                },
+                "decision_snapshot": {
+                    "label": "Decision Snapshot",
+                    "status": "BLOCKED_BY_DATA",
+                    "fresh": False,
+                    "source": "blocked_data_guard",
+                    "reason": blockers[0],
+                },
+            }
+        }
+        freshness["summary"] = _freshness_summary(freshness["tags"])
+        explainability = {
+            "summary": blockers[0],
+            "decision": "WAIT",
+            "entry_dependency_mode": settings.get("entry_dependency_mode"),
+            "selected_side": SIDE_WAIT,
+            "primary_block_stage": "BLOCKED_BY_DATA",
+            "primary_blocker": blockers[0],
+            "blocker_stages": [{"stage": "BLOCKED_BY_DATA", "blockers": blockers}],
+            "freshness_summary": dict(freshness.get("summary") or {}),
+            "order_execution_impact": "NONE_OBSERVABILITY_ONLY",
+        }
         return {
             "mode": mode,
             "timestamp": pd.Timestamp.now().isoformat(),
@@ -1421,6 +1534,8 @@ class OptionsAutoTerminalService:
             "blockers": blockers,
             "warnings": warnings,
             "explanation": blockers[0],
+            "explainability": explainability,
+            "freshness": freshness,
             "next_action": next_action,
             "decision_snapshot": {
                 "allowed": False,
@@ -1429,6 +1544,8 @@ class OptionsAutoTerminalService:
                 "selected_side": SIDE_WAIT,
                 "intended_side": SIDE_WAIT,
                 "final_selected_side": SIDE_WAIT,
+                "freshness": freshness,
+                "explainability": explainability,
             },
             "real_execution_enabled": mode == MODE_REAL,
             "real_execution_reason": "Real execution blocked until Options Auto market data is available." if mode == MODE_REAL else REAL_EXECUTION_DISABLED_REASON,
@@ -4321,6 +4438,23 @@ def _number(value: Any, default: Any = 0.0) -> float:
             return float(default)
         except (TypeError, ValueError):
             return 0.0
+
+
+def _freshness_summary(tags: dict[str, Any]) -> dict[str, Any]:
+    tag_map = dict(tags or {})
+    stale = [key for key, value in tag_map.items() if isinstance(value, dict) and value.get("fresh") is False]
+    unknown = [key for key, value in tag_map.items() if isinstance(value, dict) and value.get("fresh") is None]
+    fresh = [key for key, value in tag_map.items() if isinstance(value, dict) and value.get("fresh") is True]
+    return {
+        "status": "STALE" if stale else "UNKNOWN" if unknown else "FRESH",
+        "all_known_fresh": not stale,
+        "fresh_count": len(fresh),
+        "stale_count": len(stale),
+        "unknown_count": len(unknown),
+        "stale_tags": stale,
+        "unknown_tags": unknown,
+        "note": "Freshness tags are observability only and do not alter strategy, scoring, or order execution.",
+    }
 
 
 def _int_setting(value: Any, default: int) -> int:

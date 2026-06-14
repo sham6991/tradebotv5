@@ -250,6 +250,17 @@ class OptionsAutoStaticUITests(unittest.TestCase):
         self.assertRegex(css, r"\.oa-index-tick-row\s*\{[^}]*grid-template-columns:", re.DOTALL)
         self.assertRegex(css, r"\.oa-contract-lock-card\s+\.oa-plan-body\s*\{[^}]*overflow-y:\s*auto", re.DOTALL)
 
+    def test_dashboard_renders_explainability_and_freshness_tags(self):
+        js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
+
+        self.assertIn("result.explainability || result.decision_snapshot?.explainability", js)
+        self.assertIn("result.freshness || result.decision_snapshot?.freshness", js)
+        self.assertIn('row("Primary Stage"', js)
+        self.assertIn('row("Primary Blocker"', js)
+        self.assertIn('row("Freshness"', js)
+        self.assertIn("function freshnessStatusText", js)
+        self.assertIn("function freshnessTagText", js)
+
     def test_stop_and_kill_controls_call_live_engine_routes(self):
         js = (ROOT / "web_static" / "options_auto.js").read_text(encoding="utf-8")
 

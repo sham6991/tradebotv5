@@ -273,6 +273,31 @@ def evaluate_options_auto_decision(
         trade_plan,
     )
     explanation = _explanation(allowed, selected_side, selected, trade_score, blockers)
+    freshness = _freshness_tags(
+        settings=settings,
+        cue_payload=cue_payload,
+        selected=selected,
+        data_quality=data_quality,
+        entry_timing=entry_timing,
+        market_cue=market_cue.to_dict(),
+        market_context=market_context,
+        side_selection=side_selection,
+        timestamp=timestamp_text,
+    )
+    explainability = _decision_explainability(
+        explanation=explanation,
+        allowed=allowed,
+        entry_dependency_mode=entry_dependency_mode,
+        selected_side=selected_side,
+        side_selection=side_selection,
+        trade_score=trade_score,
+        effective_threshold=effective_threshold,
+        governor=governor,
+        blockers=blockers,
+        freshness=freshness,
+    )
+    decision_snapshot["freshness"] = freshness
+    decision_snapshot["explainability"] = explainability
     real_mode = mode == MODE_REAL
     return {
         "mode": mode,
@@ -305,6 +330,8 @@ def evaluate_options_auto_decision(
         "blockers": blockers,
         "warnings": warnings,
         "explanation": explanation,
+        "explainability": explainability,
+        "freshness": freshness,
         "decision_snapshot": decision_snapshot,
         "real_execution_enabled": real_mode,
         "real_execution_reason": (
@@ -479,6 +506,158 @@ def _explanation(allowed: bool, side: str, selected: dict[str, Any], score: dict
     return "No trade: setup did not produce a valid selected contract."
 
 
+def _decision_explainability(
+    *,
+    explanation: str,
+    allowed: bool,
+    entry_dependency_mode: str,
+    selected_side: str,
+    side_selection: dict[str, Any],
+    trade_score: dict[str, Any],
+    effective_threshold: float,
+    governor: dict[str, Any],
+    blockers: list[str],
+    freshness: dict[str, Any],
+) -> dict[str, Any]:
+    primary_blocker = str(governor.get("primary_blocker") or (blockers[0] if blockers else ""))
+    primary_stage = str(governor.get("primary_block_stage") or ("ALLOW_TRADING" if allowed else "WAIT"))
+    return {
+        "summary": explanation,
+        "decision": "ALLOW" if allowed else "WAIT",
+        "entry_dependency_mode": entry_dependency_mode,
+        "selected_side": selected_side,
+        "side_selection": dict(side_selection or {}),
+        "score": trade_score.get("score"),
+        "effective_score_threshold": effective_threshold,
+        "primary_block_stage": primary_stage,
+        "primary_blocker": primary_blocker,
+        "blocker_stages": list(governor.get("blocker_stages") or []),
+        "freshness_summary": dict((freshness or {}).get("summary") or {}),
+        "order_execution_impact": "NONE_OBSERVABILITY_ONLY",
+    }
+
+
+def _freshness_tags(
+    *,
+    settings: dict[str, Any],
+    cue_payload: dict[str, Any],
+    selected: dict[str, Any],
+    data_quality: dict[str, Any],
+    entry_timing: dict[str, Any],
+    market_cue: dict[str, Any],
+    market_context: dict[str, Any],
+    side_selection: dict[str, Any],
+    timestamp: str,
+) -> dict[str, Any]:
+    quote_limit = _number(settings.get("quote_stale_seconds"), _number(settings.get("max_quote_age_seconds"), 3.0))
+    signal_limit = _number(settings.get("max_signal_age_seconds"), 20.0)
+    selected_age = selected.get("age_seconds")
+    if selected_age in ("", None):
+        selected_age = cue_payload.get("quote_age_seconds")
+    signal_age = cue_payload.get("signal_age_seconds")
+    tags = {
+        "decision_snapshot": {
+            "label": "Decision Snapshot",
+            "status": "CURRENT",
+            "fresh": True,
+            "timestamp": timestamp,
+            "source": "single_scan_cycle",
+        },
+        "index_context": _freshness_item(
+            label="Index Context",
+            age_seconds=cue_payload.get("quote_age_seconds"),
+            max_age_seconds=quote_limit,
+            source=cue_payload.get("spot_source") or cue_payload.get("data_source") or cue_payload.get("source") or "latest_index_context",
+            timestamp=cue_payload.get("timestamp") or cue_payload.get("datetime") or timestamp,
+        ),
+        "selected_option_quote": _freshness_item(
+            label="Selected Option Quote",
+            age_seconds=selected_age,
+            max_age_seconds=quote_limit,
+            source=selected.get("quote_source") or selected.get("data_source") or "locked_contract_quote",
+            timestamp=selected.get("timestamp") or selected.get("exchange_timestamp") or timestamp,
+            state=data_quality.get("state") or "",
+        ),
+        "signal": _freshness_item(
+            label="Signal",
+            age_seconds=signal_age,
+            max_age_seconds=signal_limit,
+            source=cue_payload.get("signal_source") or "latest_scan_signal",
+            timestamp=cue_payload.get("signal_timestamp") or timestamp,
+            state=entry_timing.get("state") or "",
+        ),
+        "market_cue": {
+            "label": "Market Cue",
+            "status": "CURRENT",
+            "fresh": True,
+            "source": "market_cue_engine",
+            "timestamp": market_cue.get("last_updated") or timestamp,
+            "recommended_side": market_cue.get("recommended_side"),
+            "cue": market_cue.get("cue"),
+        },
+        "market_context": {
+            "label": "Market Context",
+            "status": "CURRENT",
+            "fresh": True,
+            "source": "market_context_router",
+            "timestamp": market_context.get("timestamp") or timestamp,
+            "permission": market_context.get("permission"),
+            "enforcement": market_context.get("enforcement"),
+        },
+        "side_selection": {
+            "label": "Side Selection",
+            "status": "MATCHED" if not side_selection.get("side_contract_mismatch") else "MISMATCH",
+            "fresh": not bool(side_selection.get("side_contract_mismatch")),
+            "source": side_selection.get("source") or "none",
+            "intended_side": side_selection.get("intended_side"),
+            "final_selected_side": side_selection.get("final_selected_side"),
+        },
+    }
+    stale = [key for key, value in tags.items() if value.get("fresh") is False]
+    unknown = [key for key, value in tags.items() if value.get("fresh") is None]
+    fresh = [key for key, value in tags.items() if value.get("fresh") is True]
+    return {
+        "summary": {
+            "status": "STALE" if stale else "UNKNOWN" if unknown else "FRESH",
+            "all_known_fresh": not stale,
+            "fresh_count": len(fresh),
+            "stale_count": len(stale),
+            "unknown_count": len(unknown),
+            "stale_tags": stale,
+            "unknown_tags": unknown,
+            "note": "Freshness tags are observability only and do not alter strategy, scoring, or order execution.",
+        },
+        "tags": tags,
+    }
+
+
+def _freshness_item(
+    *,
+    label: str,
+    age_seconds: Any = None,
+    max_age_seconds: Any = None,
+    source: Any = "",
+    timestamp: Any = "",
+    state: Any = "",
+    fresh: bool | None = None,
+) -> dict[str, Any]:
+    age = _optional_number(age_seconds)
+    limit = _optional_number(max_age_seconds)
+    if fresh is None and age is not None and limit is not None:
+        fresh = age <= limit
+    status = "FRESH" if fresh is True else "STALE" if fresh is False else "UNKNOWN"
+    return {
+        "label": label,
+        "status": status,
+        "fresh": fresh,
+        "age_seconds": round(age, 3) if age is not None else None,
+        "max_age_seconds": round(limit, 3) if limit is not None else None,
+        "source": str(source or ""),
+        "timestamp": str(timestamp or ""),
+        "state": str(state or ""),
+    }
+
+
 def _effective_entry_score_threshold(settings: dict[str, Any], market_context: dict[str, Any] | None = None) -> float:
     if simple_ohlcv_entry_enabled(settings):
         return simple_ohlcv_threshold(settings)
@@ -649,3 +828,12 @@ def _number(value: Any, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _optional_number(value: Any) -> float | None:
+    if value in ("", None):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

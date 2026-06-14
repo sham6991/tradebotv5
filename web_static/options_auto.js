@@ -941,6 +941,8 @@ function renderDashboard() {
   const plan = result.trade_plan || {};
   const watchdog = result.watchdog || {};
   const health = watchdog || {};
+  const explainability = result.explainability || result.decision_snapshot?.explainability || {};
+  const freshness = result.freshness || result.decision_snapshot?.freshness || {};
 
   setBadge("#oa-dashboard-cue-badge", cue.cue || "Waiting", cue.recommended_side === "WAIT" ? "yellow" : cue.cue ? "blue" : "grey");
   setText("#oa-cue", cue.cue || "-");
@@ -992,6 +994,9 @@ function renderDashboard() {
     row("Risk Reward", rr),
     row("Trade Score", selection.score !== undefined ? score(selection.score) : "-"),
     row("Governor", result.governor?.state || "-"),
+    row("Primary Stage", explainability.primary_block_stage || result.governor?.primary_block_stage || result.governor?.state || "-"),
+    row("Primary Blocker", explainability.primary_blocker || result.governor?.primary_blocker || "-"),
+    row("Freshness", freshnessStatusText(freshness)),
     row("No Trade Reason", noTradeReason(result)),
     row("Discipline Score", result.discipline?.discipline_score !== undefined ? score(result.discipline.discipline_score) : "-"),
     row("Data Quality", result.data_quality?.allowed ? "PASS" : "WAIT"),
@@ -1151,6 +1156,7 @@ function renderDataSourcePanel(result = {}) {
   const source = result.data_source || state.dataSource || "UNKNOWN";
   const demo = source === "DEBUG" || source === "DEMO" || Boolean(result.demo_data);
   const health = result.options_data_health || {};
+  const freshness = result.freshness || result.decision_snapshot?.freshness || {};
   const scan = result.live_scan || state.status.live_scan || {};
   const cache = result.instrument_cache || state.status.instrument_cache || {};
   const exchanges = cache.exchanges || {};
@@ -1175,6 +1181,8 @@ function renderDataSourcePanel(result = {}) {
     metric("Data Mode", result.data_mode || health.data_mode || "-"),
     metric("Quote Age", `${text(result.quote_age_seconds ?? $("#oa-quote-age")?.value, "-")} sec`),
     metric("Stale Threshold", `${text((result.settings || state.status.settings || state.defaults.settings || {}).quote_stale_seconds, 3)} sec`),
+    metric("Freshness", freshnessStatusText(freshness)),
+    metric("Fresh Tags", freshnessTagText(freshness)),
     metric("Instrument Cache", firstCache.source || "-"),
     metric("Cache File", firstCache.path || "-"),
     metric("FII/DII", (state.fiiDiiStatus.status || result.market_cue?.fii_dii_status?.status || "Not uploaded")),
@@ -1186,6 +1194,21 @@ function renderDataSourcePanel(result = {}) {
     metric("Scan Count", scan.cycle_count ?? "-"),
     metric("Next Action", result.next_action || "-"),
   ].join(""));
+}
+
+function freshnessStatusText(freshness = {}) {
+  const summary = freshness.summary || {};
+  if (!summary.status) return "-";
+  return `${summary.status} (${summary.fresh_count || 0} fresh, ${summary.stale_count || 0} stale, ${summary.unknown_count || 0} unknown)`;
+}
+
+function freshnessTagText(freshness = {}) {
+  const summary = freshness.summary || {};
+  const stale = summary.stale_tags || [];
+  const unknown = summary.unknown_tags || [];
+  if (stale.length) return `Stale: ${stale.slice(0, 3).join(", ")}`;
+  if (unknown.length) return `Unknown: ${unknown.slice(0, 3).join(", ")}`;
+  return summary.status ? "All known tags fresh" : "-";
 }
 
 function renderIndustryDiagnostics() {

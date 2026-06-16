@@ -36,6 +36,7 @@ from trade_settings_optimizer import OptimizerStopped, run_risk_settings_optimiz
 from trading_tab_optimizer import run_trading_tab_optimizer
 from ui_replay import REPLAY_FILTERS, latest_replay_database, replay_table_row
 from settings_service import DEFAULT_SETTINGS, SETTING_LABELS, SETTINGS_PROFILE_PATH
+from websocket_owner_controller import OWNER_INTRADAY, OWNER_MAIN_APP, OWNER_NONE, OWNER_OPTIONS_AUTO, WebSocketOwnerController
 from zerodha_auth import DEFAULT_REDIRECT_URL, ZerodhaAuthStore
 from zerodha_client import ZerodhaClient
 
@@ -224,6 +225,10 @@ class WebTradeBotApp:
             "trading_tab": threading.Event(),
         }
         self.market_cue = MarketCueService(kite_client_provider=self.virtual_zerodha_client)
+        self.websocket_owner_controller = WebSocketOwnerController(
+            os.path.join(runtime_dir(), "websocket_owner_state.json"),
+            active_ticker_provider=self.websocket_owner_has_active_ticker,
+        )
         self.intraday_routes = IntradayWebRoutes(self, RESULT_FOLDER)
         self.options_auto_routes = OptionsAutoWebRoutes(self, RESULT_FOLDER)
 
@@ -441,6 +446,65 @@ class WebTradeBotApp:
             "blocked": self.connection_blocked(mode),
         }
 
+    def websocket_owner_has_active_ticker(self, owner):
+        owner = str(owner or OWNER_NONE).upper()
+        wanted = {
+            OWNER_MAIN_APP: ("default",),
+            OWNER_OPTIONS_AUTO: ("options_auto",),
+            OWNER_INTRADAY: ("intraday",),
+        }.get(owner, ())
+        if not wanted:
+            return False
+        for client in self.zerodha_clients_by_mode.values():
+            if not client:
+                continue
+            if hasattr(client, "active_ticker_names"):
+                names = [str(name or "").lower() for name in client.active_ticker_names()]
+            else:
+                budget = client.websocket_connection_budget_snapshot() if hasattr(client, "websocket_connection_budget_snapshot") else {}
+                names = [str(name or "").lower() for name in budget.get("active_websocket_names") or []]
+            for name in names:
+                if any(name == prefix or name.startswith(prefix) for prefix in wanted):
+                    return True
+        return False
+
+    def websocket_owner_state(self):
+        connected = bool(self.zerodha_clients_by_mode.get("PAPER") or self.zerodha_clients_by_mode.get("LIVE"))
+        return self.websocket_owner_controller.get_state(connected)
+
+    def websocket_owner_set_preferred(self, owner):
+        return self.websocket_owner_controller.set_preferred_owner(owner)
+
+    def websocket_owner_activate_preferred(self, payload=None):
+        payload = dict(payload or {})
+        owner = str(payload.get("owner") or self.websocket_owner_controller.preferred_owner or OWNER_NONE).upper()
+        mode = self.validate_zerodha_mode(payload.get("mode") or self.current_mode or "PAPER")
+        client = self.zerodha_clients_by_mode.get(mode)
+        result = self.websocket_owner_controller.acquire_owner(
+            owner,
+            mode=mode,
+            ticker_name=str(payload.get("ticker_name") or ""),
+            tokens=payload.get("tokens") or [],
+            reason="Preferred websocket owner activated by operator.",
+            zerodha_connected=bool(client),
+        )
+        return result
+
+    def websocket_owner_stop_active(self):
+        state = self.websocket_owner_state()
+        owner = str(state.get("active_owner") or OWNER_NONE).upper()
+        if owner == OWNER_MAIN_APP:
+            self.stop()
+            return self.websocket_owner_controller.release_owner(OWNER_MAIN_APP, "Main App feed stopped by owner panel.")
+        if owner == OWNER_OPTIONS_AUTO:
+            self.options_auto_routes.service.stop_live_scan({"mode": "PAPER"})
+            self.options_auto_routes.service.stop_live_scan({"mode": "REAL"})
+            return self.websocket_owner_controller.release_owner(OWNER_OPTIONS_AUTO, "Options Auto feed stopped by owner panel.")
+        if owner == OWNER_INTRADAY:
+            self.intraday_routes.service.stop()
+            return self.websocket_owner_controller.release_owner(OWNER_INTRADAY, "Intraday feed stopped by owner panel.")
+        return self.websocket_owner_controller.release_owner(OWNER_NONE, "No active websocket owner.")
+
     def empty_network_health(self, mode):
         return {
             "mode": str(mode or "").upper(),
@@ -539,6 +603,7 @@ class WebTradeBotApp:
                 "session_summary": self.session_summary,
                 "network_health": self.network_health,
                 "recovery_status": self.recovery_status,
+                "websocket_owner_state": self.websocket_owner_state(),
                 "optimizer_progress": self.optimizer_progress,
                 "alerts": self.alerts[-50:],
                 "trades": self.trades[-100:],
@@ -581,6 +646,7 @@ class WebTradeBotApp:
             "active_orders_count": len(active_orders),
             "recent_rejected_orders": len([row for row in order_history if "REJECT" in str(row.get("status") or row.get("Order Status") or "").upper()]),
             "last_broker_reconciliation_time": live_recovery.get("checked_at") or "",
+            "websocket_owner_state": payload.get("websocket_owner_state") or {},
             "last_update": datetime.now().isoformat(timespec="seconds"),
         }
 
@@ -1125,8 +1191,9 @@ class WebTradeBotApp:
         self.live_order_history_rows = []
         self.live_trade_snapshot = {}
         self.live_health_snapshot = {}
+        self.websocket_owner_controller.force_release_if_no_active_ticker(f"{self.auth_label(mode)} disconnected.")
         self.set_status(f"{self.auth_label(mode)} disconnected")
-        return {"disconnected": True, "mode": mode}
+        return {"disconnected": True, "mode": mode, "websocket_owner_state": self.websocket_owner_state()}
 
     def finish_login(self, request_token, mode=""):
         mode = str(mode or "").upper()
@@ -1552,8 +1619,23 @@ class WebTradeBotApp:
         if mode not in {"PAPER", "LIVE"}:
             raise ValueError("Market feed can be started only from Paper or Live trading.")
         self.sync_zerodha_client_for_mode(mode)
+        owner_check = self.websocket_owner_controller.can_start_owner(
+            OWNER_MAIN_APP,
+            mode,
+            zerodha_connected=bool(self.executor.zerodha),
+        )
+        if not owner_check.get("allowed"):
+            raise PermissionError((owner_check.get("blockers") or ["Main App websocket owner check blocked feed start."])[0])
         token_map = self.token_map_from_payload(payload)
         self.current_token_map = token_map
+        self.websocket_owner_controller.acquire_owner(
+            OWNER_MAIN_APP,
+            mode=mode,
+            ticker_name="default",
+            tokens=list(token_map.keys()),
+            reason="Main App market feed starting.",
+            zerodha_connected=bool(self.executor.zerodha),
+        )
         self.executor.start_market_feed(
             list(token_map.keys()),
             on_ticks=self.on_ticks,
@@ -1572,6 +1654,21 @@ class WebTradeBotApp:
             self.live_start_mode = mode
         try:
             prepared = self.prepare_live_start(mode, payload)
+            owner_check = self.websocket_owner_controller.can_start_owner(
+                OWNER_MAIN_APP,
+                mode,
+                zerodha_connected=bool(self.executor.zerodha),
+            )
+            if not owner_check.get("allowed"):
+                raise PermissionError((owner_check.get("blockers") or ["Main App websocket owner check blocked live start."])[0])
+            self.websocket_owner_controller.acquire_owner(
+                OWNER_MAIN_APP,
+                mode=mode,
+                ticker_name="default",
+                tokens=list((prepared.get("token_map") or {}).keys()),
+                reason="Main App live trading feed starting.",
+                zerodha_connected=bool(self.executor.zerodha),
+            )
         except Exception:
             self.clear_live_start_mode(mode)
             raise
@@ -1715,6 +1812,7 @@ class WebTradeBotApp:
                 self.session_summary["session_status"] = "Idle"
                 self.session_summary["session_id"] = ""
                 self.session_summary["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.websocket_owner_controller.release_owner(OWNER_MAIN_APP, f"Main App live start failed: {exc}")
             self.set_status(f"Live start failed: {exc}")
         finally:
             self.clear_live_start_mode(mode)
@@ -1851,6 +1949,8 @@ class WebTradeBotApp:
 
     def stop(self):
         self.executor.stop()
+        if self.websocket_owner_controller.active_owner == OWNER_MAIN_APP:
+            self.websocket_owner_controller.release_owner(OWNER_MAIN_APP, "Main App live session and feed stopped.")
         with self.lock:
             self.live_start_mode = ""
             self.session_summary["session_status"] = "Idle"
@@ -2024,6 +2124,8 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.send_json(self.app_state.status_summary_payload())
         if path == "/api/status":
             return self.send_json(self.app_state.status_payload())
+        if path == "/api/websocket-owner/status":
+            return self.send_json(self.app_state.websocket_owner_state())
         if path == "/api/candles":
             params = parse_qs(parsed.query)
             name = (params.get("name") or ["NIFTY"])[0]
@@ -2109,6 +2211,15 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/network/health":
             mode = str(payload.get("mode") or "PAPER").upper()
             return self.send_json(self.app_state.run_network_health_check(mode))
+        if path == "/api/websocket-owner/preferred":
+            return self.send_json(self.app_state.websocket_owner_set_preferred(payload.get("owner")))
+        if path == "/api/websocket-owner/activate":
+            return self.send_json(self.app_state.websocket_owner_activate_preferred(payload))
+        if path == "/api/websocket-owner/stop":
+            return self.send_json(self.app_state.websocket_owner_stop_active())
+        if path == "/api/websocket-owner/release":
+            owner = str(payload.get("owner") or OWNER_NONE).upper()
+            return self.send_json(self.app_state.websocket_owner_controller.release_owner(owner, "Owner released by operator."))
         if path == "/api/recovery/status":
             mode = str(payload.get("mode") or "PAPER").upper()
             return self.send_json(self.app_state.run_recovery_check(mode))

@@ -6,6 +6,7 @@ from typing import Any
 from options_auto.constants import SIDE_CE, SIDE_PE, SIDE_WAIT
 from options_auto.indicators.option_metrics import liquidity_components, moneyness, premium_affordability_score, premium_momentum_metrics
 from options_auto.indicators.technicals import bid_ask_spread_pct, market_depth_imbalance
+from options_auto.data.quote_identity_resolver import QuoteIdentityResolver
 from options_auto.intelligence.simple_ohlcv_entry import score_simple_ohlcv_entry, simple_ohlcv_entry_enabled, simple_ohlcv_threshold
 from options_auto.intelligence.trade_score_engine import TradeScoreEngine
 
@@ -31,6 +32,7 @@ class StrikeSelection:
 class StrikeSelector:
     def __init__(self, score_engine: TradeScoreEngine | None = None) -> None:
         self.score_engine = score_engine or TradeScoreEngine()
+        self.quote_resolver = QuoteIdentityResolver()
 
     def select(
         self,
@@ -62,6 +64,7 @@ class StrikeSelector:
                 continue
             quote = self._quote_for(instrument, quotes)
             candidate = self._candidate(instrument, quote, spot, side, available, context, settings)
+            candidate["quote_resolution"] = self.quote_resolver.resolve(side, instrument, quotes)
             blockers = self._candidate_blockers(candidate, settings)
             candidate["blockers"] = blockers
             if not blockers:
@@ -125,7 +128,8 @@ class StrikeSelector:
             "exchange_timestamp": quote.get("exchange_timestamp"),
             "quote_key": quote.get("quote_key"),
             "quote_source": quote.get("quote_source") or quote.get("source"),
-            "depth_present": bool(quote.get("depth_present") or (float(bid or 0) > 0 and float(ask or 0) > 0)),
+            "depth_health": dict(quote.get("depth_health") or {}),
+            "depth_present": bool(quote.get("depth_present")),
             "bid_present": bool(quote.get("bid_present") or float(bid or 0) > 0),
             "ask_present": bool(quote.get("ask_present") or float(ask or 0) > 0),
             "total_depth": total_depth,
@@ -215,12 +219,5 @@ class StrikeSelector:
         return blockers
 
     def _quote_for(self, instrument: dict[str, Any], quotes: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        keys = [
-            str(instrument.get("instrument_token") or ""),
-            str(instrument.get("token") or ""),
-            str(instrument.get("tradingsymbol") or "").upper(),
-        ]
-        for key in keys:
-            if key and key in quotes:
-                return dict(quotes[key] or {})
-        return {}
+        role = str(instrument.get("instrument_type") or instrument.get("option_type") or "").upper()
+        return self.quote_resolver.quote_for(role, instrument, quotes)

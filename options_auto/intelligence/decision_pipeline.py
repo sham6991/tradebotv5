@@ -21,6 +21,7 @@ from options_auto.intelligence.options_greeks_risk_engine import OptionsGreeksRi
 from options_auto.intelligence.professional_discipline import ProfessionalDisciplineEngine
 from options_auto.intelligence.regime_classifier import RegimeClassifier
 from options_auto.intelligence.simple_ohlcv_entry import resolve_entry_dependency_mode, resolve_simple_ohlcv_side, simple_ohlcv_entry_enabled, simple_ohlcv_threshold
+from options_auto.intelligence.decision_model_policy import decision_model, entry_logic_policy, profile_policy
 from options_auto.intelligence.strike_selector import StrikeSelector
 from options_auto.intelligence.trade_candidate_validator import TradeCandidateValidator
 
@@ -53,6 +54,8 @@ def evaluate_options_auto_decision(
     market_cue = MarketCueEngine().evaluate(cue_payload, phase=cue_payload.get("phase") or cue_payload.get("market_phase") or cue_payload.get("cue_phase") or "")
     regime = RegimeClassifier().classify(index_features, market_cue.to_dict())
     entry_dependency_mode = resolve_entry_dependency_mode(settings)
+    entry_policy = entry_logic_policy(settings)
+    profile = profile_policy(settings)
     simple_mode = simple_ohlcv_entry_enabled(settings)
     explicit_side = _explicit_side(cue_payload)
     selected_side, selected_side_source = _selected_side_with_source(cue_payload, market_cue.to_dict(), regime.to_dict())
@@ -317,6 +320,16 @@ def evaluate_options_auto_decision(
         "selection": selection.to_dict(),
         "trade_score": trade_score,
         "entry_dependency_mode": entry_dependency_mode,
+        "decision_model": decision_model(
+            settings,
+            data_readiness_state="READY" if not blockers else "BLOCKED",
+            execution_safety_state="REAL_FINAL_VALIDATION_REQUIRED" if mode == MODE_REAL else "PAPER_SAFE",
+            final_decision="ALLOW" if allowed else "WAIT",
+            primary_blocker=(blockers[0] if blockers else ""),
+            primary_blocker_stage=(governor.get("primary_block_stage") if isinstance(governor, dict) else ""),
+        ),
+        "entry_logic_policy": entry_policy,
+        "profile_policy": profile,
         "simple_ohlcv_side": simple_side,
         "data_quality": data_quality,
         "theta_premium_risk": theta_premium_risk,

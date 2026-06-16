@@ -61,7 +61,11 @@ class LowLatencyDecisionEngine:
         if plan_age > max_age:
             blockers.append("Ready trade plan expired.")
 
-        freshness = evaluate_quote_freshness(latest_quote, settings, now_epoch=now_epoch)
+        freshness_settings = dict(settings)
+        final_quote_limit = freshness_settings.get("final_validation_quote_stale_seconds")
+        if final_quote_limit not in ("", None):
+            freshness_settings["quote_stale_seconds"] = final_quote_limit
+        freshness = evaluate_quote_freshness(latest_quote, freshness_settings, now_epoch=now_epoch)
         quote_age = freshness.age_seconds
         blockers.extend(freshness.blockers)
         bid = _quote_bid(latest_quote)
@@ -121,7 +125,7 @@ class LowLatencyDecisionEngine:
         latency_ms = self.performance_monitor.elapsed_ms(started)
         event = self.performance_monitor.record_latency("final_validation", latency_ms, {"side": side, "symbol": (plan.get("contract") or {}).get("tradingsymbol")})
         warnings.extend(event.get("warnings") or [])
-        if quote_age is not None and quote_age + latency_ms / 1000.0 > _number(settings.get("quote_stale_seconds"), 3.0):
+        if quote_age is not None and quote_age + latency_ms / 1000.0 > _number(freshness_settings.get("quote_stale_seconds"), 3.0):
             blockers.append("Quote became stale during validation.")
         blockers = list(dict.fromkeys(blockers))
         return {

@@ -44,6 +44,7 @@ from options_auto.execution.real_execution_controller import RealExecutionContro
 from options_auto.data.fii_dii_loader import fii_dii_status_from_upload, parse_fii_dii_csv_text
 from options_auto.intelligence.adaptive_risk_engine import PositionSizer, RiskEngine
 from options_auto.intelligence.decision_pipeline import evaluate_options_auto_decision
+from options_auto.intelligence.decision_model_policy import decision_model, entry_logic_policy, profile_policy
 from options_auto.intelligence.entry_timing_engine import EntryTimingEngine
 from options_auto.intelligence.exit_manager import ExitManager, build_long_option_trade_plan
 from options_auto.intelligence.feature_builder import build_index_features
@@ -65,6 +66,7 @@ from options_auto.shadow_mode import ShadowModeEngine
 from options_auto.telegram_safety import TelegramSafety
 from web_core.latency_tracker import LatencyTracker
 from web_core.path_safety import safe_user_path
+from websocket_owner_controller import OWNER_OPTIONS_AUTO
 
 
 class OptionsAutoTerminalService:
@@ -129,6 +131,7 @@ class OptionsAutoTerminalService:
         self.index_ticks: list[dict[str, Any]] = []
         self.live_index_candles = LiveIndexCandleStore()
         self.options_live_feed = OptionsLiveFeed()
+        self.websocket_owner_controller = None
         self._quote_fallback_last_attempt_epoch = 0.0
         self._quote_fallback_last_failure_epoch = 0.0
         self._quote_fallback_last_result: dict[str, Any] = {}
@@ -222,6 +225,10 @@ class OptionsAutoTerminalService:
                     "enabled": bool(self.settings.get("incremental_feature_cache_enabled", True)),
                 },
                 "api_budget": self._api_budget_snapshot_locked(),
+                "decision_model": self._decision_model_snapshot_locked(),
+                "profile_policy": profile_policy(self.settings),
+                "entry_logic_policy": entry_logic_policy(self.settings),
+                "websocket_owner_state": self.websocket_owner_controller.get_state(bool(self.kite_client_provider("PAPER") or self.kite_client_provider("LIVE"))) if self.websocket_owner_controller is not None else {},
             }
             self._record_latency_started("options_auto.status_full", start)
             payload["latency"] = self.latency_snapshot()
@@ -359,10 +366,29 @@ class OptionsAutoTerminalService:
                     "enabled": bool(self.settings.get("incremental_feature_cache_enabled", True)),
                 },
                 "api_budget": self._api_budget_snapshot_locked(),
+                "decision_model": self._decision_model_snapshot_locked(),
+                "profile_policy": profile_policy(self.settings),
+                "entry_logic_policy": entry_logic_policy(self.settings),
+                "websocket_owner_state": self.websocket_owner_controller.get_state(bool(self.kite_client_provider("PAPER") or self.kite_client_provider("LIVE"))) if self.websocket_owner_controller is not None else {},
             }
             self._record_latency_started("options_auto.ui_summary", start)
             payload["latency"] = self.latency_snapshot()
             return payload
+
+    def _decision_model_snapshot_locked(self) -> dict[str, Any]:
+        last = dict(self.session.last_decision or {})
+        options_health = dict(last.get("options_data_health") or {})
+        blocker = options_health.get("final_blocker") or last.get("final_blocker") or (last.get("blockers") or [""])[0]
+        readiness = options_health.get("data_readiness_state") or options_health.get("recovery_state") or ("READY" if options_health.get("entry_data_ready") else "WAITING_FOR_FIRST_TICK")
+        safety = "KILL_SWITCHED" if bool((self.real_controller.snapshot() or {}).get("safe_mode")) else "REAL_LOCKED" if self.settings.get("mode") == MODE_REAL and not self.settings.get("real_orders_enabled") else "PAPER_SAFE"
+        return decision_model(
+            self.settings,
+            data_readiness_state=readiness,
+            execution_safety_state=safety,
+            final_decision=str(last.get("decision") or last.get("action") or "WAIT").upper(),
+            primary_blocker=blocker,
+            primary_blocker_stage=options_health.get("final_block_stage") or last.get("blocker_stage") or "",
+        )
 
     def result_root(self) -> str:
         return os.path.join(self.base_result_folder, "options_auto")
@@ -619,6 +645,20 @@ class OptionsAutoTerminalService:
             by_name[name] = by_name.get(name, 0) + 1
             if not (item or {}).get("ok"):
                 failures += 1
+        
+        connection_budget = {}
+        mode = self._live_scan_mode or self.mode_guard.mode or self.settings.get("mode")
+        client_mode = "LIVE" if mode == MODE_REAL else "PAPER"
+        client = self.kite_client_provider(client_mode) or self.kite_client_provider(mode)
+        if client:
+            connection_budget = self._websocket_connection_budget_locked(client, mode)
+        conflict = self._active_feed_conflict_locked(client, mode) if client else {"blocked": False}
+        feed_snapshot = self.options_live_feed.snapshot(self.settings)
+        feed_health = dict(feed_snapshot.get("health") or {})
+        last_decision = dict(self.session.last_decision or {})
+        options_data_health = dict(last_decision.get("options_data_health") or {})
+        recovery_state = options_data_health.get("recovery_state") or ("PAUSED_FOR_DATA" if feed_health.get("feed_stale") else "HEALTHY" if feed_health.get("all_expected_roles_fresh") else "WAITING_FOR_DATA")
+        
         return {
             "real_api_calls_recent": by_name,
             "real_api_recent_failures": failures,
@@ -627,10 +667,19 @@ class OptionsAutoTerminalService:
             "data_mode": ((self.session.last_decision or {}).get("data_mode") or self.options_live_feed.snapshot(self.settings).get("data_mode")),
             "websocket_connected": bool(self.options_live_feed.websocket_connected),
             "quote_polling_fallback": bool(self.options_live_feed.quote_polling_fallback),
+            "websocket_connection_budget": connection_budget,
+            "active_feed_conflict": conflict,
+            "websocket_owner_state": self.websocket_owner_controller.get_state(bool(client)) if self.websocket_owner_controller is not None else {},
+            "recovery_state": recovery_state,
+            "entry_data_ready": bool(options_data_health.get("entry_data_ready") or feed_health.get("all_expected_roles_fresh")),
+            "pause_new_entries": bool(options_data_health.get("pause_new_entries") or conflict.get("blocked") or feed_health.get("feed_stale")),
+            "final_blocker": options_data_health.get("final_blocker") or last_decision.get("final_blocker") or (last_decision.get("blockers") or [""])[0],
+            "data_blockers": options_data_health.get("data_blockers") or last_decision.get("data_blockers") or [],
             "real_broker_reconcile_poll_seconds": self.settings.get("real_broker_reconcile_poll_seconds"),
             "real_entry_poll_seconds": self.settings.get("real_entry_poll_seconds"),
             "real_order_update_source": _real_order_update_source(self.settings),
         }
+
 
     def configure(self, payload: dict[str, Any] | None = None, kite_profile: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
@@ -877,6 +926,37 @@ class OptionsAutoTerminalService:
             return {}
         client_mode = "LIVE" if mode == MODE_REAL else "PAPER"
         client = self.kite_client_provider(client_mode) or self.kite_client_provider(mode)
+        conflict = self._active_feed_conflict_locked(client, mode)
+        if conflict.get("blocked"):
+            return {
+                "blocked": True,
+                "blockers": [conflict["message"]],
+                "warnings": [],
+                "next_action": conflict.get("next_action") or "Stop the other Zerodha live feed before starting Options Auto.",
+                "diagnostics": {
+                    "data_source": "zerodha_live_feed",
+                    "data_mode": "ACTIVE_FEED_CONFLICT",
+                    "recovery_state": "BLOCKED_BY_ACTIVE_FEED",
+                    "entry_data_ready": False,
+                    "pause_new_entries": True,
+                    "active_feed_conflict": conflict,
+                    "data_blockers": [{
+                        "category": "ACTIVE_FEED_CONFLICT",
+                        "stage": "START",
+                        "role": "OWNER",
+                        "symbol": conflict.get("owner"),
+                        "source_attempted": "websocket",
+                        "next_action": conflict.get("next_action"),
+                        "message": conflict["message"],
+                    }],
+                    "options_data_health": {
+                        "recovery_state": "BLOCKED_BY_ACTIVE_FEED",
+                        "entry_data_ready": False,
+                        "pause_new_entries": True,
+                        "active_feed_conflict": conflict,
+                    },
+                },
+            }
         underlying = str(settings.get("underlying") or payload.get("underlying") or "NIFTY").upper()
         spot = self.options_live_feed.index_spot(underlying, mode, settings) if bool(settings.get("options_websocket_primary_enabled", True)) else {}
         if not spot:
@@ -932,6 +1012,180 @@ class OptionsAutoTerminalService:
             source=source,
             base_diagnostics=base_diagnostics,
         )
+
+    def _websocket_connection_budget_locked(self, client: Any, mode: str = "") -> dict[str, Any]:
+        if client and hasattr(client, "websocket_connection_budget_snapshot"):
+            try:
+                return dict(client.websocket_connection_budget_snapshot() or {})
+            except Exception as exc:
+                return {"error": str(exc)}
+        return {}
+
+    def _active_feed_conflict_locked(self, client: Any, mode: str = "") -> dict[str, Any]:
+        if self.websocket_owner_controller is not None:
+            owner_check = self.websocket_owner_controller.can_start_owner(
+                OWNER_OPTIONS_AUTO,
+                "LIVE" if str(mode).upper() == MODE_REAL else "PAPER",
+                zerodha_connected=bool(client),
+            )
+            if not owner_check.get("allowed"):
+                state = self.websocket_owner_controller.get_state(bool(client))
+                blocker = (owner_check.get("blockers") or [self.websocket_owner_controller.build_blocker_for(OWNER_OPTIONS_AUTO)])[0]
+                active_owner = state.get("active_owner") or ""
+                return {
+                    "blocked": True,
+                    "owner": active_owner,
+                    "message": blocker or "Options Auto cannot start websocket because another module owns the Zerodha feed.",
+                    "next_action": state.get("next_action") or "Stop the active websocket owner before starting Options Auto.",
+                    "websocket_owner_state": state,
+                    "websocket_connection_budget": self._websocket_connection_budget_locked(client, mode),
+                    "active_websocket_names": (self._websocket_connection_budget_locked(client, mode).get("active_websocket_names") if client else []),
+                }
+        budget = self._websocket_connection_budget_locked(client, mode)
+        names = [str(name or "") for name in budget.get("active_websocket_names") or []]
+        lower_names = [name.lower() for name in names]
+        if "default" in lower_names:
+            return {
+                "blocked": True,
+                "owner": "MAIN_APP",
+                "message": "Options Auto cannot start because Main App is currently using the Zerodha live feed. Stop Main App live feed first.",
+                "next_action": "Stop Main App live feed first.",
+                "active_websocket_names": names,
+                "websocket_connection_budget": budget,
+            }
+        intraday_names = [name for name in names if name.lower().startswith("intraday")]
+        if intraday_names:
+            return {
+                "blocked": True,
+                "owner": "INTRADAY",
+                "message": "Options Auto cannot start because Intraday is currently using the Zerodha live feed. Stop Intraday first.",
+                "next_action": "Stop Intraday first.",
+                "active_websocket_names": names,
+                "websocket_connection_budget": budget,
+            }
+        return {
+            "blocked": False,
+            "owner": "",
+            "active_websocket_names": names,
+            "websocket_connection_budget": budget,
+        }
+
+    def _blocked_active_feed_start_locked(self, mode: str, conflict: dict[str, Any]) -> dict[str, Any]:
+        blocker = conflict.get("message") or "Options Auto cannot start because another Zerodha live feed is active."
+        self.session.status = "BLOCKED_BY_ACTIVE_FEED"
+        self.session.record_rejection(blocker, {"mode": mode, "stage": "ACTIVE_FEED", "conflict": conflict})
+        self._live_scan_last_error = blocker
+        diagnostics = {
+            "data_mode": "ACTIVE_FEED_CONFLICT",
+            "recovery_state": "BLOCKED_BY_ACTIVE_FEED",
+            "entry_data_ready": False,
+            "pause_new_entries": True,
+            "active_feed_conflict": dict(conflict or {}),
+            "websocket_connection_budget": dict(conflict.get("websocket_connection_budget") or {}),
+            "data_blockers": [{
+                "category": "ACTIVE_FEED_CONFLICT",
+                "stage": "START",
+                "role": "OWNER",
+                "symbol": conflict.get("owner") or "",
+                "source_attempted": "websocket",
+                "next_action": conflict.get("next_action") or "",
+                "message": blocker,
+            }],
+        }
+        return {
+            "allowed": False,
+            "mode": mode,
+            "blockers": [blocker],
+            "warnings": [],
+            "message": blocker,
+            "next_action": conflict.get("next_action") or "",
+            "session": self.session.to_dict(),
+            "paper_account": self.paper_broker.snapshot(),
+            "paper_lifecycle": self.paper_lifecycle.snapshot(),
+            "contract_lock": self.locked_contract_manager.snapshot(),
+            "data_quality": {"allowed": False, "state": "ACTIVE_FEED_CONFLICT", "blockers": [blocker], "warnings": []},
+            "governor": {"allowed": False, "state": "ACTIVE_FEED_CONFLICT", "blockers": [blocker], "warnings": []},
+            **diagnostics,
+        }
+
+    def _quote_data_blockers(
+        self,
+        underlying: str,
+        contracts: list[dict[str, Any]],
+        quote_result: dict[str, Any],
+        settings: dict[str, Any],
+    ) -> list[str]:
+        quotes = dict(quote_result.get("quotes") or {})
+        missing_keys = set(str(key or "") for key in quote_result.get("missing_quote_keys") or [])
+        max_age = _number(settings.get("max_quote_age_seconds"), settings.get("quote_stale_seconds") or 3)
+        blockers: list[str] = []
+        for contract in contracts or []:
+            role = str(contract.get("instrument_type") or contract.get("option_type") or "").upper()
+            symbol = str(contract.get("tradingsymbol") or "").upper()
+            quote_key = quote_key_for(contract)
+            quote = self._quote_for_contract(contract, quotes)
+            label = role or ("CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else "OPTION")
+            if not quote:
+                returned_note = "snapshot fallback failed: quote key not returned" if quote_key in missing_keys else "websocket quote missing"
+                blockers.append(f"{label} quote missing: {quote_key or symbol or 'locked contract'} {returned_note}.")
+                continue
+            age = quote.get("age_seconds")
+            age_value = _number(age, -1)
+            if age in ("", None) or age_value < 0:
+                blockers.append(f"{label} quote age unknown: {quote_key or symbol}; source {quote.get('quote_source') or quote.get('source') or 'unknown'}.")
+            elif age_value > max_age:
+                blockers.append(
+                    f"{label} quote stale: {quote_key or symbol} {quote.get('quote_source') or quote.get('source') or 'quote'} age {age_value:.1f}s > max {max_age:.1f}s."
+                )
+            elif _number(quote.get("ltp"), quote.get("last_price")) <= 0:
+                blockers.append(f"{label} quote invalid: {quote_key or symbol} LTP is missing or zero.")
+        if quote_result.get("errors"):
+            blockers.extend(str(error) for error in quote_result.get("errors") or [])
+        return list(dict.fromkeys(blockers))
+
+    def _with_data_blocker_diagnostics(self, diagnostics: dict[str, Any], blockers: list[str], recovery_state: str) -> dict[str, Any]:
+        result = dict(diagnostics or {})
+        blocker_rows = []
+        for blocker in blockers or []:
+            text = str(blocker or "")
+            role = "CE" if text.upper().startswith("CE ") else "PE" if text.upper().startswith("PE ") else "API" if "API" in text.upper() else "DATA"
+            category = "SNAPSHOT_FALLBACK_FAILED" if "snapshot" in text.lower() or "quote key not returned" in text.lower() else "STALE_WEBSOCKET" if "stale" in text.lower() else "PARTIAL_TICKS"
+            if "rate" in text.lower() and "limit" in text.lower():
+                category = "API_BACKOFF"
+            blocker_rows.append({
+                "category": category,
+                "stage": "DATA",
+                "role": role,
+                "symbol": self._symbol_from_blocker(text),
+                "source_attempted": "websocket+snapshot" if "snapshot" in text.lower() else "websocket",
+                "next_action": result.get("next_action") or "wait",
+                "message": text,
+            })
+        options_health = dict(result.get("options_data_health") or {})
+        options_health.update({
+            "recovery_state": recovery_state,
+            "entry_data_ready": False,
+            "pause_new_entries": True,
+            "data_blockers": blocker_rows,
+            "final_blocker": (blockers or [""])[0],
+            "final_block_stage": "DATA",
+        })
+        result.update({
+            "recovery_state": recovery_state,
+            "entry_data_ready": False,
+            "pause_new_entries": True,
+            "data_blockers": blocker_rows,
+            "final_blocker": (blockers or [""])[0],
+            "final_block_stage": "DATA",
+            "options_data_health": options_health,
+        })
+        return result
+
+    def _symbol_from_blocker(self, text: str) -> str:
+        for part in str(text or "").replace(";", " ").split():
+            if ":" in part and not part.endswith(":"):
+                return part.strip(".,")
+        return ""
 
     def _prewarm_options_reference_data_locked(self, mode: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         if not bool(self.settings.get("prewarm_reference_data_on_start", True)):
@@ -1090,7 +1344,7 @@ class OptionsAutoTerminalService:
             index_token = None
         self.options_live_feed.quote_polling_fallback = bool(settings.get("quote_polling_fallback_enabled", True))
         self.options_live_feed.subscribe_locked_contracts(index_token, contracts[0], contracts[1])
-        self._ensure_options_websocket_locked(client, mode, underlying, index_token, contracts, settings)
+        websocket_start = self._ensure_options_websocket_locked(client, mode, underlying, index_token, contracts, settings)
         quote_result = self._locked_contract_quote_result(client, contracts, settings, source)
         valid_quote_count = int(quote_result.get("valid_quote_count") or 0)
         locked_symbols = [contract.get("tradingsymbol") for contract in contracts if contract.get("tradingsymbol")]
@@ -1115,6 +1369,8 @@ class OptionsAutoTerminalService:
             "quote_errors": quote_result.get("errors") or [],
             "quote_source": quote_result.get("quote_source"),
             "data_mode": quote_result.get("data_mode") or diagnostics.get("data_mode"),
+            "websocket_start": websocket_start,
+            "websocket_connection_budget": websocket_start.get("connection_budget") or self._websocket_connection_budget_locked(client, mode),
             "valid_quote_count": valid_quote_count,
             "requested_quote_keys": quote_result.get("requested_quote_keys") or [],
             "options_data_health": {
@@ -1129,23 +1385,40 @@ class OptionsAutoTerminalService:
                 "missing_quote_keys": quote_result.get("missing_quote_keys") or [],
                 "quote_errors": quote_result.get("errors") or [],
                 "data_mode": quote_result.get("data_mode"),
+                "websocket_connected": bool(self.options_live_feed.websocket_connected),
+                "websocket_subscribed": bool(self._options_ws_tokens),
+                "first_tick_received": bool((self.options_live_feed.snapshot(settings).get("health") or {}).get("fresh_roles")),
+                "entry_data_ready": False,
+                "recovery_state": "PAUSED_FOR_DATA",
             },
         })
         if quote_result.get("errors") and settings.get("quote_error_pause_new_entries", True):
+            blockers = self._quote_data_blockers(underlying, contracts, quote_result, settings) or list(quote_result.get("errors") or [])
             return {
                 "blocked": True,
-                "blockers": quote_result.get("errors") or ["Zerodha quote snapshot failed."],
+                "blockers": blockers,
                 "warnings": warnings + list(quote_result.get("warnings") or []),
                 "next_action": "Keep Zerodha connected; the scanner will retry quote snapshots.",
-                "diagnostics": diagnostics,
+                "diagnostics": self._with_data_blocker_diagnostics(diagnostics, blockers, "API_RATE_LIMITED" if quote_result.get("errors") else "PAUSED_FOR_DATA"),
             }
         if valid_quote_count <= 0:
+            blockers = self._quote_data_blockers(underlying, contracts, quote_result, settings)
             return {
                 "blocked": True,
-                "blockers": [f"No valid {underlying} option quotes returned from {'Real Zerodha' if mode == MODE_REAL else 'Paper Data Zerodha'} for locked contracts."],
+                "blockers": blockers or [f"No valid {underlying} option quotes returned from {'Real Zerodha' if mode == MODE_REAL else 'Paper Data Zerodha'} for locked contracts."],
                 "warnings": warnings + list(quote_result.get("warnings") or []),
                 "next_action": "Check locked contract quote permissions, selected expiry, and Zerodha quote availability.",
-                "diagnostics": diagnostics,
+                "diagnostics": self._with_data_blocker_diagnostics(diagnostics, blockers, "PAUSED_FOR_DATA"),
+            }
+        expected_quote_count = len([contract for contract in contracts if contract.get("tradingsymbol")])
+        if expected_quote_count and valid_quote_count < expected_quote_count and settings.get("quote_missing_pause_new_entries", True):
+            blockers = self._quote_data_blockers(underlying, contracts, quote_result, settings)
+            return {
+                "blocked": True,
+                "blockers": blockers,
+                "warnings": warnings + list(quote_result.get("warnings") or []),
+                "next_action": "Wait for both locked CE/PE quotes or refresh the locked contracts if the quote key is expired.",
+                "diagnostics": self._with_data_blocker_diagnostics(diagnostics, blockers, "PAUSED_FOR_DATA"),
             }
         return {
             "payload": {
@@ -1607,6 +1880,11 @@ class OptionsAutoTerminalService:
     def start_paper(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             payload = {**dict(payload or {}), "mode": MODE_PAPER}
+            client = self.kite_client_provider("PAPER") or self.kite_client_provider(MODE_PAPER)
+            conflict = self._active_feed_conflict_locked(client, MODE_PAPER)
+            if conflict.get("blocked"):
+                blocked = self._blocked_active_feed_start_locked(MODE_PAPER, conflict)
+                return {**blocked, "live_scan": self._live_scan_state_locked()}
             self._prewarm_options_reference_data_locked(MODE_PAPER, payload)
             result = self._evaluate_locked(payload)
             self.mode_guard.assert_paper_allowed()
@@ -1658,6 +1936,9 @@ class OptionsAutoTerminalService:
             client = self.kite_client_provider("LIVE")
             if not client:
                 return self._blocked_real_order(["Real Money Zerodha is not connected."])
+            conflict = self._active_feed_conflict_locked(client, MODE_REAL)
+            if conflict.get("blocked"):
+                return {**self._blocked_active_feed_start_locked(MODE_REAL, conflict), "live_scan": self._live_scan_state_locked()}
             self._prewarm_options_reference_data_locked(MODE_REAL, payload)
             settings = {
                 **self.settings,
@@ -2265,6 +2546,12 @@ class OptionsAutoTerminalService:
             return {"started": False, "reason": "Options Auto websocket primary is disabled."}
         if not client:
             return {"started": False, "reason": "Zerodha client is not connected."}
+        conflict = self._active_feed_conflict_locked(client, mode)
+        if conflict.get("blocked"):
+            reason = conflict.get("message") or "Another Zerodha live feed is active."
+            self._options_ws_last_error = reason
+            self.options_live_feed.health.mark_reconnecting(reason)
+            return {"started": False, "reason": reason, "active_feed_conflict": conflict, "connection_budget": conflict.get("websocket_connection_budget") or {}}
         tokens = [_token_int(index_token)] + [_token_int(contract) for contract in contracts or []]
         tokens = tuple(dict.fromkeys(token for token in tokens if token > 0))
         if not tokens:
@@ -2273,6 +2560,19 @@ class OptionsAutoTerminalService:
             self._options_ws_last_error = "Options Auto websocket token count exceeds Zerodha 3000-instrument limit."
             self.options_live_feed.health.mark_reconnecting(self._options_ws_last_error)
             return {"started": False, "reason": self._options_ws_last_error}
+        
+        # Check Zerodha websocket connection budget
+        budget = None
+        if hasattr(client, "websocket_connection_budget_snapshot"):
+            budget = client.websocket_connection_budget_snapshot()
+            if budget and not budget.get("options_auto_can_start_own_websocket"):
+                # Connection limit reached and no existing options_auto ticker
+                reason = budget.get("recommendation", "Zerodha websocket connection limit reached (3 active connections).")
+                self._options_ws_last_error = reason
+                self.options_live_feed.health.mark_reconnecting(reason)
+                self.logger.log("INFO", "Options Auto websocket blocked by connection limit; quote polling fallback will be used", budget=budget)
+                return {"started": False, "reason": reason, "connection_budget": budget}
+        
         client_id = id(client)
         if self._options_ws_mode == mode and self._options_ws_client_id == client_id and self._options_ws_tokens == tokens:
             return {"started": False, "reason": "Options Auto websocket already subscribed.", "tokens": list(tokens)}
@@ -2286,6 +2586,22 @@ class OptionsAutoTerminalService:
                 symbol = str(contract.get("tradingsymbol") or "").upper()
                 roles[token] = "CE" if symbol.endswith("CE") else "PE" if symbol.endswith("PE") else str(contract.get("instrument_type") or contract.get("option_type") or "").upper()
         name = f"options_auto_{mode.lower()}"
+        owner_acquired = False
+        if self.websocket_owner_controller is not None:
+            owner_result = self.websocket_owner_controller.acquire_owner(
+                OWNER_OPTIONS_AUTO,
+                mode="LIVE" if mode == MODE_REAL else "PAPER",
+                ticker_name=name,
+                tokens=list(tokens),
+                reason="Options Auto websocket starting.",
+                zerodha_connected=bool(client),
+            )
+            if not owner_result.get("allowed"):
+                reason = (owner_result.get("blockers") or ["Options Auto websocket owner lock blocked start."])[0]
+                self._options_ws_last_error = reason
+                self.options_live_feed.health.mark_reconnecting(reason)
+                return {"started": False, "reason": reason, "websocket_owner_state": owner_result}
+            owner_acquired = True
 
         def on_ticks(ticks):
             with self._lock:
@@ -2363,6 +2679,8 @@ class OptionsAutoTerminalService:
         except Exception as exc:
             self._options_ws_last_error = str(exc)
             self.options_live_feed.health.mark_reconnecting(str(exc))
+            if owner_acquired and self.websocket_owner_controller is not None:
+                self.websocket_owner_controller.release_owner(OWNER_OPTIONS_AUTO, f"Options Auto websocket startup failed: {exc}")
             self.logger.log("WARN", "Options Auto websocket startup failed; quote polling fallback remains active", error=str(exc))
             return {"started": False, "reason": str(exc), "tokens": list(tokens)}
         self._options_ws_mode = mode
@@ -2373,6 +2691,8 @@ class OptionsAutoTerminalService:
         self._options_ws_last_error = ""
         self._options_ws_reconnect_policy = reconnect_policy
         self.options_live_feed.mark_websocket_connected(True)
+        if self.websocket_owner_controller is not None:
+            self.websocket_owner_controller.mark_owner_status(OWNER_OPTIONS_AUTO, "ACTIVE", "Options Auto websocket subscribed.")
         self.logger.log("INFO", "Options Auto websocket subscribed", mode=mode, tokens=len(tokens), underlying=underlying, reconnect_policy=reconnect_policy)
         return {"started": True, "tokens": list(tokens), "reconnect_policy": reconnect_policy}
 
@@ -2396,6 +2716,8 @@ class OptionsAutoTerminalService:
         self._options_ws_roles = {}
         self._options_ws_started_at = ""
         self._options_ws_reconnect_policy = {}
+        if self.websocket_owner_controller is not None and self.websocket_owner_controller.active_owner == OWNER_OPTIONS_AUTO:
+            self.websocket_owner_controller.release_owner(OWNER_OPTIONS_AUTO, reason or "Options Auto websocket stopped.")
 
     def _on_options_websocket_ticks_locked(self, client: Any, mode: str, underlying: str, ticks: Any) -> None:
         interval = self.settings.get("chart_interval") or "3minute"

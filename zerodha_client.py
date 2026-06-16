@@ -574,6 +574,92 @@ class ZerodhaClient:
                 pass
         tickers.clear()
 
+    def websocket_connection_budget_snapshot(self):
+        """
+        Returns diagnostic info about active websocket connections and available budget.
+        
+        Zerodha allows 3 websocket connections per API key:
+        - 1 default ticker (optional)
+        - 2 named tickers (optional)
+        
+        Returns dict with:
+        - zerodha_websocket_connection_limit: always 3
+        - active_websocket_connection_count: number of active tickers
+        - active_websocket_names: list of active ticker names ("default" or named)
+        - has_default_ticker: bool
+        - has_named_tickers: bool
+        - named_ticker_count: number of named tickers
+        - connection_budget_available: true if count < 3
+        - connection_limit_risk: true if count >= 3
+        - options_auto_can_start_own_websocket: convenience flag (not available if count >= 3 and no options_auto ticker exists)
+        - recommendation: human readable suggestion
+        """
+        names = []
+        count = 0
+        
+        # Check default ticker
+        has_default = bool(self.ticker is not None)
+        if has_default:
+            names.append("default")
+            count += 1
+        
+        # Check named tickers
+        named_tickers = getattr(self, "_named_tickers", None) or {}
+        named_count = 0
+        for ticker_name in sorted(named_tickers.keys()):
+            if named_tickers.get(ticker_name):
+                names.append(str(ticker_name))
+                count += 1
+                named_count += 1
+        
+        budget_available = count < 3
+        at_limit = count >= 3
+        
+        # Check if options_auto ticker exists
+        has_options_auto = any("options_auto" in str(name).lower() for name in names)
+        
+        recommendation = ""
+        if at_limit and not has_options_auto:
+            recommendation = "Zerodha websocket limit reached (3 active connections). Options Auto cannot start new websocket. Will use quote snapshot fallback."
+        elif at_limit and has_options_auto:
+            recommendation = "Zerodha websocket limit reached (3 active connections). Options Auto websocket is running."
+        elif count == 2:
+            recommendation = "Warning: only 1 websocket connection slot available."
+        
+        return {
+            "zerodha_websocket_connection_limit": 3,
+            "active_websocket_connection_count": count,
+            "active_websocket_names": names,
+            "has_default_ticker": has_default,
+            "has_named_tickers": bool(named_count > 0),
+            "named_ticker_count": named_count,
+            "connection_budget_available": budget_available,
+            "connection_limit_risk": at_limit,
+            "options_auto_can_start_own_websocket": budget_available or has_options_auto,
+            "recommendation": recommendation,
+        }
+
+    def websocket_budget_snapshot(self):
+        return self.websocket_connection_budget_snapshot()
+
+    def active_ticker_names(self):
+        names = []
+        if self.ticker is not None:
+            names.append("default")
+        for ticker_name, ticker in (getattr(self, "_named_tickers", None) or {}).items():
+            if ticker:
+                names.append(str(ticker_name))
+        return names
+
+    def has_ticker(self, name):
+        name = str(name or "default")
+        if name == "default":
+            return self.ticker is not None
+        return bool((getattr(self, "_named_tickers", None) or {}).get(name))
+
+    def active_ticker_count(self):
+        return len(self.active_ticker_names())
+
     def _transaction_type(self, transaction_type):
         value = str(transaction_type).upper()
         if value == "BUY":

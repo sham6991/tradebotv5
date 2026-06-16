@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .constants import MODE_REAL, SESSION_STATUS_RUNNING
 from .terminal_service import IntradayTerminalService
+from websocket_owner_controller import OWNER_INTRADAY
 
 
 class IntradayWebRoutes:
@@ -26,7 +27,7 @@ class IntradayWebRoutes:
         if path == "/api/intraday/defaults":
             return handler.send_json(self.service.defaults())
         if path == "/api/intraday/status":
-            return handler.send_json(self.service.status())
+            return handler.send_json(self._with_owner_state(self.service.status()))
         if path == "/api/intraday/ui-summary":
             return handler.send_json(self.ui_summary())
         if path == "/api/intraday/account-status":
@@ -43,10 +44,29 @@ class IntradayWebRoutes:
             return handler.send_json(self.service.upload_fii_dii(payload))
         if path == "/api/intraday/start":
             require_connection = not (self._requested_app_mode(payload) == "PAPER" and _bool((payload or {}).get("allow_simulated_fallback")))
-            blockers = self._mode_blockers(self._requested_app_mode(payload), require_connection=require_connection)
+            requested_mode = self._requested_app_mode(payload)
+            blockers = self._mode_blockers(requested_mode, require_connection=require_connection)
             if blockers:
                 raise ValueError(blockers[0])
-            return handler.send_json(self.service.start(payload))
+            client = self.app_state.zerodha_clients_by_mode.get(requested_mode)
+            owner = getattr(self.app_state, "websocket_owner_controller", None)
+            if owner is not None and bool(client):
+                owner_check = owner.acquire_owner(
+                    OWNER_INTRADAY,
+                    mode=requested_mode,
+                    ticker_name=f"intraday_{requested_mode.lower()}",
+                    tokens=[],
+                    reason="Intraday session starting.",
+                    zerodha_connected=bool(client),
+                )
+                if not owner_check.get("allowed"):
+                    raise PermissionError((owner_check.get("blockers") or ["Intraday websocket owner check blocked start."])[0])
+            try:
+                return handler.send_json(self._with_owner_state(self.service.start(payload)))
+            except Exception:
+                if owner is not None and owner.active_owner == OWNER_INTRADAY:
+                    owner.release_owner(OWNER_INTRADAY, "Intraday start failed.")
+                raise
         if path == "/api/intraday/evaluate":
             return handler.send_json(self.service.evaluate(payload))
         if path == "/api/intraday/process-orders":
@@ -63,7 +83,11 @@ class IntradayWebRoutes:
         if path == "/api/intraday/kill-switch":
             return handler.send_json(self.service.kill_switch())
         if path == "/api/intraday/stop":
-            return handler.send_json(self.service.stop())
+            result = self.service.stop()
+            owner = getattr(self.app_state, "websocket_owner_controller", None)
+            if owner is not None and owner.active_owner == OWNER_INTRADAY:
+                owner.release_owner(OWNER_INTRADAY, "Intraday session stopped.")
+            return handler.send_json(self._with_owner_state(result))
         return handler.send_json({"error": "Intraday route not found"}, status=404)
 
     def account_status(self) -> dict:
@@ -92,6 +116,7 @@ class IntradayWebRoutes:
             account = self.account_status()
             status["real_margin"] = (account.get("real") or {}).get("funds")
             status["account_status"] = account
+            status["websocket_owner_state"] = self.app_state.websocket_owner_state() if hasattr(self.app_state, "websocket_owner_state") else {}
             return status
         status = self.service.status()
         account = self.account_status()
@@ -125,7 +150,14 @@ class IntradayWebRoutes:
             "stocks": stocks,
             "latency": status.get("latency") or {},
             "engine": status.get("engine") or {},
+            "websocket_owner_state": self.app_state.websocket_owner_state() if hasattr(self.app_state, "websocket_owner_state") else {},
         }
+
+    def _with_owner_state(self, payload: dict) -> dict:
+        payload = dict(payload or {})
+        if hasattr(self.app_state, "websocket_owner_state"):
+            payload["websocket_owner_state"] = self.app_state.websocket_owner_state()
+        return payload
 
     def _requested_app_mode(self, payload: dict | str | None) -> str:
         if isinstance(payload, str):

@@ -509,6 +509,7 @@ function renderAll() {
   renderTopStatus();
   renderCockpitSafety();
   renderDashboard();
+  renderWebSocketOwnerPanel();
   renderIndustryDiagnostics();
   renderIndexTickStreams();
   renderContractLockCards();
@@ -673,6 +674,66 @@ function realPreflightResult(result = {}) {
   if (hasRealPreflightResult(runtime)) return { ...runtime, account_status: state.status.account_status || {} };
   if (hasRealPreflightResult(state.lastResult)) return state.lastResult;
   return {};
+}
+
+function renderWebSocketOwnerPanel(result = state.lastResult || state.status || {}) {
+  const owner = result.websocket_owner_state || state.status.websocket_owner_state || {};
+  const active = owner.active_owner || "NONE";
+  const preferred = owner.preferred_owner || "NONE";
+  const blocked = (owner.blockers || []).length > 0;
+  const status = owner.owner_status || "NONE";
+  setBadge("#oa-websocket-owner-badge", active === "NONE" ? preferred : active, blocked ? "red" : active === "OPTIONS_AUTO" ? "green" : active === "NONE" ? "grey" : "yellow");
+  setHtml("#oa-websocket-owner-panel", [
+    metric("Preferred", preferred),
+    metric("Active", active),
+    metric("Status", status),
+    metric("Zerodha Login", owner.zerodha_login_required ? "Required" : "Connected/Not Required"),
+    metric("Active Mode", owner.active_mode || "-"),
+    metric("Active Since", owner.active_since || "-"),
+    metric("Active Ticker", owner.active_ticker_name || "-"),
+    metric("Token Count", owner.active_token_count ?? "-"),
+    metric("Can Main App", owner.can_start_main_app ? "YES" : "NO"),
+    metric("Can Options Auto", owner.can_start_options_auto ? "YES" : "NO"),
+    metric("Can Intraday", owner.can_start_intraday ? "YES" : "NO"),
+    metric("Blocker", (owner.blockers || [])[0] || "-"),
+    metric("Next Action", owner.next_action || "-"),
+  ].join(""));
+}
+
+function initWebSocketOwnerControls() {
+  on("#oa-owner-main", "click", () => setPreferredWebsocketOwner("MAIN_APP"));
+  on("#oa-owner-options", "click", () => setPreferredWebsocketOwner("OPTIONS_AUTO"));
+  on("#oa-owner-intraday", "click", () => setPreferredWebsocketOwner("INTRADAY"));
+  on("#oa-owner-activate", "click", activatePreferredWebsocketOwner);
+  on("#oa-owner-stop", "click", stopActiveWebsocketOwner);
+}
+
+async function setPreferredWebsocketOwner(owner) {
+  try {
+    const result = await api("/api/websocket-owner/preferred", { owner });
+    await refreshUiSummaryAfterMutation({ websocket_owner_state: result });
+  } catch (error) {
+    setTabAlert("debug", error.message, "danger");
+  }
+}
+
+async function activatePreferredWebsocketOwner() {
+  try {
+    const owner = (state.status.websocket_owner_state || {}).preferred_owner || "OPTIONS_AUTO";
+    const result = await api("/api/websocket-owner/activate", { owner, mode: selectedModeFromState(state.status) });
+    await refreshUiSummaryAfterMutation({ websocket_owner_state: result });
+  } catch (error) {
+    setTabAlert("debug", error.message, "danger");
+  }
+}
+
+async function stopActiveWebsocketOwner() {
+  try {
+    const result = await api("/api/websocket-owner/stop", { mode: selectedModeFromState(state.status) });
+    await refreshUiSummaryAfterMutation({ websocket_owner_state: result }, { clearLastResult: true });
+  } catch (error) {
+    setTabAlert("debug", error.message, "danger");
+  }
 }
 
 function realApprovalFromState() {
@@ -1228,7 +1289,11 @@ function renderNewsEventSignal(signal = {}) {
 function renderDataSourcePanel(result = {}) {
   const source = result.data_source || state.dataSource || "UNKNOWN";
   const demo = source === "DEBUG" || source === "DEMO" || Boolean(result.demo_data);
-  const health = result.options_data_health || {};
+  const apiBudget = result.api_budget || state.status.api_budget || {};
+  const health = result.options_data_health || apiBudget || {};
+  const decisionModel = result.decision_model || state.status.decision_model || {};
+  const entryPolicy = result.entry_logic_policy || state.status.entry_logic_policy || {};
+  const profilePolicy = result.profile_policy || state.status.profile_policy || {};
   const freshness = result.freshness || result.decision_snapshot?.freshness || {};
   const scan = result.live_scan || state.status.live_scan || {};
   const cache = result.instrument_cache || state.status.instrument_cache || {};
@@ -1252,6 +1317,17 @@ function renderDataSourcePanel(result = {}) {
     metric("Candle Interval", result.live_index_candle_interval || "-"),
     metric("Quote Source", result.quote_source || health.quote_source || "-"),
     metric("Data Mode", result.data_mode || health.data_mode || "-"),
+    metric("Profile", decisionModel.profile || profilePolicy.profile || "-"),
+    metric("Entry Logic", decisionModel.entry_logic_label || decisionModel.entry_logic || "-"),
+    metric("Market Context", decisionModel.market_context_policy || "-"),
+    metric("Score Engine", decisionModel.score_engine || entryPolicy.score_engine || "-"),
+    metric("Depth Policy", profilePolicy.depth_requirement || "-"),
+    metric("Recovery", result.recovery_state || health.recovery_state || "-"),
+    metric("Data Readiness", decisionModel.data_readiness_state || "-"),
+    metric("Execution Safety", decisionModel.execution_safety_state || "-"),
+    metric("Entry Data Ready", (result.entry_data_ready ?? health.entry_data_ready) ? "YES" : "NO"),
+    metric("Pause Entries", (result.pause_new_entries ?? health.pause_new_entries) ? "YES" : "NO"),
+    metric("Final Blocker", result.final_blocker || health.final_blocker || (result.blockers || [])[0] || "-"),
     metric("Quote Age", `${text(result.quote_age_seconds ?? $("#oa-quote-age")?.value, "-")} sec`),
     metric("Stale Threshold", `${text((result.settings || state.status.settings || state.defaults.settings || {}).quote_stale_seconds, 3)} sec`),
     metric("Freshness", freshnessStatusText(freshness)),
@@ -1306,6 +1382,9 @@ function renderIndustryDiagnostics() {
   const referenceCache = result.reference_cache || state.status.reference_cache || {};
   const featureCache = result.feature_cache || state.status.feature_cache || {};
   const apiBudget = result.api_budget || state.status.api_budget || {};
+  const owner = result.websocket_owner_state || state.status.websocket_owner_state || apiBudget.websocket_owner_state || {};
+  const wsBudget = apiBudget.websocket_connection_budget || result.websocket_connection_budget || {};
+  const activeConflict = apiBudget.active_feed_conflict || result.active_feed_conflict || {};
   const recentApiCalls = apiBudget.real_api_calls_recent || {};
   setBadge("#oa-live-feed-badge", feedMode, feedStale ? "red" : feedMode === "WEBSOCKET_TICKS" ? "green" : feedMode === "QUOTE_SNAPSHOT_POLLING" ? "yellow" : "grey");
   setHtml("#oa-live-feed-panel", [
@@ -1314,6 +1393,13 @@ function renderIndustryDiagnostics() {
     metric("Postback Required", "NO"),
     metric("Postback", "DISABLED"),
     metric("Websocket", websocketLabel),
+    metric("WS Connections", `${wsBudget.active_websocket_connection_count ?? "-"} / ${wsBudget.zerodha_websocket_connection_limit ?? 3}`),
+    metric("WS Names", (wsBudget.active_websocket_names || []).join(", ") || "-"),
+    metric("Owner", owner.active_owner || "NONE"),
+    metric("Owner Status", owner.owner_status || "-"),
+    metric("Owner Blocker", (owner.blockers || [])[0] || "-"),
+    metric("Feed Conflict", activeConflict.blocked ? activeConflict.owner || "YES" : "NO"),
+    metric("Recovery", apiBudget.recovery_state || result.recovery_state || "-"),
     metric("Quote Fallback", feed.quote_polling_fallback ? "ENABLED" : "OFF"),
     metric("Index Tick", feedHealth.last_index_tick || "-"),
     metric("CE Tick", feedHealth.last_ce_tick || "-"),
@@ -2863,6 +2949,10 @@ function hydrateStatusDecision(payload) {
     reference_cache: payload.reference_cache || {},
     feature_cache: payload.feature_cache || {},
     api_budget: payload.api_budget || {},
+    decision_model: payload.decision_model || {},
+    profile_policy: payload.profile_policy || {},
+    entry_logic_policy: payload.entry_logic_policy || {},
+    websocket_owner_state: payload.websocket_owner_state || {},
     blackbox: payload.blackbox || {},
   };
 }
@@ -2898,6 +2988,7 @@ function initDashboard() {
   on("#oa-top-refresh", "click", () => refresh({ full: true }));
   on("#oa-stop-engine-top", "click", stopEngine);
   on("#oa-kill-switch-top", "click", killSwitch);
+  initWebSocketOwnerControls();
   initFiiDiiUpload();
 }
 

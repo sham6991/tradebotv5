@@ -13,6 +13,7 @@ class OptionsAutoWebRoutes:
                 "LIVE" if str(mode).upper() in {MODE_REAL, "LIVE"} else "PAPER"
             ),
         )
+        self.service.websocket_owner_controller = getattr(app_state, "websocket_owner_controller", None)
 
     def can_handle_get(self, path: str) -> bool:
         return path == "/options-auto" or path.startswith("/api/options-auto")
@@ -176,6 +177,8 @@ class OptionsAutoWebRoutes:
     def _with_account_status(self, payload: dict) -> dict:
         payload = _redact_sensitive(dict(payload))
         payload["account_status"] = self._sync_connection_state()
+        if hasattr(self.app_state, "websocket_owner_state"):
+            payload["websocket_owner_state"] = self.app_state.websocket_owner_state()
         return payload
 
     def ui_summary(self) -> dict:
@@ -185,6 +188,7 @@ class OptionsAutoWebRoutes:
             status = self._with_account_status(self.service.status())
         settings = status.get("settings") or {}
         account = status.get("account_status") or {}
+        owner_state = status.get("websocket_owner_state") or (self.app_state.websocket_owner_state() if hasattr(self.app_state, "websocket_owner_state") else {})
         lifecycle = status.get("real_order_lifecycle") or {}
         session = status.get("session") or {}
         feed = status.get("options_live_feed") or {}
@@ -270,6 +274,7 @@ class OptionsAutoWebRoutes:
             "feature_cache": status.get("feature_cache") or {},
             "api_budget": status.get("api_budget") or {},
             "account_status": account,
+            "websocket_owner_state": owner_state,
         }
 
     def _with_profile(self, payload: dict | None) -> dict:

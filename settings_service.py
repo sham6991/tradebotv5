@@ -278,8 +278,14 @@ def parse_runtime_setting_value(key, value):
 
 
 def settings_from_values(values):
+    raw_values = values or {}
     values = {key: setting_value(values, key) for key in DEFAULT_SETTINGS}
     parsed = {key: parse_runtime_setting_value(key, value) for key, value in values.items()}
+    explicit_bias_mode = "bias_mode" in raw_values or "manual_bias" in raw_values
+    if explicit_bias_mode and parsed.get("bias_mode") == "Manual":
+        parsed["trend_set"] = parsed.get("manual_bias") or "Auto"
+    elif explicit_bias_mode:
+        parsed["trend_set"] = "Auto"
     raise_for_fast_ohlcv_settings(parsed)
     return parsed
 

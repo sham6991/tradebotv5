@@ -7,9 +7,12 @@ class BacktestLiveClient:
     def get_nifty50_token(self):
         return 256265
 
+    def get_index_token(self, underlying_id="NIFTY"):
+        return 265 if str(underlying_id).upper() == "SENSEX" else 256265
+
     def find_option_contract(self, option_type=None, strike=None, expiry=None, name="NIFTY"):
         return {
-            "tradingsymbol": f"NIFTY{expiry}{strike}{option_type}",
+            "tradingsymbol": f"{name}{expiry}{strike}{option_type}",
             "instrument_token": 123456,
             "instrument_type": option_type,
             "strike": strike,
@@ -57,6 +60,15 @@ class BacktestLiveConnectionTests(unittest.TestCase):
 
         self.assertEqual(app.fetch_nifty_token("BACKTEST")["token"], 256265)
 
+    def test_fetch_index_token_respects_selected_underlying(self):
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["PAPER"] = BacktestLiveClient()
+
+        result = app.fetch_nifty_token("BACKTEST", "SENSEX")
+
+        self.assertEqual(result["token"], 265)
+        self.assertEqual(result["underlying_id"], "SENSEX")
+
     def test_fetch_option_returns_token_alias(self):
         app = WebTradeBotApp()
         app.zerodha_clients_by_mode["PAPER"] = BacktestLiveClient()
@@ -69,6 +81,19 @@ class BacktestLiveConnectionTests(unittest.TestCase):
 
         self.assertEqual(contract["instrument_token"], 123456)
         self.assertEqual(contract["token"], 123456)
+
+    def test_fetch_option_uses_selected_underlying(self):
+        app = WebTradeBotApp()
+        app.zerodha_clients_by_mode["PAPER"] = BacktestLiveClient()
+
+        contract = app.fetch_option_contract("BACKTEST", {
+            "underlying_id": "SENSEX",
+            "option_type": "PE",
+            "strike": "80000",
+            "expiry": "2026-05-26",
+        })
+
+        self.assertTrue(contract["tradingsymbol"].startswith("SENSEX"))
 
     def test_nifty_optimizer_does_not_expose_profile_apply_method(self):
         app = WebTradeBotApp()

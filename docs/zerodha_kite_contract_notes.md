@@ -41,10 +41,12 @@ Websocket lifecycle behavior:
 - Heartbeats are not valid market data.
 - Freshness must use tick/quote timestamps and latest tick age.
 - Main App and Intraday must not own Zerodha websocket simultaneously.
+- Websocket owner activation only reserves the Zerodha feed slot. It must not auto-start ticks because the selected index and option tokens still have to be loaded and subscribed through Start Feed/Start Paper/Start Live.
 
 Main App implementation contract:
 
 - Supported underlyings: NIFTY and SENSEX.
+- Selected underlying must drive index token fetch, option lookup, backtest labels, live desk labels, and optimizer labels. SENSEX must never silently fall back to NIFTY instruments.
 - Direction uses spot/index price action, current-month futures volume/VWAP confirmation, and selected option OHLCV confirmation.
 - Index volume, market depth, bid/ask depth scoring, news shock scanners, Shadow Mode, market orders, and SL-M orders are not used by Main App.
 - Entry must be `BUY LIMIT`.
@@ -55,6 +57,7 @@ Main App implementation contract:
 - Strategy plugins only emit signals. They do not call Zerodha or mutate broker/order state.
 - Paper, Live, Live Monitor, and Backtest share the same decision kernel and lifecycle policy.
 - User-facing Main App settings expose only essentials first: mode/context, NIFTY/SENSEX underlying, risk mode, fixed `FAST_OHLCV` entry logic, lots, daily risk, square-off, bias controls, and explicit price-only futures fallback. Advanced thresholds are grouped under Advanced Expert Settings. Market-order, SL-M, order-product override, and market-entry conversion controls are hidden from the operator UI.
+- Manual 30-minute bias is an operator override for the current decision window. Saving Paper/Live settings during an active session updates only decision-context settings such as bias and underlying; it does not mutate broker/order lifecycle state.
 
 Code paths affected:
 

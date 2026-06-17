@@ -59,6 +59,32 @@ class WebAppFeedInputTests(unittest.TestCase):
         self.assertFalse(summary["postback_enabled"])
         self.assertFalse(summary["public_callback_required"])
 
+    def test_status_payload_contains_market_context(self):
+        app = WebTradeBotApp()
+
+        payload = app.status_payload()
+
+        self.assertIn("market_context", payload)
+        self.assertIn(payload["market_context"]["underlying_id"], {"NIFTY", "SENSEX"})
+        self.assertIn("allowed_side", payload["market_context"])
+
+    def test_runtime_decision_settings_update_active_session(self):
+        app = WebTradeBotApp()
+
+        class Session:
+            settings = {}
+
+        app.executor.live_paper_session = Session()
+        applied = app.apply_runtime_decision_settings("paper", {
+            "bias_mode": "Manual",
+            "manual_bias": "Bullish",
+            "underlying_id": "SENSEX",
+        })
+
+        self.assertTrue(applied)
+        self.assertEqual(app.executor.live_paper_session.settings["underlying_id"], "SENSEX")
+        self.assertEqual(app.executor.live_paper_session.settings["trend_set"], "Bullish")
+
 
 if __name__ == "__main__":
     unittest.main()

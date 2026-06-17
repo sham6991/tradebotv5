@@ -37,6 +37,8 @@ def test_websocket_owner_card_shows_operational_fields():
 
     assert "Zerodha Connection & Websocket Owner" in html
     assert 'id="websocket-owner-card"' in html
+    assert "Activate Main App Owner" in html
+    assert "does not start ticks by itself" in html
     for field_id in (
         "ws-owner-preferred",
         "ws-owner-active",
@@ -78,3 +80,17 @@ def test_main_app_settings_surface_is_simplified_and_limit_only():
     assert "hiddenUiSettings" in script
     assert "Market Entry Score" not in labels
     assert "Live Option Market Entry As Limit" in labels
+
+
+def test_underlying_selection_drives_index_ui_and_market_context_card():
+    html = (ROOT / "web_static" / "index.html").read_text(encoding="utf-8")
+    script = (ROOT / "web_static" / "app.js").read_text(encoding="utf-8")
+
+    assert "Market Context" in html
+    assert "market-context-list" in html
+    assert 'data-action="fetch-index"' in script
+    assert "/api/live/fetch-index" in script
+    assert "selectedUnderlyingMeta" in script
+    assert "SENSEX" in script
+    assert "Fetch NIFTY" in html
+    assert "Fetch SENSEX" not in html

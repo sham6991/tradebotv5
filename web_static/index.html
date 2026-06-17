@@ -86,6 +86,11 @@
               <p class="section-subtitle" id="data-health-state">Waiting for feed.</p>
               <div class="metric-list" id="data-health-list"></div>
             </article>
+            <article class="metric-card" id="market-context-card">
+              <h2 class="section-title">Market Context</h2>
+              <p class="section-subtitle" id="market-context-state">Waiting for context.</p>
+              <div class="metric-list" id="market-context-list"></div>
+            </article>
             <article class="metric-card" id="execution-health-card">
               <h2 class="section-title">Execution Health</h2>
               <p class="section-subtitle" id="execution-health-state">No execution issue reported.</p>
@@ -292,7 +297,7 @@
               <label>Account <input value="Virtual/Paper Zerodha" readonly></label>
             </div>
             <div class="file-card">
-              <strong>NIFTY</strong>
+              <strong id="backtest-index-label">NIFTY</strong>
               <label data-backtest-manual>Excel/CSV file <input type="file" name="nifty_file" accept=".csv,.xlsx,.xls,.xlsm"></label>
               <label data-backtest-manual>Or server path <input name="nifty_path" placeholder="C:\path\to\nifty.xlsx"></label>
               <small data-backtest-source="zerodha" hidden>Fetched automatically from Virtual/Paper Zerodha.</small>
@@ -346,13 +351,13 @@
             <pre id="trading-optimizer-output">No Trading tab optimizer run yet.</pre>
           </section>
           <form id="zerodha-backtest-form" class="panel zerodha-backtest-form">
-            <h2>NIFTY Optimizer</h2>
+            <h2 id="zerodha-optimizer-title">NIFTY Optimizer</h2>
             <label>Account
               <input name="mode_label" value="Virtual Zerodha" readonly>
               <input type="hidden" name="mode" value="PAPER">
             </label>
-            <label>NIFTY Token <input name="nifty_token"></label>
-            <button type="button" data-zbt-action="fetch-nifty">Fetch NIFTY</button>
+            <label><span id="zerodha-index-token-label">NIFTY Token</span> <input name="nifty_token"></label>
+              <button type="button" data-zbt-action="fetch-index">Fetch NIFTY</button>
             <label>Date Range
               <select name="date_range_months">
                 <option value="1">Last 1 Month</option>
@@ -370,11 +375,11 @@
               </select>
             </label>
             <div class="actions wide">
-              <button type="submit" class="primary">Run NIFTY Optimizer</button>
+              <button type="submit" class="primary" id="run-zerodha-optimizer">Run NIFTY Optimizer</button>
             </div>
           </form>
           <section class="panel">
-            <h2>NIFTY Optimizer Output</h2>
+            <h2 id="zerodha-optimizer-output-title">NIFTY Optimizer Output</h2>
             <pre id="zerodha-backtest-output">No NIFTY optimizer run yet.</pre>
           </section>
         </section>
@@ -436,11 +441,12 @@
               <div><span>Blockers</span><strong id="ws-owner-blockers">-</strong><small>Main App and Intraday cannot own feed together</small></div>
             </div>
             <div class="actions">
-              <button type="button" id="ws-owner-main">Make Main App Owner</button>
-              <button type="button" id="ws-owner-intraday">Make Intraday Owner</button>
+              <button type="button" id="ws-owner-main">Activate Main App Owner</button>
+              <button type="button" id="ws-owner-intraday">Activate Intraday Owner</button>
               <button type="button" id="ws-owner-release">Release Owner</button>
               <button type="button" id="ws-owner-stop">Stop Active Feed</button>
             </div>
+            <p class="note">Owner activation reserves the Zerodha websocket slot. It does not start ticks by itself; use Start Feed or Start Paper/Live after contracts are loaded.</p>
           </section>
           <div class="grid two">
             <form class="panel auth-form" data-mode="PAPER">

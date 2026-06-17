@@ -75,6 +75,26 @@ const titles = {
   zerodha: "Connections",
 };
 
+const underlyingLabels = {
+  NIFTY: { id: "NIFTY", display: "NIFTY 50", token: "NIFTY Token", candles: "NIFTY Candles" },
+  SENSEX: { id: "SENSEX", display: "SENSEX", token: "SENSEX Token", candles: "SENSEX Candles" },
+};
+
+function normalizeUnderlying(value) {
+  const text = String(value || "NIFTY").trim().toUpperCase();
+  return text === "SENSEX" ? "SENSEX" : "NIFTY";
+}
+
+function selectedUnderlying(profile = "paper") {
+  const fromStatus = state.lastStatus?.market_context?.underlying_id;
+  const values = currentSettings(profile);
+  return normalizeUnderlying(values.underlying_id || fromStatus);
+}
+
+function selectedUnderlyingMeta(profile = "paper") {
+  return underlyingLabels[selectedUnderlying(profile)] || underlyingLabels.NIFTY;
+}
+
 const settingOrder = [
   "underlying_id", "risk_mode", "entry_logic", "lot_size", "max_trades",
   "max_daily_loss", "max_daily_profit", "max_consecutive_losses", "square_off_time",
@@ -622,6 +642,7 @@ async function loadSettings() {
   state.settings = data.profiles;
   state.labels = data.labels;
   state.defaults = { ...(data.defaults || data.profiles?.backtest || {}) };
+  updateUnderlyingLabels();
 }
 
 function updateBacktestSourceView() {
@@ -634,6 +655,47 @@ function updateBacktestSourceView() {
   $all("[data-backtest-manual]", form).forEach(node => {
     node.hidden = source !== "manual";
   });
+  updateUnderlyingLabels();
+}
+
+function updateUnderlyingLabels() {
+  const backtestMeta = selectedUnderlyingMeta("backtest");
+  setText("#backtest-index-label", backtestMeta.id);
+  setText("#zerodha-optimizer-title", `${backtestMeta.display} Optimizer`);
+  setText("#zerodha-index-token-label", `${backtestMeta.display} Token`);
+  setText("[data-zbt-action='fetch-index']", `Fetch ${backtestMeta.display}`);
+  setText("#run-zerodha-optimizer", `Run ${backtestMeta.display} Optimizer`);
+  setText("#zerodha-optimizer-output-title", `${backtestMeta.display} Optimizer Output`);
+  const callSymbol = $("#backtest-form [name='call_symbol']");
+  const putSymbol = $("#backtest-form [name='put_symbol']");
+  if (callSymbol && /^(NIFTY|SENSEX)_CE$/.test(callSymbol.value || "")) callSymbol.value = `${backtestMeta.id}_CE`;
+  if (putSymbol && /^(NIFTY|SENSEX)_PE$/.test(putSymbol.value || "")) putSymbol.value = `${backtestMeta.id}_PE`;
+
+  $all(".live-view").forEach(view => {
+    const profile = view.dataset.mode === "LIVE" ? "real" : "paper";
+    const meta = selectedUnderlyingMeta(profile);
+    setText($("[data-underlying-token-label]", view), `${meta.display} Token`);
+    setText($("[data-action='fetch-index']", view), `Fetch ${meta.display}`);
+    $all("[data-underlying-display]", view).forEach(node => setText(node, meta.display));
+    setText($("[data-underlying-candles-label]", view), `${meta.display} Candles`);
+  });
+}
+
+function renderMarketContext(context = {}) {
+  const stateText = context.market_state || "Auto";
+  setText("#market-context-state", `${context.display_name || context.underlying_id || "NIFTY"} ${stateText}`);
+  renderMetricList("#market-context-list", [
+    ["Underlying", context.display_name || context.underlying_id || "-"],
+    ["Spot key", context.spot_quote_key || "-"],
+    ["Market state", stateText],
+    ["Allowed scan", context.allowed_side || "-"],
+    ["Bias mode", context.bias_mode || "-"],
+    ["Manual bias", context.manual_bias || "-"],
+    ["Market phase", context.phase || "-"],
+    ["Futures mode", context.futures_mode || "-"],
+    ["Decision", context.live_decision_status || "-"],
+    ["Reason", context.reason || "-"],
+  ]);
 }
 
 function buildLiveViews() {
@@ -652,8 +714,8 @@ function buildLiveViews() {
             <button type="button" data-action="disconnect">Disconnect</button>
           </div>
         </div>
-        <label>NIFTY Token <input data-field="nifty_token"></label>
-        <button type="button" data-action="fetch-nifty">Fetch NIFTY</button>
+        <label><span data-underlying-token-label>NIFTY Token</span> <input data-field="nifty_token"></label>
+        <button type="button" data-action="fetch-index">Fetch NIFTY</button>
         <span></span><span></span><span></span><span></span>
         ${["CALL", "PUT"].map((name, index) => `
           <label>${name === "CALL" ? "Call" : "Put"} Type
@@ -699,12 +761,12 @@ function buildLiveViews() {
       <section class="panel tick-tabs">
         <h2>Ticks</h2>
         <div class="tick-rate-strip">
-          <div><span>NIFTY 50</span><strong data-rate="NIFTY">0/s</strong></div>
+          <div><span data-underlying-display>NIFTY 50</span><strong data-rate="NIFTY">0/s</strong></div>
           <div><span>CE</span><strong data-rate="CE">0/s</strong></div>
           <div><span>PE</span><strong data-rate="PE">0/s</strong></div>
         </div>
         <div class="tab-buttons">
-          <button type="button" class="tick-tab-button active" data-tick-tab="NIFTY">NIFTY 50</button>
+          <button type="button" class="tick-tab-button active" data-tick-tab="NIFTY" data-underlying-display>NIFTY 50</button>
           <button type="button" class="tick-tab-button" data-tick-tab="CE">CE</button>
           <button type="button" class="tick-tab-button" data-tick-tab="PE">PE</button>
         </div>
@@ -712,7 +774,7 @@ function buildLiveViews() {
         <div class="tick-table" data-tick-panel="CE"><div class="table-wrap tick-scroll"><table data-field="ticks-CE"></table></div></div>
         <div class="tick-table" data-tick-panel="PE"><div class="table-wrap tick-scroll"><table data-field="ticks-PE"></table></div></div>
         <div class="candle-actions">
-          <button type="button" data-action="open-candles" data-candles="NIFTY">NIFTY Candles</button>
+          <button type="button" data-action="open-candles" data-candles="NIFTY" data-underlying-candles-label>NIFTY Candles</button>
           <button type="button" data-action="open-candles" data-candles="CE">CE Candles</button>
           <button type="button" data-action="open-candles" data-candles="PE">PE Candles</button>
         </div>
@@ -766,7 +828,7 @@ function liveReadiness(data, view) {
     {
       label: "Contracts",
       state: tokensReady ? "ok" : "bad",
-      detail: tokensReady ? "NIFTY, CE, and PE ready" : "Fetch or enter tokens",
+      detail: tokensReady ? `${selectedUnderlyingMeta(mode === "LIVE" ? "real" : "paper").display}, CE, and PE ready` : "Fetch or enter tokens",
     },
   ];
   if (mode === "LIVE") {
@@ -836,7 +898,7 @@ function renderLiveStatus(data, view) {
   const note = $(`[data-field="action_note"]`, view);
   if (note) {
     if (!readiness.connected) note.textContent = `Connect ${mode} before starting feed or trading.`;
-    else if (!readiness.tokensReady) note.textContent = "Fetch or enter NIFTY, CE, and PE contracts before starting.";
+    else if (!readiness.tokensReady) note.textContent = `Fetch or enter ${selectedUnderlyingMeta(mode === "LIVE" ? "real" : "paper").display}, CE, and PE contracts before starting.`;
     else if (!readiness.startReady && mode === "LIVE") note.textContent = "Run fresh LIVE health and recovery checks before real-money start.";
     else note.textContent = mode === "LIVE" ? "LIVE readiness complete." : "Paper desk is ready to start.";
   }
@@ -856,6 +918,7 @@ function collectLivePayload(view) {
   const mode = view.dataset.mode;
   return {
     mode,
+    underlying_id: selectedUnderlying(mode === "LIVE" ? "real" : "paper"),
     nifty_token: $(`[data-field="nifty_token"]`, view).value.trim(),
     history_days: $(`[data-field="history_days"]`, view).value.trim(),
     history_interval: $(`[data-field="history_interval"]`, view).value,
@@ -867,6 +930,7 @@ function collectLivePayload(view) {
 function collectZerodhaBacktestPayload(form) {
   return {
     mode: form.elements.mode.value,
+    underlying_id: selectedUnderlying("backtest"),
     nifty_token: form.elements.nifty_token.value.trim(),
     date_range_months: form.elements.date_range_months.value,
     history_interval: form.elements.history_interval.value,
@@ -880,10 +944,12 @@ async function handleLiveAction(button) {
   const mode = view.dataset.mode;
   const action = button.dataset.action;
   const payload = collectLivePayload(view);
-  if (action === "fetch-nifty") {
-    const data = await api("/api/live/fetch-nifty", { mode });
+  if (action === "fetch-index") {
+    const profile = mode === "LIVE" ? "real" : "paper";
+    const meta = selectedUnderlyingMeta(profile);
+    const data = await api("/api/live/fetch-index", { mode, underlying_id: meta.id });
     $(`[data-field="nifty_token"]`, view).value = data.token;
-    toast("NIFTY token fetched");
+    toast(`${data.display_name || meta.display} token fetched`);
     return;
   }
   if (action === "refresh-margin") {
@@ -901,7 +967,7 @@ async function handleLiveAction(button) {
   if (action === "fetch-option") {
     const index = button.dataset.option;
     const option = payload.options[Number(index)];
-    const data = await api("/api/live/fetch-option", { mode, ...option });
+    const data = await api("/api/live/fetch-option", { mode, underlying_id: payload.underlying_id, ...option });
     $(`[data-option="${index}"][data-field="tradingsymbol"]`, view).value = data.tradingsymbol;
     $(`[data-option="${index}"][data-field="token"]`, view).value = data.instrument_token;
     $(`[data-option="${index}"][data-field="expiry"]`, view).value = data.expiry;
@@ -948,10 +1014,11 @@ async function handleZerodhaBacktestAction(button) {
   const form = $("#zerodha-backtest-form");
   const mode = form.elements.mode.value || "PAPER";
   const action = button.dataset.zbtAction;
-  if (action === "fetch-nifty") {
-    const data = await api("/api/live/fetch-nifty", { mode });
+  if (action === "fetch-index") {
+    const meta = selectedUnderlyingMeta("backtest");
+    const data = await api("/api/live/fetch-index", { mode, underlying_id: meta.id });
     form.elements.nifty_token.value = data.token;
-    toast("NIFTY token fetched");
+    toast(`${data.display_name || meta.display} token fetched`);
     return;
   }
 }
@@ -1093,6 +1160,7 @@ function renderCommandCenter(data = {}) {
     ["NIFTY tick age", latestTickAge(data.ticks?.NIFTY)],
     ["Quote fallback", feed.quote_fallback_active ? "YES" : "NO"],
   ]);
+  renderMarketContext(data.market_context || {});
   renderMetricList("#execution-health-list", [
     ["Active orders", activeOrders],
     ["Recent rejected", countOrderStatus(data.order_history, "REJECTED")],
@@ -1215,6 +1283,7 @@ async function refreshStatus() {
   $("#live-connection").textContent = connectionText(data.connections.LIVE);
   renderCommandCenter(data);
   renderWebsocketOwner(data.websocket_owner_state || {}, data.feed || {});
+  updateUnderlyingLabels();
   renderNetworkHealth(data.network_health || {});
   renderRecoveryStatus(data.recovery_status || {});
   $("#latest-result").textContent = JSON.stringify(data.last_backtest || data.last_replay?.summary || {}, null, 2);
@@ -1346,7 +1415,7 @@ function bindForms() {
       state.settings[state.activeSettingsProfile] = saved.values;
       $("#settings-dialog").close();
       await refreshStatus();
-      toast("Settings saved");
+      toast(saved.runtime_applied ? "Settings saved and active session bias updated" : "Settings saved");
     } catch (error) {
       const message = error.message || "Settings could not be saved.";
       showSettingsError(message);
@@ -1460,7 +1529,7 @@ function bindForms() {
   $("#zerodha-backtest-form").addEventListener("submit", async event => {
     event.preventDefault();
     const form = event.currentTarget;
-    $("#zerodha-backtest-output").textContent = "Running NIFTY optimizer. This can take a few minutes for larger date ranges...";
+    $("#zerodha-backtest-output").textContent = `Running ${selectedUnderlyingMeta("backtest").display} optimizer. This can take a few minutes for larger date ranges...`;
     try {
       const data = await api("/api/backtest/zerodha-optimize", collectZerodhaBacktestPayload(form));
       $("#zerodha-backtest-output").textContent = JSON.stringify(data, null, 2);
@@ -1494,7 +1563,7 @@ function bindForms() {
       await api("/api/websocket-owner/preferred", { owner: "MAIN_APP" });
       const result = await api("/api/websocket-owner/activate", { owner: "MAIN_APP", mode: state.lastStatus?.current_mode || "PAPER" });
       renderWebsocketOwner(result);
-      toast("Main App owner selected");
+      toast("Main App owner activated. Start feed after contracts are loaded.");
     });
   });
   on("#ws-owner-intraday", "click", async event => {
@@ -1502,7 +1571,7 @@ function bindForms() {
       await api("/api/websocket-owner/preferred", { owner: "INTRADAY" });
       const result = await api("/api/websocket-owner/activate", { owner: "INTRADAY", mode: state.lastStatus?.current_mode || "PAPER" });
       renderWebsocketOwner(result);
-      toast("Intraday owner selected");
+      toast("Intraday owner activated");
     });
   });
   on("#ws-owner-release", "click", async event => {

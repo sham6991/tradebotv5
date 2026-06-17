@@ -23,7 +23,8 @@ from execution_v2 import Executor
 from indicators import clean_and_add_indicators
 from intraday.web_routes import IntradayWebRoutes
 from live_backtest_optimizer import date_range_from_months, run_live_backtest_optimizer
-from main_app.underlyings import UNDERLYING_SPECS
+from main_app.market_phase_engine import MarketPhaseEngine
+from main_app.underlyings import UNDERLYING_SPECS, get_underlying_spec, normalize_underlying_id
 from market_cue import MarketCueService
 from parity_replay import build_parity_report
 from position_reconciler import PositionReconciler
@@ -530,6 +531,56 @@ class WebTradeBotApp:
             },
         }
 
+    def selected_settings_profile_name(self):
+        mode = str(self.current_mode or "PAPER").upper()
+        if mode == "LIVE":
+            return "real"
+        if mode == "PAPER":
+            return "paper"
+        return "backtest"
+
+    def selected_settings_values(self):
+        profiles = load_settings_profiles()
+        return normalized_settings_profile(profiles.get(self.selected_settings_profile_name(), {}), self.selected_settings_profile_name())
+
+    def selected_underlying_id(self, values=None):
+        values = values or self.selected_settings_values()
+        return normalize_underlying_id(values.get("underlying_id") or "NIFTY")
+
+    def market_context_snapshot(self):
+        values = self.selected_settings_values()
+        settings = settings_from_values(values)
+        underlying_id = normalize_underlying_id(settings.get("underlying_id"))
+        spec = get_underlying_spec(underlying_id)
+        bias_mode = str(settings.get("bias_mode") or "Auto")
+        manual_bias = str(settings.get("manual_bias") or "Auto")
+        trend_set = str(settings.get("trend_set") or "Auto")
+        effective_bias = manual_bias if bias_mode == "Manual" and manual_bias != "Auto" else trend_set
+        allowed_side = {
+            "Bullish": "CE only",
+            "Bearish": "PE only",
+        }.get(effective_bias, "Auto: waits for live candle decision")
+        phase = MarketPhaseEngine().phase_at(datetime.now(), settings.get("square_off_time", "15:20"))
+        health = self.live_health_snapshot or {}
+        reason = "Manual 30-min bias is active." if bias_mode == "Manual" and manual_bias != "Auto" else "Auto bias: live candles decide CE/PE/no-trade."
+        if health.get("trading_blocked_reason"):
+            reason = health["trading_blocked_reason"]
+        return {
+            "underlying_id": underlying_id,
+            "display_name": spec.display_name,
+            "spot_quote_key": spec.spot_quote_key,
+            "risk_mode": settings.get("risk_mode", "Balanced"),
+            "entry_logic": settings.get("entry_logic", "FAST_OHLCV"),
+            "bias_mode": bias_mode,
+            "manual_bias": manual_bias,
+            "market_state": effective_bias,
+            "allowed_side": allowed_side,
+            "phase": phase,
+            "futures_mode": "Price-only allowed" if settings.get("allow_price_only_direction_when_futures_unavailable") else "Futures confirmation required",
+            "live_decision_status": "Active session" if health.get("session_id") else "Waiting for live session",
+            "reason": reason,
+        }
+
     def empty_network_health(self, mode):
         return {
             "mode": str(mode or "").upper(),
@@ -587,6 +638,27 @@ class WebTradeBotApp:
         self.account_margins["PAPER"] = self.paper_balance_snapshot()
         return paper
 
+    def apply_runtime_decision_settings(self, profile, values):
+        mode = "LIVE" if str(profile).lower() == "real" else "PAPER" if str(profile).lower() == "paper" else ""
+        if not mode:
+            return False
+        session = self.executor.live_real_session if mode == "LIVE" else self.executor.live_paper_session
+        if not session:
+            return False
+        parsed = settings_from_values(values)
+        runtime_keys = {
+            "underlying_id",
+            "risk_mode",
+            "entry_logic",
+            "bias_mode",
+            "manual_bias",
+            "trend_set",
+            "allow_price_only_direction_when_futures_unavailable",
+        }
+        for key in runtime_keys:
+            session.settings[key] = parsed.get(key)
+        return True
+
     def update_session_summary(self, health=None, mode=None):
         health = health or {}
         current_mode = str(mode or health.get("mode") or self.current_mode or "PAPER").upper()
@@ -619,6 +691,8 @@ class WebTradeBotApp:
                 },
                 "account_margins": self.account_margins,
                 "feed": metrics,
+                "settings": self.selected_settings_values(),
+                "market_context": self.market_context_snapshot(),
                 "ticks": self.tick_buffer,
                 "tick_rates": self.tick_rates,
                 "active_orders": self.live_log_active_rows[-100:],
@@ -1497,6 +1571,7 @@ class WebTradeBotApp:
             raise ValueError("Call and Put strike/expiry are required for Zerodha historical backtest data.")
         call = options_payload[0]
         put = options_payload[1]
+        underlying_id = normalize_underlying_id(payload.get("underlying_id") or settings.get("underlying_id"))
         interval = normalise_interval(
             payload.get("history_interval")
             or payload.get("interval")
@@ -1511,6 +1586,7 @@ class WebTradeBotApp:
             call.get("expiry"),
             put.get("strike"),
             put.get("expiry"),
+            underlying_id=underlying_id,
         )
         metadata["connected_mode"] = "PAPER"
         return nifty, options, metadata
@@ -1527,7 +1603,9 @@ class WebTradeBotApp:
         settings = settings_from_values(settings_values)
         interval = normalise_interval(payload.get("history_interval") or settings.get("chart_interval"))
         settings["chart_interval"] = interval
-        nifty_token = parse_instrument_token(payload.get("nifty_token"), "NIFTY token")
+        underlying_id = normalize_underlying_id(payload.get("underlying_id") or settings.get("underlying_id"))
+        spec = get_underlying_spec(underlying_id)
+        nifty_token = parse_instrument_token(payload.get("nifty_token") or payload.get("index_token"), f"{spec.display_name} token")
         range_months = payload.get("date_range_months") or payload.get("range_months")
         if range_months:
             start_date, end_date = date_range_from_months(range_months)
@@ -1537,7 +1615,7 @@ class WebTradeBotApp:
         if not start_date or not end_date:
             raise ValueError("Choose a date range: last 1, 2, 3, or 6 months.")
 
-        self.set_status("Running NIFTY RSI optimizer...")
+        self.set_status(f"Running {spec.display_name} RSI optimizer...")
         output_folder = result_folder("backtest_live")
         result = run_live_backtest_optimizer(
             client,
@@ -1551,7 +1629,7 @@ class WebTradeBotApp:
         )
         with self.lock:
             self.last_backtest = result
-        self.set_status(f"NIFTY optimizer complete: {result['runs']} runs, {result['days_used']} days")
+        self.set_status(f"{spec.display_name} optimizer complete: {result['runs']} runs, {result['days_used']} days")
         return result
 
     def normalise_backtest_payload(self, payload):
@@ -1587,15 +1665,23 @@ class WebTradeBotApp:
         ]
         return payload
 
-    def fetch_nifty_token(self, mode):
+    def fetch_nifty_token(self, mode, underlying_id="NIFTY"):
         mode = self.validate_zerodha_mode(mode)
+        spec = get_underlying_spec(underlying_id)
         self.sync_zerodha_client_for_mode(mode)
         if not self.executor.zerodha:
             raise ValueError(f"Connect {self.auth_label(mode)} first.")
-        return {"token": self.executor.zerodha.get_nifty50_token()}
+        if hasattr(self.executor.zerodha, "get_index_token"):
+            token = self.executor.zerodha.get_index_token(spec.underlying_id)
+        else:
+            if spec.underlying_id != "NIFTY":
+                raise ValueError(f"{spec.display_name} token fetch requires an updated Zerodha client.")
+            token = self.executor.zerodha.get_nifty50_token()
+        return {"token": token, "underlying_id": spec.underlying_id, "display_name": spec.display_name}
 
     def fetch_option_contract(self, mode, payload):
         mode = self.validate_zerodha_mode(mode)
+        underlying_id = normalize_underlying_id(payload.get("underlying_id") or self.selected_underlying_id())
         self.sync_zerodha_client_for_mode(mode)
         if not self.executor.zerodha:
             raise ValueError(f"Connect {self.auth_label(mode)} first.")
@@ -1603,7 +1689,7 @@ class WebTradeBotApp:
             option_type=payload.get("option_type"),
             strike=payload.get("strike"),
             expiry=payload.get("expiry"),
-            name="NIFTY",
+            name=underlying_id,
         )
         return {
             "tradingsymbol": contract["tradingsymbol"],
@@ -1634,7 +1720,9 @@ class WebTradeBotApp:
         return contracts[:2]
 
     def token_map_from_payload(self, payload):
-        token_map = {parse_instrument_token(payload.get("nifty_token"), "NIFTY token"): "NIFTY"}
+        underlying_id = normalize_underlying_id(payload.get("underlying_id") or self.selected_underlying_id())
+        spec = get_underlying_spec(underlying_id)
+        token_map = {parse_instrument_token(payload.get("nifty_token") or payload.get("index_token"), f"{spec.display_name} token"): spec.underlying_id}
         for index, contract in enumerate(self.option_contracts_from_payload(payload.get("options"))):
             token_map[int(contract["token"])] = f"OPTION_{index}"
         return token_map
@@ -1739,10 +1827,12 @@ class WebTradeBotApp:
         history_days = int(payload.get("history_days") or 5)
         interval = normalise_interval(payload.get("history_interval") or settings.get("chart_interval"))
         contracts = self.option_contracts_from_payload(payload.get("options"))
-        nifty_token = str(payload.get("nifty_token") or "").strip()
+        underlying_id = normalize_underlying_id(payload.get("underlying_id") or settings.get("underlying_id"))
+        spec = get_underlying_spec(underlying_id)
+        nifty_token = str(payload.get("nifty_token") or payload.get("index_token") or "").strip()
         if not nifty_token:
-            raise ValueError("NIFTY token is required.")
-        token_map = {parse_instrument_token(nifty_token, "NIFTY token"): "NIFTY"}
+            raise ValueError(f"{spec.display_name} token is required.")
+        token_map = {parse_instrument_token(nifty_token, f"{spec.display_name} token"): spec.underlying_id}
         for index, contract in enumerate(contracts):
             token_map[int(contract["token"])] = f"OPTION_{index}"
         return {
@@ -1752,6 +1842,7 @@ class WebTradeBotApp:
             "interval": interval,
             "contracts": contracts,
             "nifty_token": nifty_token,
+            "underlying_id": underlying_id,
             "token_map": token_map,
         }
 
@@ -2200,11 +2291,12 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         if path.startswith("/api/settings/"):
             profile = path.rsplit("/", 1)[-1]
             values = save_settings_profile(profile, payload)
+            runtime_applied = self.app_state.apply_runtime_decision_settings(profile, values)
             if profile == "paper":
                 self.app_state.account_margins["PAPER"] = self.app_state.paper_balance_snapshot()
                 if not self.app_state.executor.live_paper_session:
                     self.app_state.session_summary = self.app_state.empty_session_summary("PAPER")
-            return self.send_json({"profile": profile, "values": values})
+            return self.send_json({"profile": profile, "values": values, "runtime_applied": runtime_applied})
         if path == "/api/backtest/run":
             return self.send_json(self.app_state.run_backtest_job(payload))
         if path == "/api/backtest/risk-optimize":
@@ -2246,9 +2338,12 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         if path == "/api/recovery/status":
             mode = str(payload.get("mode") or "PAPER").upper()
             return self.send_json(self.app_state.run_recovery_check(mode))
+        if path == "/api/live/fetch-index":
+            mode = str(payload.get("mode") or "PAPER").upper()
+            return self.send_json(self.app_state.fetch_nifty_token(mode, payload.get("underlying_id") or "NIFTY"))
         if path == "/api/live/fetch-nifty":
             mode = str(payload.get("mode") or "PAPER").upper()
-            return self.send_json(self.app_state.fetch_nifty_token(mode))
+            return self.send_json(self.app_state.fetch_nifty_token(mode, payload.get("underlying_id") or "NIFTY"))
         if path == "/api/live/fetch-option":
             mode = str(payload.get("mode") or "PAPER").upper()
             return self.send_json(self.app_state.fetch_option_contract(mode, payload))

@@ -1,8 +1,19 @@
 import pandas as pd
 
+from main_app.underlyings import get_underlying_spec, normalize_underlying_id
+
 
 KiteConnect = None
 KiteTicker = None
+
+
+def _instrument_exchanges(candidates):
+    exchanges = []
+    for candidate in candidates:
+        exchange = str(candidate or "").split("-", 1)[0].strip().upper()
+        if exchange and exchange not in exchanges:
+            exchanges.append(exchange)
+    return exchanges
 
 
 def _load_kiteconnect():
@@ -336,41 +347,51 @@ class ZerodhaClient:
         raise ValueError(f"Lot size not found for {tradingsymbol} on {exchange}.")
 
     def get_nifty50_token(self):
-        for instrument in self._get_cached_instruments(self.kite.EXCHANGE_NSE):
-            if str(instrument.get("tradingsymbol", "")).upper() == "NIFTY 50":
+        return self.get_index_token("NIFTY")
+
+    def get_index_token(self, underlying_id="NIFTY"):
+        spec = get_underlying_spec(underlying_id)
+        exchange, symbol = spec.spot_quote_key.split(":", 1)
+        for instrument in self._get_cached_instruments(exchange):
+            tradingsymbol = str(instrument.get("tradingsymbol", "")).upper()
+            name = str(instrument.get("name", "")).upper()
+            if tradingsymbol == symbol.upper() or name == symbol.upper():
                 return int(instrument["instrument_token"])
-        return 256265
+        if normalize_underlying_id(underlying_id) == "NIFTY":
+            return 256265
+        raise ValueError(f"{spec.display_name} spot token not found in {exchange} instrument master.")
 
     def find_option_contract(self, option_type, strike, expiry=None, name="NIFTY"):
         option_type = str(option_type).upper()
         strike = float(str(strike).replace(",", ""))
-        wanted_name = str(name).upper()
+        spec = get_underlying_spec(name)
+        aliases = {alias.upper() for alias in spec.derivative_aliases}
         matches = []
         wanted_expiry = self._normalise_expiry(expiry) if expiry else None
 
-        for instrument in self._get_cached_instruments(self.kite.EXCHANGE_NFO):
-            if str(instrument.get("instrument_type", "")).upper() != option_type:
-                continue
-            if str(instrument.get("segment", "")).upper() != "NFO-OPT":
-                continue
-            if float(instrument.get("strike") or 0) != strike:
-                continue
-
-            instrument_name = str(instrument.get("name", "")).upper()
-            tradingsymbol = str(instrument.get("tradingsymbol", "")).upper()
-
-            if instrument_name != wanted_name and not tradingsymbol.startswith(wanted_name):
-                continue
-
-            if wanted_expiry:
-                if self._normalise_expiry(instrument.get("expiry")) != wanted_expiry:
+        for exchange in _instrument_exchanges(spec.option_exchange_candidates):
+            for instrument in self._get_cached_instruments(exchange):
+                if str(instrument.get("instrument_type", "")).upper() != option_type:
+                    continue
+                if not str(instrument.get("segment", "")).upper().endswith("-OPT"):
+                    continue
+                if float(instrument.get("strike") or 0) != strike:
                     continue
 
-            matches.append(instrument)
+                instrument_name = str(instrument.get("name", "")).upper()
+                tradingsymbol = str(instrument.get("tradingsymbol", "")).upper()
+
+                if instrument_name not in aliases and not any(tradingsymbol.startswith(alias) for alias in aliases):
+                    continue
+
+                if wanted_expiry and self._normalise_expiry(instrument.get("expiry")) != wanted_expiry:
+                    continue
+
+                matches.append(instrument)
 
         if not matches:
             raise ValueError(
-                f"No {wanted_name} {option_type} contract found for strike {strike}"
+                f"No {spec.underlying_id} {option_type} contract found for strike {strike}"
                 + (f" and expiry {expiry}." if expiry else ".")
             )
 
@@ -378,28 +399,30 @@ class ZerodhaClient:
         return matches[0]
 
     def get_option_expiries(self, option_type=None, strike=None, name="NIFTY"):
-        wanted_name = str(name).upper()
+        spec = get_underlying_spec(name)
+        aliases = {alias.upper() for alias in spec.derivative_aliases}
         wanted_type = str(option_type).upper() if option_type else None
         wanted_strike = float(str(strike).replace(",", "")) if strike else None
         expiries = set()
 
-        for instrument in self._get_cached_instruments(self.kite.EXCHANGE_NFO):
-            if str(instrument.get("segment", "")).upper() != "NFO-OPT":
-                continue
-            if wanted_type and str(instrument.get("instrument_type", "")).upper() != wanted_type:
-                continue
-            if wanted_strike is not None and float(instrument.get("strike") or 0) != wanted_strike:
-                continue
+        for exchange in _instrument_exchanges(spec.option_exchange_candidates):
+            for instrument in self._get_cached_instruments(exchange):
+                if not str(instrument.get("segment", "")).upper().endswith("-OPT"):
+                    continue
+                if wanted_type and str(instrument.get("instrument_type", "")).upper() != wanted_type:
+                    continue
+                if wanted_strike is not None and float(instrument.get("strike") or 0) != wanted_strike:
+                    continue
 
-            instrument_name = str(instrument.get("name", "")).upper()
-            tradingsymbol = str(instrument.get("tradingsymbol", "")).upper()
+                instrument_name = str(instrument.get("name", "")).upper()
+                tradingsymbol = str(instrument.get("tradingsymbol", "")).upper()
 
-            if instrument_name != wanted_name and not tradingsymbol.startswith(wanted_name):
-                continue
+                if instrument_name not in aliases and not any(tradingsymbol.startswith(alias) for alias in aliases):
+                    continue
 
-            expiry = self._normalise_expiry(instrument.get("expiry"))
-            if expiry:
-                expiries.add(expiry)
+                expiry = self._normalise_expiry(instrument.get("expiry"))
+                if expiry:
+                    expiries.add(expiry)
 
         return sorted(expiries)
 

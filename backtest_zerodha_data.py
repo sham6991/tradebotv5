@@ -3,6 +3,7 @@ from datetime import datetime, time
 import pandas as pd
 
 from indicators import clean_and_add_indicators
+from main_app.underlyings import get_underlying_spec, normalize_underlying_id
 from strategy import ensure_option_formula_columns
 
 
@@ -29,7 +30,7 @@ def _required(value, label):
     return text
 
 
-def _prepare_nifty(frame, label):
+def _prepare_index(frame, label, underlying_id):
     if frame is None or frame.empty:
         raise ValueError(f"Zerodha returned no candles for {label}.")
     prepared = clean_and_add_indicators(frame)
@@ -37,8 +38,8 @@ def _prepare_nifty(frame, label):
     missing = required - set(prepared.columns)
     if missing:
         raise ValueError(f"{label} historical candles missing columns: {', '.join(sorted(missing))}.")
-    prepared.attrs["instrument"] = "NIFTY"
-    prepared.attrs["tradingsymbol"] = "NIFTY 50"
+    prepared.attrs["instrument"] = normalize_underlying_id(underlying_id)
+    prepared.attrs["tradingsymbol"] = label
     return prepared
 
 
@@ -76,10 +77,12 @@ def fetch_zerodha_backtest_data(
     call_expiry,
     put_strike,
     put_expiry,
+    underlying_id="NIFTY",
 ):
     if not zerodha:
         raise ValueError("Connect Virtual/Paper Zerodha first.")
 
+    spec = get_underlying_spec(underlying_id or settings.get("underlying_id"))
     from_dt, to_dt = market_datetime_range(trade_date)
     interval = str(interval or "").strip() or "3minute"
 
@@ -87,19 +90,20 @@ def fetch_zerodha_backtest_data(
         option_type="CE",
         strike=_required(call_strike, "Call strike"),
         expiry=_required(call_expiry, "Call expiry"),
-        name="NIFTY",
+        name=spec.underlying_id,
     )
     put_contract = zerodha.find_option_contract(
         option_type="PE",
         strike=_required(put_strike, "Put strike"),
         expiry=_required(put_expiry, "Put expiry"),
-        name="NIFTY",
+        name=spec.underlying_id,
     )
-    nifty_token = int(zerodha.get_nifty50_token())
+    index_token = int(zerodha.get_index_token(spec.underlying_id) if hasattr(zerodha, "get_index_token") else zerodha.get_nifty50_token())
 
-    nifty = _prepare_nifty(
-        zerodha.historical_candles(nifty_token, from_dt, to_dt, interval=interval),
-        "NIFTY 50",
+    index_frame = _prepare_index(
+        zerodha.historical_candles(index_token, from_dt, to_dt, interval=interval),
+        spec.display_name,
+        spec.underlying_id,
     )
     options = [
         _prepare_option(
@@ -123,7 +127,9 @@ def fetch_zerodha_backtest_data(
         "from": from_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "to": to_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "interval": interval,
-        "nifty_token": nifty_token,
+        "underlying_id": spec.underlying_id,
+        "index_token": index_token,
+        "nifty_token": index_token,
         "contracts": [_contract_row(call_contract, "CE"), _contract_row(put_contract, "PE")],
     }
-    return nifty, options, metadata
+    return index_frame, options, metadata

@@ -6,11 +6,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class StaticDatePickerContractTests(unittest.TestCase):
-    def test_main_intraday_and_options_auto_keep_native_date_inputs(self):
+    def test_main_and_intraday_keep_native_date_inputs(self):
         pages = {
             "main": ROOT / "web_static" / "index.html",
             "intraday": ROOT / "web_static" / "intraday.html",
-            "options_auto": ROOT / "web_static" / "options_auto.html",
         }
 
         for name, path in pages.items():
@@ -22,7 +21,6 @@ class StaticDatePickerContractTests(unittest.TestCase):
         scripts = {
             "main": ROOT / "web_static" / "app.js",
             "intraday": ROOT / "web_static" / "intraday.js",
-            "options_auto": ROOT / "web_static" / "options_auto.js",
         }
 
         for name, path in scripts.items():

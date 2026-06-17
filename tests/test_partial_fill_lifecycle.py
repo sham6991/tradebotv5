@@ -179,7 +179,7 @@ class PartialFillLifecycleTests(unittest.TestCase):
         self.assertEqual(session.open_position["entry_price"], 99.5)
         self.assertEqual([order["quantity"] for order in fake_orders.placed], [25, 25])
 
-    def test_partial_market_entry_cancels_remainder_before_opening_position(self):
+    def test_legacy_market_partial_entry_no_longer_runs_in_limit_only_mode(self):
         fake_orders = FakeOrderManager({})
         session, option = session_with_orders(fake_orders)
         session.settings["enforce_market_hours"] = 0
@@ -206,10 +206,9 @@ class PartialFillLifecycleTests(unittest.TestCase):
 
         session._try_entry(0)
 
-        self.assertEqual(fake_orders.cancelled, ["P1"])
-        self.assertIsNotNone(session.open_position)
-        self.assertEqual(session.open_position["quantity"], 25)
-        self.assertEqual([order["side"] for order in fake_orders.placed], ["BUY", "SELL", "SELL"])
+        self.assertEqual(fake_orders.cancelled, [])
+        self.assertIsNone(session.open_position)
+        self.assertTrue(session.pending_entry or session.trades)
 
     def test_partial_exit_fill_activates_kill_switch_without_finalizing_trade(self):
         fake_orders = FakeOrderManager({

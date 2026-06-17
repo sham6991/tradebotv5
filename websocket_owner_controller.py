@@ -9,9 +9,8 @@ from typing import Any, Callable
 
 OWNER_NONE = "NONE"
 OWNER_MAIN_APP = "MAIN_APP"
-OWNER_OPTIONS_AUTO = "OPTIONS_AUTO"
 OWNER_INTRADAY = "INTRADAY"
-ALLOWED_OWNERS = {OWNER_NONE, OWNER_MAIN_APP, OWNER_OPTIONS_AUTO, OWNER_INTRADAY}
+ALLOWED_OWNERS = {OWNER_NONE, OWNER_MAIN_APP, OWNER_INTRADAY}
 
 
 class WebSocketOwnerController:
@@ -62,7 +61,6 @@ class WebSocketOwnerController:
                 "zerodha_login_required": preferred != OWNER_NONE and not connected,
                 "can_activate_preferred": self.can_activate(preferred, self.active_mode, connected)["allowed"],
                 "can_start_main_app": self.can_start_owner(OWNER_MAIN_APP, self.active_mode, connected)["allowed"],
-                "can_start_options_auto": self.can_start_owner(OWNER_OPTIONS_AUTO, self.active_mode, connected)["allowed"],
                 "can_start_intraday": self.can_start_owner(OWNER_INTRADAY, self.active_mode, connected)["allowed"],
                 "blockers": blockers,
                 "warnings": list(self.warnings),
@@ -132,7 +130,10 @@ class WebSocketOwnerController:
             self.active_ticker_name = str(ticker_name or self.active_ticker_name or _default_ticker_name(owner, self.active_mode))
             self.active_token_count = len(tokens) if tokens else self.active_token_count
             self.active_tokens_sample = tokens[:12] if tokens else self.active_tokens_sample
-            self.owner_status = "RECONNECTING" if same_owner and reason and "reconnect" in reason.lower() else "ACTIVE"
+            if tokens:
+                self.owner_status = "RECONNECTING" if same_owner and reason and "reconnect" in reason.lower() else "ACTIVE"
+            else:
+                self.owner_status = "RESERVED"
             self.blockers = []
             self.last_error = ""
             self.last_switch_reason = reason or f"{owner} acquired websocket owner lock."
@@ -252,6 +253,8 @@ class WebSocketOwnerController:
             return "Login to Zerodha to activate the preferred websocket owner."
         if state.get("active_owner") == OWNER_NONE:
             return "Select and activate a websocket owner."
+        if str(state.get("owner_status") or "").upper() == "RESERVED":
+            return f"{_owner_label(state.get('active_owner'))} owns the feed slot and is waiting for websocket subscription tokens."
         return f"{_owner_label(state.get('active_owner'))} owns the websocket feed."
 
 
@@ -261,9 +264,6 @@ def _normalize_owner(owner: Any) -> str:
         "MAIN": OWNER_MAIN_APP,
         "MAINAPP": OWNER_MAIN_APP,
         "MAIN_APP": OWNER_MAIN_APP,
-        "OPTIONS": OWNER_OPTIONS_AUTO,
-        "OPTION_AUTO": OWNER_OPTIONS_AUTO,
-        "OPTIONS_AUTO": OWNER_OPTIONS_AUTO,
         "INTRADAY": OWNER_INTRADAY,
         "NONE": OWNER_NONE,
         "": OWNER_NONE,
@@ -281,8 +281,6 @@ def _normalize_mode(mode: Any) -> str:
 def _default_ticker_name(owner: str, mode: str) -> str:
     if owner == OWNER_MAIN_APP:
         return "default"
-    if owner == OWNER_OPTIONS_AUTO:
-        return f"options_auto_{str(mode or 'paper').lower()}"
     if owner == OWNER_INTRADAY:
         return f"intraday_{str(mode or 'paper').lower()}"
     return ""
@@ -292,7 +290,6 @@ def _owner_label(owner: Any) -> str:
     owner = _normalize_owner(owner)
     return {
         OWNER_MAIN_APP: "Main App",
-        OWNER_OPTIONS_AUTO: "Options Auto",
         OWNER_INTRADAY: "Intraday",
         OWNER_NONE: "No owner",
     }.get(owner, str(owner or "Unknown"))

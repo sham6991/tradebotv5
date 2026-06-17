@@ -165,6 +165,11 @@ function $all(selector, root = document) {
   return Array.from(root.querySelectorAll(selector));
 }
 
+function on(selector, eventName, handler) {
+  const node = $(selector);
+  if (node) node.addEventListener(eventName, handler);
+}
+
 async function api(path, payload) {
   let options = {};
   if (payload !== undefined) {
@@ -1129,6 +1134,18 @@ function escapeHtml(value) {
   }[char]));
 }
 
+function renderWebsocketOwner(owner = {}) {
+  setText("#ws-owner-preferred", owner.preferred_owner || "NONE");
+  setText("#ws-owner-active", owner.active_owner || "NONE");
+  setText("#ws-owner-mode", `Mode ${owner.active_mode || "-"}`);
+  setText("#ws-owner-ticker", owner.active_ticker_name || "-");
+  setText("#ws-owner-token-count", `Tokens ${owner.active_token_count || 0}`);
+  const blockers = owner.blockers || [];
+  const health = blockers.length ? "Blocked" : owner.owner_status || "Stopped";
+  setText("#ws-owner-health", health);
+  setText("#ws-owner-action", owner.next_action || blockers[0] || "Ready");
+}
+
 async function refreshStatus() {
   if (state.refreshBusy) return;
   state.refreshBusy = true;
@@ -1159,6 +1176,7 @@ async function refreshStatus() {
   $("#paper-connection").textContent = connectionText(data.connections.PAPER);
   $("#live-connection").textContent = connectionText(data.connections.LIVE);
   renderCommandCenter(data);
+  renderWebsocketOwner(data.websocket_owner_state || {});
   renderNetworkHealth(data.network_health || {});
   renderRecoveryStatus(data.recovery_status || {});
   $("#latest-result").textContent = JSON.stringify(data.last_backtest || data.last_replay?.summary || {}, null, 2);
@@ -1430,6 +1448,37 @@ function bindForms() {
       } catch (error) {
         toast(error.message);
       }
+    });
+  });
+
+  on("#ws-owner-main", "click", async event => {
+    await guardedCommand("ws-owner-main", event.currentTarget, async () => {
+      await api("/api/websocket-owner/preferred", { owner: "MAIN_APP" });
+      const result = await api("/api/websocket-owner/activate", { owner: "MAIN_APP", mode: state.lastStatus?.current_mode || "PAPER" });
+      renderWebsocketOwner(result);
+      toast("Main App owner selected");
+    });
+  });
+  on("#ws-owner-intraday", "click", async event => {
+    await guardedCommand("ws-owner-intraday", event.currentTarget, async () => {
+      await api("/api/websocket-owner/preferred", { owner: "INTRADAY" });
+      const result = await api("/api/websocket-owner/activate", { owner: "INTRADAY", mode: state.lastStatus?.current_mode || "PAPER" });
+      renderWebsocketOwner(result);
+      toast("Intraday owner selected");
+    });
+  });
+  on("#ws-owner-release", "click", async event => {
+    await guardedCommand("ws-owner-release", event.currentTarget, async () => {
+      const result = await api("/api/websocket-owner/release", { owner: state.lastStatus?.websocket_owner_state?.active_owner || "NONE" });
+      renderWebsocketOwner(result);
+      toast("Websocket owner released");
+    });
+  });
+  on("#ws-owner-stop", "click", async event => {
+    await guardedCommand("ws-owner-stop", event.currentTarget, async () => {
+      const result = await api("/api/websocket-owner/stop", {});
+      renderWebsocketOwner(result);
+      toast("Active feed stopped");
     });
   });
 

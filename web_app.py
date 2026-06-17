@@ -23,8 +23,8 @@ from execution_v2 import Executor
 from indicators import clean_and_add_indicators
 from intraday.web_routes import IntradayWebRoutes
 from live_backtest_optimizer import date_range_from_months, run_live_backtest_optimizer
+from main_app.underlyings import UNDERLYING_SPECS
 from market_cue import MarketCueService
-from options_auto.web_routes import OptionsAutoWebRoutes
 from parity_replay import build_parity_report
 from position_reconciler import PositionReconciler
 from reporting import timestamped_file
@@ -36,7 +36,7 @@ from trade_settings_optimizer import OptimizerStopped, run_risk_settings_optimiz
 from trading_tab_optimizer import run_trading_tab_optimizer
 from ui_replay import REPLAY_FILTERS, latest_replay_database, replay_table_row
 from settings_service import DEFAULT_SETTINGS, SETTING_LABELS, SETTINGS_PROFILE_PATH
-from websocket_owner_controller import OWNER_INTRADAY, OWNER_MAIN_APP, OWNER_NONE, OWNER_OPTIONS_AUTO, WebSocketOwnerController
+from websocket_owner_controller import OWNER_INTRADAY, OWNER_MAIN_APP, OWNER_NONE, WebSocketOwnerController
 from zerodha_auth import DEFAULT_REDIRECT_URL, ZerodhaAuthStore
 from zerodha_client import ZerodhaClient
 
@@ -230,7 +230,6 @@ class WebTradeBotApp:
             active_ticker_provider=self.websocket_owner_has_active_ticker,
         )
         self.intraday_routes = IntradayWebRoutes(self, RESULT_FOLDER)
-        self.options_auto_routes = OptionsAutoWebRoutes(self, RESULT_FOLDER)
 
     @property
     def base_url(self):
@@ -450,7 +449,6 @@ class WebTradeBotApp:
         owner = str(owner or OWNER_NONE).upper()
         wanted = {
             OWNER_MAIN_APP: ("default",),
-            OWNER_OPTIONS_AUTO: ("options_auto",),
             OWNER_INTRADAY: ("intraday",),
         }.get(owner, ())
         if not wanted:
@@ -496,14 +494,41 @@ class WebTradeBotApp:
         if owner == OWNER_MAIN_APP:
             self.stop()
             return self.websocket_owner_controller.release_owner(OWNER_MAIN_APP, "Main App feed stopped by owner panel.")
-        if owner == OWNER_OPTIONS_AUTO:
-            self.options_auto_routes.service.stop_live_scan({"mode": "PAPER"})
-            self.options_auto_routes.service.stop_live_scan({"mode": "REAL"})
-            return self.websocket_owner_controller.release_owner(OWNER_OPTIONS_AUTO, "Options Auto feed stopped by owner panel.")
         if owner == OWNER_INTRADAY:
             self.intraday_routes.service.stop()
             return self.websocket_owner_controller.release_owner(OWNER_INTRADAY, "Intraday feed stopped by owner panel.")
         return self.websocket_owner_controller.release_owner(OWNER_NONE, "No active websocket owner.")
+
+    def main_app_architecture_snapshot(self):
+        return {
+            "app": "MAIN_APP",
+            "legacy_options_module_removed": True,
+            "allowed_websocket_owners": [OWNER_NONE, OWNER_MAIN_APP, OWNER_INTRADAY],
+            "underlyings": {
+                key: {
+                    "display_name": spec.display_name,
+                    "spot_quote_key": spec.spot_quote_key,
+                    "strike_step": spec.strike_step,
+                    "default_lot_size": spec.default_lot_size,
+                    "index_exchange": spec.index_exchange,
+                }
+                for key, spec in UNDERLYING_SPECS.items()
+            },
+            "order_policy": {
+                "entry": "BUY LIMIT",
+                "stoploss": "SELL SL-LIMIT",
+                "target": "SELL LIMIT",
+                "product": "NRML",
+                "forbidden_order_types": ["MARKET", "SL-M"],
+                "auto_lot_sizing": False,
+                "market_depth": False,
+                "news_scanner": False,
+            },
+            "decision_kernel": {
+                "shared_by": ["PAPER", "LIVE", "LIVE_MONITOR", "BACKTEST"],
+                "active_plugin": "FAST_OHLCV",
+            },
+        }
 
     def empty_network_health(self, mode):
         return {
@@ -2116,8 +2141,6 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.send_static_file("index.html")
         if path.startswith("/static/"):
             return self.send_static_file(path[len("/static/"):])
-        if self.app_state.options_auto_routes.can_handle_get(path):
-            return self.app_state.options_auto_routes.handle_get(self, path, parsed)
         if self.app_state.intraday_routes.can_handle_get(path):
             return self.app_state.intraday_routes.handle_get(self, path, parsed)
         if path == "/api/status/summary":
@@ -2126,6 +2149,8 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
             return self.send_json(self.app_state.status_payload())
         if path == "/api/websocket-owner/status":
             return self.send_json(self.app_state.websocket_owner_state())
+        if path == "/api/main-app/architecture":
+            return self.send_json(self.app_state.main_app_architecture_snapshot())
         if path == "/api/candles":
             params = parse_qs(parsed.query)
             name = (params.get("name") or ["NIFTY"])[0]
@@ -2164,8 +2189,6 @@ class TradeBotRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         payload = self.read_payload()
-        if self.app_state.options_auto_routes.can_handle_post(path):
-            return self.app_state.options_auto_routes.handle_post(self, path, payload)
         if self.app_state.intraday_routes.can_handle_post(path):
             return self.app_state.intraday_routes.handle_post(self, path, payload)
         if path == "/api/settings/apply-backtest-live":

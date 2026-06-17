@@ -279,7 +279,8 @@ class PaperBalanceCheckTests(unittest.TestCase):
         session.balance = 10000
         session._try_entry(0)
 
-        self.assertIsNotNone(session.open_position)
+        self.assertIsNone(session.open_position)
+        self.assertIsNotNone(session.pending_entry)
         self.assertEqual(session.trade_count, 0)
 
 

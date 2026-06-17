@@ -507,7 +507,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
         contract_lot_size = self.orders.lot_size(tradingsymbol)
         return self.lots * contract_lot_size, contract_lot_size
 
-    def _place_order(self, side, signal, qty, order_type="MARKET", price=None, trigger_price=None):
+    def _place_order(self, side, signal, qty, order_type="LIMIT", price=None, trigger_price=None):
         order_started = time.perf_counter()
         tradingsymbol = signal.get("tradingsymbol") or signal.get("instrument")
         product = self._order_product()
@@ -517,6 +517,13 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             order_type,
             price,
             tradingsymbol,
+        )
+        order_type, price, trigger_price = self._enforce_main_app_limit_order_policy(
+            side,
+            signal,
+            order_type,
+            price,
+            trigger_price,
         )
         idempotency_key = self._order_idempotency_key(
             side,
@@ -661,7 +668,7 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             return 0.2
 
     def _maybe_live_option_market_entry_limit(self, side, signal, order_type, price, tradingsymbol):
-        order_type = str(order_type or "MARKET").upper()
+        order_type = str(order_type or "LIMIT").upper()
         side = str(side or "").upper()
         if (
             self.mode != "LIVE"
@@ -694,6 +701,37 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
             },
         )
         return "LIMIT", limit_price
+
+    def _enforce_main_app_limit_order_policy(self, side, signal, order_type, price, trigger_price):
+        side = str(side or "").upper()
+        order_type = str(order_type or "LIMIT").upper()
+        if order_type in {"MARKET", "SL-M", "SLM"}:
+            order_type = "LIMIT"
+        if order_type == "LIMIT" and price in ("", None):
+            price = self._fallback_limit_price(side, signal)
+        if order_type == "SL":
+            if price in ("", None) and trigger_price not in ("", None):
+                try:
+                    price = self._round_price(float(trigger_price) - float(self.settings.get("stoploss_limit_buffer_points", 2) or 2))
+                except (TypeError, ValueError):
+                    price = trigger_price
+        return order_type, price, trigger_price
+
+    def _fallback_limit_price(self, side, signal):
+        keys = ("entry", "ltp", "last_price", "exit_price", "_live_entry_limit_price")
+        for key in keys:
+            value = signal.get(key)
+            if value not in ("", None):
+                try:
+                    price = float(value)
+                    if side == "BUY":
+                        price += max(float(self.settings.get("live_option_market_entry_limit_buffer_points", 2) or 2), self._price_tick())
+                    elif side == "SELL":
+                        price = max(price - max(float(self.settings.get("emergency_exit_buffer_points", 2) or 2), self._price_tick()), self._price_tick())
+                    return self._round_price(price)
+                except (TypeError, ValueError):
+                    continue
+        return None
 
     def _latest_option_ltp(self, signal):
         try:
@@ -819,13 +857,16 @@ class LivePaperSession(BrokerReconciliationMixin, RiskRuntimeMixin, SessionPersi
         if margin_error:
             self._record_rejected_entry(signal, i, margin_error)
             return "entry_rejected"
-        entry_order_type = str(signal.get("entry_order_type", "MARKET") or "MARKET").upper()
+        entry_order_type = str(signal.get("entry_order_type", "LIMIT") or "LIMIT").upper()
+        if entry_order_type in {"MARKET", "SL-M", "SLM"}:
+            signal["entry_order_type"] = "LIMIT"
+            entry_order_type = "LIMIT"
         if entry_order_type == "LIMIT":
             return self._place_pending_limit_entry(signal, i, qty, lot_size)
 
         self.order_transition_in_progress = True
         try:
-            entry_status, entry_order_id = self._place_order("BUY", signal, qty, order_type="MARKET")
+            entry_status, entry_order_id = self._place_order("BUY", signal, qty, order_type="LIMIT", price=signal.get("entry"))
             if entry_status.startswith("FAILED"):
                 self._record_rejected_entry(signal, i, entry_status)
                 return "order_failed"

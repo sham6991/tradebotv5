@@ -361,10 +361,10 @@ def decide_entry_type(df, i, settings=None, current_candle_closed=True, ltp=None
                 return _with_buy_aliases(decision)
             return _finish(decision, "live_candle_score_below_setup")
         if check_aggressive_live_entry(features, score, rejection, ltp=ltp, settings=score_settings):
-            decision["Entry Type"] = "MARKET"
-            decision["Final Decision"] = "MARKET ENTRY"
+            decision["Entry Type"] = "BUY LIMIT"
+            decision["Final Decision"] = "BUY LIMIT ENTRY"
             decision["Setup Status"] = "AGGRESSIVE LIVE ENTRY"
-            decision["Decision Reason"] = "aggressive_live_entry_passed"
+            decision["Decision Reason"] = "aggressive_live_entry_passed_limit_only"
             return _with_buy_aliases(decision)
         decision["Final Decision"] = "WAIT"
         decision["Decision Reason"] = rejection["Rejection Reason"] or "aggressive_live_entry_not_confirmed"
@@ -379,10 +379,10 @@ def decide_entry_type(df, i, settings=None, current_candle_closed=True, ltp=None
         and decision["BodyPercent"] >= score_settings["market_entry_minimum_body_percent"]
         and decision["ClosePosition"] >= score_settings["market_entry_minimum_close_position"]
     ):
-        decision["Entry Type"] = "MARKET"
-        decision["Final Decision"] = "MARKET ENTRY"
+        decision["Entry Type"] = "BUY LIMIT"
+        decision["Final Decision"] = "BUY LIMIT ENTRY"
         decision["Setup Status"] = "ENTRY ALLOWED"
-        decision["Decision Reason"] = "market_entry_conditions_passed"
+        decision["Decision Reason"] = "market_entry_conditions_passed_limit_only"
         return _with_buy_aliases(decision)
     if (
         decision["Early Score"] >= score_settings["buy_limit_score_low"]
@@ -454,7 +454,7 @@ def _finish(decision, reason):
 
 
 def _with_buy_aliases(decision):
-    decision["Buy Entry"] = "BUY" if decision.get("Final Decision") in {"MARKET ENTRY", "BUY LIMIT ENTRY"} else ""
+    decision["Buy Entry"] = "BUY" if decision.get("Final Decision") == "BUY LIMIT ENTRY" else ""
     decision["Sell Score"] = ""
     decision["Sell Entry"] = ""
     return decision

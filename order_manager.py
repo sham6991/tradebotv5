@@ -31,9 +31,24 @@ class ZerodhaOrderManager:
     def is_live(self):
         return self.mode == "LIVE"
 
-    def place_order(self, side, tradingsymbol, quantity, product="NRML", order_type="MARKET", price=None, trigger_price=None):
+    def place_order(self, side, tradingsymbol, quantity, product="NRML", order_type="LIMIT", price=None, trigger_price=None):
         side = str(side or "").upper()
-        order_type = str(order_type or "MARKET").upper()
+        order_type = str(order_type or "LIMIT").upper()
+        product = str(product or "NRML").upper()
+        policy_error = self._main_app_order_policy_error(order_type, product, quantity)
+        if policy_error:
+            classification = classify_runtime_error(policy_error, context="order_placement")
+            return {
+                "status": f"FAILED: {policy_error}",
+                "order_id": "",
+                "log_status": "",
+                "log_data": {},
+                "error": policy_error,
+                "error_class": classification["class"],
+                "error_category": classification["category"],
+                "retriable": False,
+                "requires_reconciliation": False,
+            }
         if not self.is_live():
             return {
                 "status": f"PAPER {side}",
@@ -72,37 +87,6 @@ class ZerodhaOrderManager:
                     "log_data": {"quantity": quantity, "price": price},
                     "error": "",
                 }
-            if order_type == "SL-M":
-                if self._looks_like_option_symbol(tradingsymbol):
-                    classification = classify_runtime_error(
-                        "SL-M is blocked for option stoploss orders; use SL with trigger and limit price.",
-                        context="order_placement",
-                    )
-                    return {
-                        "status": "FAILED: SL-M is blocked for option stoploss orders; use SL with trigger and limit price.",
-                        "order_id": "",
-                        "log_status": "",
-                        "log_data": {},
-                        "error": "SL-M is blocked for option stoploss orders; use SL with trigger and limit price.",
-                        "error_class": classification["class"],
-                        "error_category": classification["category"],
-                        "retriable": classification["retriable"],
-                        "requires_reconciliation": classification["requires_reconciliation"],
-                    }
-                order_id = self.zerodha.place_stoploss_market_order(
-                    tradingsymbol=tradingsymbol,
-                    transaction_type=side,
-                    quantity=quantity,
-                    trigger_price=trigger_price,
-                    product=product,
-                )
-                return {
-                    "status": f"{side} SL-M ORDER PLACED",
-                    "order_id": order_id,
-                    "log_status": "SL-M PLACED",
-                    "log_data": {"quantity": quantity, "trigger_price": trigger_price},
-                    "error": "",
-                }
             if order_type == "SL":
                 order_id = self.zerodha.place_stoploss_limit_order(
                     tradingsymbol=tradingsymbol,
@@ -120,19 +104,7 @@ class ZerodhaOrderManager:
                     "error": "",
                 }
 
-            order_id = self.zerodha.place_market_order(
-                tradingsymbol=tradingsymbol,
-                transaction_type=side,
-                quantity=quantity,
-                product=product,
-            )
-            return {
-                "status": f"{side} MARKET ORDER PLACED",
-                "order_id": order_id,
-                "log_status": "MARKET PLACED",
-                "log_data": {"quantity": quantity},
-                "error": "",
-            }
+            raise ValueError("Main App allows only LIMIT and SL-LIMIT orders.")
         except Exception as exc:
             classification = classify_order_error(exc)
             return {
@@ -146,6 +118,20 @@ class ZerodhaOrderManager:
                 "retriable": classification["retriable"],
                 "requires_reconciliation": classification["requires_reconciliation"],
             }
+
+    def _main_app_order_policy_error(self, order_type, product, quantity):
+        if order_type in {"MARKET", "SL-M", "SLM"}:
+            return "Main App is LIMIT-only. MARKET and SL-M are forbidden."
+        if order_type not in {"LIMIT", "SL"}:
+            return "Main App allows only LIMIT and SL-LIMIT orders."
+        if product != "NRML":
+            return "Main App product must be NRML."
+        try:
+            if int(quantity or 0) <= 0:
+                return "Quantity must be positive and derived from exact user lots."
+        except (TypeError, ValueError):
+            return "Quantity must be positive and derived from exact user lots."
+        return ""
 
     def cancel_order(self, order_id, retries=2, retry_delay=0.2):
         if not self.is_live() or not self.zerodha or not order_id:

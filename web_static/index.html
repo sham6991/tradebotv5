@@ -23,7 +23,6 @@
           <button class="nav" data-view="paper">Paper Desk</button>
           <button class="nav" data-view="live">Live Monitor</button>
           <span class="nav-group">Trading</span>
-          <a class="nav nav-link" href="/options-auto">Options Auto</a>
           <a class="nav nav-link nav-intraday" href="/intraday">Intraday Stocks</a>
           <span class="nav-group">Research</span>
           <button class="nav" data-view="market-cue">Market Cue</button>
@@ -126,13 +125,6 @@
             </div>
             <a class="primary-link" href="/intraday">Open Terminal</a>
           </section>
-          <section class="panel launch-panel">
-            <div>
-              <h2>Options Auto</h2>
-              <p>Open the guarded options cockpit for NIFTY/SENSEX CE/PE selection, market cue, paper/shadow evaluation, and real dry-run checks.</p>
-            </div>
-            <a class="primary-link" href="/options-auto">Open Options Auto</a>
-          </section>
           <section class="panel">
             <h2>Network Health</h2>
             <div class="health-toolbar">
@@ -181,6 +173,18 @@
               <div class="connection-grid">
                 <div><span>Virtual/Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
                 <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
+              </div>
+              <div class="account-grid health-grid">
+                <div><span>Preferred Owner</span><strong id="ws-owner-preferred">NONE</strong><small>MAIN_APP or INTRADAY</small></div>
+                <div><span>Active Owner</span><strong id="ws-owner-active">NONE</strong><small id="ws-owner-mode">Mode -</small></div>
+                <div><span>Active Ticker</span><strong id="ws-owner-ticker">-</strong><small id="ws-owner-token-count">Tokens 0</small></div>
+                <div><span>Feed Health</span><strong id="ws-owner-health">Stopped</strong><small id="ws-owner-action">Select owner</small></div>
+              </div>
+              <div class="actions">
+                <button type="button" id="ws-owner-main">Make Main App Owner</button>
+                <button type="button" id="ws-owner-intraday">Make Intraday Owner</button>
+                <button type="button" id="ws-owner-release">Release Owner</button>
+                <button type="button" id="ws-owner-stop">Stop Active Feed</button>
               </div>
             </section>
             <section class="panel debug-panel">

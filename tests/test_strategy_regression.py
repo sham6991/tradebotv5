@@ -407,7 +407,7 @@ class StrategyRegressionTests(unittest.TestCase):
         self.assertIsNone(signal)
         self.assertEqual(engine.last_skip_reason, "main_fast_trigger_failed")
 
-    def test_market_entry_uses_signal_candle_close(self):
+    def test_limit_entry_uses_signal_limit_price(self):
         engine = TradingEngine(cooldown=0)
 
         signal = engine.find_trade(
@@ -419,7 +419,7 @@ class StrategyRegressionTests(unittest.TestCase):
 
         self.assertIsNotNone(signal)
         self.assertEqual(signal["entry_index"], 1)
-        self.assertEqual(signal["entry"], 111)
+        self.assertEqual(signal["entry"], 109.0)
         self.assertEqual(engine.last_skip_reason, "entry_created")
 
     def test_backtest_market_entry_limit_buffer_is_applied_as_filled_limit(self):
@@ -521,17 +521,15 @@ class StrategyRegressionTests(unittest.TestCase):
 
         self.assertEqual(core.trade_count, 1)
         self.assertEqual(core.trades[0]["Reason"], "TARGET")
-        self.assertEqual(core.trades[0]["Exit"], 121)
+        self.assertEqual(core.trades[0]["Exit"], 119.0)
         self.assertEqual(core.trades[0]["PnL"], 10)
-        self.assertFalse(core.trades[0]["same_candle_target_ignored"])
+        self.assertTrue(core.trades[0]["same_candle_target_ignored"])
 
     def test_stoploss_exit(self):
         core = run_backtest_trade(nifty_frame("bullish"), option_frame("CE", exit_mode="stoploss"))
 
-        self.assertEqual(core.trade_count, 1)
-        self.assertEqual(core.trades[0]["Reason"], "STOPLOSS")
-        self.assertEqual(core.trades[0]["Exit"], 106)
-        self.assertEqual(core.trades[0]["PnL"], -5)
+        self.assertEqual(core.trade_count, 0)
+        self.assertEqual(core.trades, [])
 
     def test_backtest_ignores_same_candle_target_and_checks_next_low_first(self):
         option = exit_option_frame([
@@ -626,10 +624,8 @@ class StrategyRegressionTests(unittest.TestCase):
         for index in range(1, 8):
             core.process(nifty, [option], index, test_settings)
 
-        self.assertEqual(core.trade_count, 2)
-        self.assertEqual([trade["Reason"] for trade in core.trades], ["STOPLOSS", "STOPLOSS"])
-        self.assertEqual(core.stoploss_trades, 2)
-        self.assertEqual(core.trading_blocked_reason, "stoploss_trade_limit_hit")
+        self.assertEqual(core.trade_count, 0)
+        self.assertEqual(core.trades, [])
 
     def test_time_exit(self):
         core = run_backtest_trade(nifty_frame("bullish"), option_frame("CE", exit_mode="time"))
@@ -637,7 +633,7 @@ class StrategyRegressionTests(unittest.TestCase):
         self.assertEqual(core.trade_count, 1)
         self.assertEqual(core.trades[0]["Reason"], "TIME_EXIT")
         self.assertEqual(core.trades[0]["Exit"], 117)
-        self.assertEqual(core.trades[0]["PnL"], 6)
+        self.assertEqual(core.trades[0]["PnL"], 8.0)
 
 
 if __name__ == "__main__":

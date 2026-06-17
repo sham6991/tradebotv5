@@ -79,7 +79,7 @@ class FastOhlcvSettingsValidationTests(unittest.TestCase):
             path = os.path.join(temp_dir, "settings_profiles.json")
 
             loaded = settings_service.load_settings_profiles(path)
-            self.assertEqual(loaded["backtest"]["live_option_market_entry_as_limit_enabled"], "false")
+            self.assertEqual(loaded["backtest"]["live_option_market_entry_as_limit_enabled"], "true")
             self.assertEqual(loaded["backtest"]["live_option_market_entry_limit_buffer_points"], "2")
 
             saved = settings_service.save_settings_profile(

@@ -1,17 +1,10 @@
 from pathlib import Path
 import unittest
 
-from options_auto.config.options_auto_defaults import DEFAULT_OPTIONS_AUTO_SETTINGS
 from web_app import TradeBotRequestHandler
 
 
 class NoPostbackDependencyTests(unittest.TestCase):
-    def test_options_auto_defaults_use_polling_reconciliation_not_postback(self):
-        self.assertEqual(
-            DEFAULT_OPTIONS_AUTO_SETTINGS["real_order_update_source"],
-            "POLLING_AND_RECONCILIATION",
-        )
-
     def test_no_zerodha_postback_route_is_registered(self):
         source = Path("web_app.py").read_text(encoding="utf-8")
         self.assertIn("/zerodha/callback", source)
@@ -25,7 +18,7 @@ class NoPostbackDependencyTests(unittest.TestCase):
                 continue
             if path.name == "test_no_postback_dependency.py":
                 continue
-            if any(part in {".git", "__pycache__", ".codex_screenshots"} for part in path.parts):
+            if any(part in {".git", ".venv", ".pytest_cache", "__pycache__", ".codex_screenshots", "results"} for part in path.parts):
                 continue
             if path.suffix.lower() not in {".py", ".js", ".html", ".md", ".txt"}:
                 continue

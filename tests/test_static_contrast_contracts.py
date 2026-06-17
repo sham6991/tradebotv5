@@ -28,25 +28,6 @@ def contrast_ratio(foreground: str, background: str) -> float:
 
 
 class StaticContrastContractTests(unittest.TestCase):
-    def test_options_auto_backtest_table_overrides_shared_dark_shell_table_colors(self):
-        css = (ROOT / "web_static" / "options_auto.css").read_text(encoding="utf-8")
-
-        for token in (
-            "body.app-shell .oa-shell .oa-table",
-            "body.app-shell .oa-shell .oa-table th",
-            "body.app-shell .oa-shell .oa-table td",
-            "body.app-shell .oa-shell .oa-table tbody tr:nth-child(even)",
-            "body.app-shell .oa-shell .oa-status-badge",
-            "body.app-shell .oa-shell .oa-badge-green",
-            "body.app-shell .oa-shell .oa-badge-red",
-            "body.app-shell .oa-shell .oa-badge-yellow",
-            "body.app-shell .oa-shell .oa-badge-grey",
-            "body.app-shell .oa-shell .oa-badge-blue",
-            'body.app-shell .oa-shell input[type="date"]',
-            "color-scheme: light",
-        ):
-            self.assertIn(token, css)
-
     def test_main_and_intraday_tables_override_light_even_row_defaults_in_dark_shell(self):
         app_css = (ROOT / "web_static" / "app.css").read_text(encoding="utf-8")
         intraday_css = (ROOT / "web_static" / "intraday.css").read_text(encoding="utf-8")
@@ -62,13 +43,6 @@ class StaticContrastContractTests(unittest.TestCase):
 
     def test_required_contrast_pairs_stay_above_wcag_normal_text_threshold(self):
         pairs = {
-            "options_auto_table_text": ("#17212b", "#ffffff"),
-            "options_auto_table_even": ("#17212b", "#f6f9fc"),
-            "options_auto_table_header": ("#25364a", "#edf4fa"),
-            "options_auto_green_badge": ("#0f6b45", "#e8f6ef"),
-            "options_auto_red_badge": ("#9f1f17", "#fdeceb"),
-            "options_auto_yellow_badge": ("#744600", "#fff4dc"),
-            "options_auto_blue_badge": ("#164f82", "#e7f1fb"),
             "main_dark_table": ("#eef4fb", "#121a24"),
             "main_dark_even_table": ("#eef4fb", "#182332"),
             "intraday_dark_table": ("#eef4fb", "#121a24"),

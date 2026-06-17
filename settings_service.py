@@ -15,7 +15,7 @@ DEFAULT_SETTINGS = {
     "profit_points": "20",
     "safety_points": "10",
     "stoploss_limit_buffer_points": "2",
-    "live_option_market_entry_as_limit_enabled": "false",
+    "live_option_market_entry_as_limit_enabled": "true",
     "live_option_market_entry_limit_buffer_points": "2",
     "trailing_sl_enabled": "false",
     "trailing_start_points": "10",
@@ -165,8 +165,7 @@ def interval_label(value):
 
 
 def normalise_order_product(value):
-    text = str(value or "NRML").strip().upper()
-    return "MIS" if text in ("MIS", "INTRADAY") else "NRML"
+    return "NRML"
 
 
 def normalise_trend_set(value):

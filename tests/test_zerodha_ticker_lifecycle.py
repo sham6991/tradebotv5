@@ -99,15 +99,15 @@ class ZerodhaTickerLifecycleTests(unittest.TestCase):
         client.start_ticker([256265], on_ticks=lambda ticks: None)
         default = client.ticker
 
-        client.start_named_ticker("options_auto_paper", [111, 222], on_ticks=lambda ticks: None)
-        named = client._named_tickers["options_auto_paper"]
+        client.start_named_ticker("intraday_paper", [111, 222], on_ticks=lambda ticks: None)
+        named = client._named_tickers["intraday_paper"]
 
         self.assertIs(client.ticker, default)
         self.assertIsNot(named, default)
         self.assertEqual(named.api_key, "api-key")
         self.assertEqual(named.access_token, "access-token")
 
-        client.stop_named_ticker("options_auto_paper")
+        client.stop_named_ticker("intraday_paper")
 
         self.assertTrue(named.closed)
         self.assertFalse(default.closed)
@@ -125,7 +125,7 @@ class ZerodhaTickerLifecycleTests(unittest.TestCase):
 
         self.assertEqual(ticker.reconnect_max_tries, 7)
         self.assertEqual(ticker.reconnect_max_delay, 3)
-        self.assertEqual(ticker.options_auto_reconnect_policy["applied"]["reconnect_max_tries"], 7)
+        self.assertEqual(ticker.reconnect_policy["applied"]["reconnect_max_tries"], 7)
 
 
 if __name__ == "__main__":

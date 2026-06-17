@@ -22,7 +22,7 @@ def base_rows():
 
 
 class FastOhlcvEntryTests(unittest.TestCase):
-    def test_market_entry_requires_main_trigger_and_no_rejection(self):
+    def test_high_score_entry_uses_buy_limit_not_market(self):
         rows = base_rows()
         rows.append({
             "datetime": datetime(2026, 5, 21, 9, 45),
@@ -35,8 +35,8 @@ class FastOhlcvEntryTests(unittest.TestCase):
 
         decision = decide_entry_type(pd.DataFrame(rows), 10, {})
 
-        self.assertEqual(decision["Final Decision"], "MARKET ENTRY")
-        self.assertEqual(decision["Entry Type"], "MARKET")
+        self.assertEqual(decision["Final Decision"], "BUY LIMIT ENTRY")
+        self.assertEqual(decision["Entry Type"], "BUY LIMIT")
         self.assertEqual(decision["Early Score"], 60)
         self.assertEqual(decision["Main Fast Trigger Passed"], "YES")
         self.assertEqual(decision["Rejection Active"], "NO")

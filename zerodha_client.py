@@ -514,7 +514,7 @@ class ZerodhaClient:
 
         tokens = [int(token) for token in instrument_tokens]
         ticker = KiteTicker(self.api_key, self.access_token)
-        ticker.options_auto_reconnect_policy = _apply_ticker_reconnect_policy(
+        ticker.reconnect_policy = _apply_ticker_reconnect_policy(
             ticker,
             reconnect_max_attempts=reconnect_max_attempts,
             reconnect_backoff_seconds=reconnect_backoff_seconds,
@@ -591,7 +591,6 @@ class ZerodhaClient:
         - named_ticker_count: number of named tickers
         - connection_budget_available: true if count < 3
         - connection_limit_risk: true if count >= 3
-        - options_auto_can_start_own_websocket: convenience flag (not available if count >= 3 and no options_auto ticker exists)
         - recommendation: human readable suggestion
         """
         names = []
@@ -615,14 +614,9 @@ class ZerodhaClient:
         budget_available = count < 3
         at_limit = count >= 3
         
-        # Check if options_auto ticker exists
-        has_options_auto = any("options_auto" in str(name).lower() for name in names)
-        
         recommendation = ""
-        if at_limit and not has_options_auto:
-            recommendation = "Zerodha websocket limit reached (3 active connections). Options Auto cannot start new websocket. Will use quote snapshot fallback."
-        elif at_limit and has_options_auto:
-            recommendation = "Zerodha websocket limit reached (3 active connections). Options Auto websocket is running."
+        if at_limit:
+            recommendation = "Zerodha websocket limit reached (3 active connections). Stop Main App or Intraday feed before starting another stream."
         elif count == 2:
             recommendation = "Warning: only 1 websocket connection slot available."
         
@@ -635,7 +629,6 @@ class ZerodhaClient:
             "named_ticker_count": named_count,
             "connection_budget_available": budget_available,
             "connection_limit_risk": at_limit,
-            "options_auto_can_start_own_websocket": budget_available or has_options_auto,
             "recommendation": recommendation,
         }
 

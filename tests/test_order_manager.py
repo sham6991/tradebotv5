@@ -154,18 +154,18 @@ class ZerodhaOrderManagerTests(unittest.TestCase):
         self.assertEqual(result["order_id"], "")
         self.assertEqual(fake.calls, [])
 
-    def test_live_places_market_limit_and_sl_orders(self):
+    def test_live_places_limit_and_sl_orders_only(self):
         fake = FakeZerodha()
         manager = ZerodhaOrderManager(fake, mode="LIVE", default_lot_size=75)
 
-        market = manager.place_order("BUY", "NIFTY25000CE", 50, product="NRML")
+        entry = manager.place_order("BUY", "NIFTY25000CE", 50, product="NRML", order_type="LIMIT", price=100)
         limit = manager.place_order("SELL", "NIFTY25000CE", 50, product="NRML", order_type="LIMIT", price=120)
         stoploss = manager.place_order("SELL", "NIFTY25000CE", 50, product="NRML", order_type="SL", trigger_price=95, price=93)
 
-        self.assertEqual(market["status"], "BUY MARKET ORDER PLACED")
+        self.assertEqual(entry["status"], "BUY LIMIT ORDER PLACED")
         self.assertEqual(limit["status"], "SELL LIMIT ORDER PLACED")
         self.assertEqual(stoploss["status"], "SELL SL ORDER PLACED")
-        self.assertEqual([call[0] for call in fake.calls], ["MARKET", "LIMIT", "SL"])
+        self.assertEqual([call[0] for call in fake.calls], ["LIMIT", "LIMIT", "SL"])
         self.assertEqual(limit["log_data"]["price"], 120)
         self.assertEqual(stoploss["log_data"]["trigger_price"], 95)
         self.assertEqual(stoploss["log_data"]["price"], 93)
@@ -177,7 +177,7 @@ class ZerodhaOrderManagerTests(unittest.TestCase):
         result = manager.place_order("SELL", "NIFTY25000CE", 50, product="NRML", order_type="SL-M", trigger_price=95)
 
         self.assertTrue(result["status"].startswith("FAILED"))
-        self.assertIn("SL-M is blocked", result["error"])
+        self.assertIn("MARKET and SL-M are forbidden", result["error"])
         self.assertEqual(fake.calls, [])
 
     def test_low_level_client_rejects_slm_for_option_symbols(self):

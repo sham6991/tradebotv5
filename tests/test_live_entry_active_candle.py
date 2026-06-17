@@ -200,11 +200,11 @@ class LivePendingCancelOrders:
 
 
 class LiveEntryActiveCandleTests(unittest.TestCase):
-    def test_live_paper_uses_signal_candle_close_for_market_entry(self):
+    def test_live_paper_creates_pending_limit_from_signal_candle_close(self):
         test_settings = settings(entry_offset=0, max_trades=1, lot_size=1)
         nifty = nifty_frame("bearish", count=11)
         ce = fast_option_frame("CE")
-        pe = fast_option_frame("PE", entry_type="market")
+        pe = fast_option_frame("PE", entry_type="limit")
         session = LivePaperSession(
             nifty,
             [ce, pe],
@@ -221,9 +221,10 @@ class LiveEntryActiveCandleTests(unittest.TestCase):
 
         session._try_entry(10)
 
-        self.assertIsNotNone(session.open_position)
-        self.assertEqual(session.open_position["signal"]["type"], "PE")
-        self.assertEqual(session.open_position["entry_price"], 111)
+        self.assertIsNone(session.open_position)
+        self.assertIsNotNone(session.pending_entry)
+        self.assertEqual(session.pending_entry["signal"]["type"], "PE")
+        self.assertEqual(session.pending_entry["limit_price"], 102.0)
 
     def test_live_paper_limit_entry_cancels_after_timeout_without_market_conversion(self):
         test_settings = settings(

@@ -168,27 +168,6 @@
             <div class="table-wrap"><table id="recovery-findings"></table></div>
           </section>
           <div class="grid two">
-            <section class="panel" id="websocket-owner-card">
-              <h2>Zerodha Connection & Websocket Owner</h2>
-              <div class="connection-grid">
-                <div><span>Virtual/Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
-                <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
-              </div>
-              <div class="account-grid health-grid">
-                <div><span>Preferred Owner</span><strong id="ws-owner-preferred">NONE</strong><small>MAIN_APP or INTRADAY</small></div>
-                <div><span>Active Owner</span><strong id="ws-owner-active">NONE</strong><small id="ws-owner-mode">Mode -</small></div>
-                <div><span>Active Ticker</span><strong id="ws-owner-ticker">-</strong><small id="ws-owner-token-count">Tokens 0</small></div>
-                <div><span>Last Tick Age</span><strong id="ws-owner-last-tick">-</strong><small>stale means no valid market data yet</small></div>
-                <div><span>Feed Health</span><strong id="ws-owner-health">Stopped</strong><small id="ws-owner-action">Select owner</small></div>
-                <div><span>Blockers</span><strong id="ws-owner-blockers">-</strong><small>Main App and Intraday cannot own feed together</small></div>
-              </div>
-              <div class="actions">
-                <button type="button" id="ws-owner-main">Make Main App Owner</button>
-                <button type="button" id="ws-owner-intraday">Make Intraday Owner</button>
-                <button type="button" id="ws-owner-release">Release Owner</button>
-                <button type="button" id="ws-owner-stop">Stop Active Feed</button>
-              </div>
-            </section>
             <section class="panel debug-panel">
               <details>
                 <summary>Developer Tools - Latest Result JSON</summary>
@@ -442,6 +421,27 @@
         </section>
 
         <section id="zerodha" class="view">
+          <section class="panel" id="websocket-owner-card">
+            <h2>Zerodha Connection & Websocket Owner</h2>
+            <div class="connection-grid">
+              <div><span>Virtual/Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
+              <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
+            </div>
+            <div class="account-grid health-grid">
+              <div><span>Preferred Owner</span><strong id="ws-owner-preferred">NONE</strong><small>MAIN_APP or INTRADAY</small></div>
+              <div><span>Active Owner</span><strong id="ws-owner-active">NONE</strong><small id="ws-owner-mode">Mode -</small></div>
+              <div><span>Active Ticker</span><strong id="ws-owner-ticker">-</strong><small id="ws-owner-token-count">Tokens 0</small></div>
+              <div><span>Last Tick Age</span><strong id="ws-owner-last-tick">-</strong><small>stale means no valid market data yet</small></div>
+              <div><span>Feed Health</span><strong id="ws-owner-health">Stopped</strong><small id="ws-owner-action">Select owner</small></div>
+              <div><span>Blockers</span><strong id="ws-owner-blockers">-</strong><small>Main App and Intraday cannot own feed together</small></div>
+            </div>
+            <div class="actions">
+              <button type="button" id="ws-owner-main">Make Main App Owner</button>
+              <button type="button" id="ws-owner-intraday">Make Intraday Owner</button>
+              <button type="button" id="ws-owner-release">Release Owner</button>
+              <button type="button" id="ws-owner-stop">Stop Active Feed</button>
+            </div>
+          </section>
           <div class="grid two">
             <form class="panel auth-form" data-mode="PAPER">
               <h2>Virtual/Paper Data Login</h2>

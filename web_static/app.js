@@ -76,8 +76,10 @@ const titles = {
 };
 
 const settingOrder = [
-  "balance", "lot_size", "max_trades", "profit_points", "safety_points", "stoploss_limit_buffer_points",
-  "live_option_market_entry_as_limit_enabled", "live_option_market_entry_limit_buffer_points",
+  "underlying_id", "risk_mode", "entry_logic", "lot_size", "max_trades",
+  "max_daily_loss", "max_daily_profit", "max_consecutive_losses", "square_off_time",
+  "bias_mode", "manual_bias", "allow_price_only_direction_when_futures_unavailable", "balance",
+  "profit_points", "safety_points", "stoploss_limit_buffer_points",
   "trailing_sl_enabled", "trailing_start_points", "trailing_step_points", "trailing_lock_points",
   "time_exit", "cooldown", "chart_interval", "trend_set", "bullish_threshold", "bearish_threshold",
   "rsi_bull", "rsi_bear", "rsi_reversal_bullish", "rsi_reversal_bearish",
@@ -93,25 +95,39 @@ const settingOrder = [
   "aggressive_upper_wick_max", "aggressive_minimum_body_percent", "aggressive_minimum_close_position",
   "aggressive_move_from_low_max_multiplier", "one_entry_attempt_per_candle",
   "missed_limit_cooldown_candles", "max_spread_points",
-  "max_daily_loss", "max_daily_profit", "max_consecutive_losses", "square_off_time", "order_product",
 ];
 
 const settingGroups = [
   {
-    id: "nifty",
-    label: "Nifty",
+    id: "essentials",
+    label: "Essentials",
     keys: [
-      "trend_set",
+      "underlying_id", "risk_mode", "entry_logic",
+      "lot_size", "max_trades",
+      "max_daily_loss", "max_daily_profit", "max_consecutive_losses",
+      "square_off_time", "bias_mode", "manual_bias",
+      "allow_price_only_direction_when_futures_unavailable",
+    ],
+  },
+  {
+    id: "risk",
+    label: "Risk",
+    keys: [
+      "balance",
+      "profit_points", "safety_points", "stoploss_limit_buffer_points",
+      "time_exit", "cooldown", "trailing_sl_enabled",
+      "trailing_start_points", "trailing_step_points", "trailing_lock_points",
+    ],
+  },
+  {
+    id: "advanced",
+    label: "Advanced Expert",
+    keys: [
+      "chart_interval", "trend_set",
       "bullish_threshold", "bearish_threshold",
       "rsi_bull", "rsi_bear",
       "rsi_reversal_bullish", "rsi_reversal_bearish",
       "bullish_reversal_condition", "bearish_reversal_condition",
-    ],
-  },
-  {
-    id: "trading",
-    label: "Trading",
-    keys: [
       "fast_ohlcv_entry_enabled",
       "buy_limit_score_low", "market_entry_score",
       "minimum_body_percent", "minimum_close_position",
@@ -126,24 +142,17 @@ const settingGroups = [
       "aggressive_upper_wick_max", "aggressive_minimum_body_percent",
       "aggressive_minimum_close_position", "aggressive_move_from_low_max_multiplier",
       "one_entry_attempt_per_candle", "missed_limit_cooldown_candles", "max_spread_points",
-    ],
-  },
-  {
-    id: "market",
-    label: "Market",
-    keys: [
-      "balance", "lot_size", "max_trades",
-      "profit_points", "safety_points", "stoploss_limit_buffer_points",
-      "live_option_market_entry_as_limit_enabled", "live_option_market_entry_limit_buffer_points",
-      "trailing_sl_enabled", "trailing_start_points", "trailing_step_points", "trailing_lock_points",
-      "time_exit", "cooldown", "chart_interval",
-      "max_daily_loss", "max_daily_profit", "max_consecutive_losses",
-      "square_off_time", "order_product",
+      "backtest_limit_fill_mode",
     ],
   },
 ];
 
 const liveProfileHiddenSettings = new Set(["chart_interval"]);
+const hiddenUiSettings = new Set([
+  "order_product",
+  "live_option_market_entry_as_limit_enabled",
+  "live_option_market_entry_limit_buffer_points",
+]);
 const booleanSettings = new Set([
   "fast_ohlcv_entry_enabled",
   "enable_chop_filter",
@@ -151,6 +160,7 @@ const booleanSettings = new Set([
   "one_entry_attempt_per_candle",
   "trailing_sl_enabled",
   "live_option_market_entry_as_limit_enabled",
+  "allow_price_only_direction_when_futures_unavailable",
 ]);
 
 function isEnabledValue(value) {
@@ -517,7 +527,7 @@ function collectSettingsFromDialog() {
 
 function openSettings(profile) {
   state.activeSettingsProfile = profile;
-  $("#settings-title").textContent = `${profile[0].toUpperCase()}${profile.slice(1)} Risk Settings`;
+  $("#settings-title").textContent = `${profile[0].toUpperCase()}${profile.slice(1)} Main App Settings`;
   showSettingsError("");
   const tabs = $("#settings-tabs");
   const fields = $("#settings-fields");
@@ -527,21 +537,38 @@ function openSettings(profile) {
   const rendered = new Set();
 
   const makeSettingField = key => {
+    if (hiddenUiSettings.has(key)) return null;
     if ((profile === "paper" || profile === "real") && liveProfileHiddenSettings.has(key)) return;
     const label = document.createElement("label");
     label.textContent = state.labels[key] || key;
-    const input = key === "chart_interval" || key === "trend_set" || key === "order_product" || key === "backtest_limit_fill_mode" || booleanSettings.has(key)
+    const input = [
+        "underlying_id", "risk_mode", "entry_logic", "bias_mode", "manual_bias",
+        "chart_interval", "trend_set", "backtest_limit_fill_mode",
+      ].includes(key) || booleanSettings.has(key)
       ? document.createElement("select")
       : document.createElement("input");
     input.dataset.settingKey = key;
+    if (key === "underlying_id") {
+      ["NIFTY", "SENSEX"].forEach(option => input.add(new Option(option, option)));
+    }
+    if (key === "risk_mode") {
+      ["Conservative", "Balanced", "Aggressive"].forEach(option => input.add(new Option(option, option)));
+    }
+    if (key === "entry_logic") {
+      input.add(new Option("FAST_OHLCV", "FAST_OHLCV"));
+      input.disabled = true;
+    }
+    if (key === "bias_mode") {
+      ["Auto", "Manual"].forEach(option => input.add(new Option(option, option)));
+    }
+    if (key === "manual_bias") {
+      ["Auto", "Bullish", "Bearish"].forEach(option => input.add(new Option(option, option)));
+    }
     if (key === "chart_interval") {
       ["1 min", "2 min", "3 min", "5 min"].forEach(option => input.add(new Option(option, option)));
     }
     if (key === "trend_set") {
       ["Auto", "Bullish", "Bearish"].forEach(option => input.add(new Option(option, option)));
-    }
-    if (key === "order_product") {
-      ["NRML", "MIS"].forEach(option => input.add(new Option(option, option)));
     }
     if (key === "backtest_limit_fill_mode") {
       ["CONSERVATIVE", "SIMPLE", "STRICT"].forEach(option => input.add(new Option(option, option)));
@@ -583,7 +610,7 @@ function openSettings(profile) {
     if (rendered.has(key)) return;
     const field = makeSettingField(key);
     if (!field) return;
-    let fallbackPanel = $("[data-settings-panel='market']", fields);
+    let fallbackPanel = $("[data-settings-panel='advanced']", fields);
     if (!fallbackPanel) fallbackPanel = fields.firstElementChild;
     $(".settings-grid", fallbackPanel).appendChild(field);
   });
@@ -639,7 +666,7 @@ function buildLiveViews() {
           <button type="button" data-option="${index}" data-action="fetch-option">Fetch</button>
         `).join("")}
         <div class="live-actions">
-          <button type="button" data-settings="${profile}">Risk Settings</button>
+          <button type="button" data-settings="${profile}">Main App Settings</button>
           <label>History Days <input data-field="history_days" value="5"></label>
           <label>Interval
             <select data-field="history_interval"><option>1 min</option><option>2 min</option><option selected>3 min</option><option>5 min</option></select>
@@ -1134,7 +1161,15 @@ function escapeHtml(value) {
   }[char]));
 }
 
-function renderWebsocketOwner(owner = {}) {
+function formatAge(value) {
+  if (value === null || value === undefined || value === "") return "-";
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return String(value);
+  if (numeric < 1000) return `${Math.round(numeric)}ms`;
+  return `${Math.round(numeric / 1000)}s`;
+}
+
+function renderWebsocketOwner(owner = {}, feed = {}) {
   setText("#ws-owner-preferred", owner.preferred_owner || "NONE");
   setText("#ws-owner-active", owner.active_owner || "NONE");
   setText("#ws-owner-mode", `Mode ${owner.active_mode || "-"}`);
@@ -1142,8 +1177,11 @@ function renderWebsocketOwner(owner = {}) {
   setText("#ws-owner-token-count", `Tokens ${owner.active_token_count || 0}`);
   const blockers = owner.blockers || [];
   const health = blockers.length ? "Blocked" : owner.owner_status || "Stopped";
+  const age = owner.last_tick_age_ms ?? feed.last_tick_age_ms ?? feed.data_lag_ms ?? "-";
+  setText("#ws-owner-last-tick", formatAge(age));
   setText("#ws-owner-health", health);
   setText("#ws-owner-action", owner.next_action || blockers[0] || "Ready");
+  setText("#ws-owner-blockers", blockers.length ? blockers.join("; ") : "-");
 }
 
 async function refreshStatus() {
@@ -1176,7 +1214,7 @@ async function refreshStatus() {
   $("#paper-connection").textContent = connectionText(data.connections.PAPER);
   $("#live-connection").textContent = connectionText(data.connections.LIVE);
   renderCommandCenter(data);
-  renderWebsocketOwner(data.websocket_owner_state || {});
+  renderWebsocketOwner(data.websocket_owner_state || {}, data.feed || {});
   renderNetworkHealth(data.network_health || {});
   renderRecoveryStatus(data.recovery_status || {});
   $("#latest-result").textContent = JSON.stringify(data.last_backtest || data.last_replay?.summary || {}, null, 2);

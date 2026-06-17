@@ -168,8 +168,8 @@
             <div class="table-wrap"><table id="recovery-findings"></table></div>
           </section>
           <div class="grid two">
-            <section class="panel">
-              <h2>Zerodha Connection</h2>
+            <section class="panel" id="websocket-owner-card">
+              <h2>Zerodha Connection & Websocket Owner</h2>
               <div class="connection-grid">
                 <div><span>Virtual/Paper Data</span><strong id="paper-connection">Not Connected</strong></div>
                 <div><span>Real Money</span><strong id="live-connection">Not Connected</strong></div>
@@ -178,7 +178,9 @@
                 <div><span>Preferred Owner</span><strong id="ws-owner-preferred">NONE</strong><small>MAIN_APP or INTRADAY</small></div>
                 <div><span>Active Owner</span><strong id="ws-owner-active">NONE</strong><small id="ws-owner-mode">Mode -</small></div>
                 <div><span>Active Ticker</span><strong id="ws-owner-ticker">-</strong><small id="ws-owner-token-count">Tokens 0</small></div>
+                <div><span>Last Tick Age</span><strong id="ws-owner-last-tick">-</strong><small>stale means no valid market data yet</small></div>
                 <div><span>Feed Health</span><strong id="ws-owner-health">Stopped</strong><small id="ws-owner-action">Select owner</small></div>
+                <div><span>Blockers</span><strong id="ws-owner-blockers">-</strong><small>Main App and Intraday cannot own feed together</small></div>
               </div>
               <div class="actions">
                 <button type="button" id="ws-owner-main">Make Main App Owner</button>
@@ -335,7 +337,7 @@
               <small data-backtest-source="zerodha" hidden>Contract is resolved from strike and expiry.</small>
             </div>
             <div class="actions wide">
-              <button type="button" data-settings="backtest">Risk Settings</button>
+              <button type="button" data-settings="backtest">Main App Settings</button>
               <button type="button" id="apply-backtest-live">Apply Settings To Live</button>
               <button type="button" id="optimize-risk-settings">Optimize Risk Settings</button>
               <button type="button" id="stop-risk-optimizer" class="danger" disabled>Stop Risk Optimizer</button>
@@ -474,7 +476,7 @@
     <dialog id="settings-dialog">
       <form method="dialog" id="settings-form">
         <header>
-          <h2 id="settings-title">Risk Settings</h2>
+          <h2 id="settings-title">Main App Settings</h2>
           <button value="cancel" class="ghost" type="submit">Close</button>
         </header>
         <div id="settings-tabs" class="settings-tabs"></div>

@@ -54,6 +54,7 @@ Main App implementation contract:
 - User-defined lots are used exactly; risk mode must not auto-change quantity.
 - Strategy plugins only emit signals. They do not call Zerodha or mutate broker/order state.
 - Paper, Live, Live Monitor, and Backtest share the same decision kernel and lifecycle policy.
+- User-facing Main App settings expose only essentials first: mode/context, NIFTY/SENSEX underlying, risk mode, fixed `FAST_OHLCV` entry logic, lots, daily risk, square-off, bias controls, and explicit price-only futures fallback. Advanced thresholds are grouped under Advanced Expert Settings. Market-order, SL-M, order-product override, and market-entry conversion controls are hidden from the operator UI.
 
 Code paths affected:
 
@@ -80,4 +81,4 @@ Tests that prove compliance:
 - Main App direction/kernel tests for market phase, gap/opening range, CE/PE side restriction, futures VWAP confirmation, plugin confidence, and shared trade-plan generation.
 - Main App lifecycle tests for LIMIT-only order policy, NRML-only product, exact lots, SL-LIMIT before target, protection failure handling, target/SL reconciliation, paper ledger, and manual reconciliation on impossible double-fill.
 - Tick cache tests for latest-wins behavior, bounded queue, dropped tick metrics, and decision throttle mode.
-- Removal/owner/UI tests proving only Main App and Intraday remain as websocket owners and no removed route/page is registered.
+- Removal/owner/UI tests proving only Main App and Intraday remain as websocket owners, no removed route/page is registered, the websocket owner card shows operational fields, and the simplified Main App settings surface keeps forbidden controls out of the operator workflow.

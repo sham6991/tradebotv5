@@ -10,6 +10,9 @@ RUNTIME_ACCOUNT_KEYS = {"zerodha_margin_fetched", "broker_user_id", "available_m
 
 DEFAULT_SETTINGS = {
     "balance": "100000",
+    "underlying_id": "NIFTY",
+    "risk_mode": "Balanced",
+    "entry_logic": "FAST_OHLCV",
     "lot_size": "1",
     "max_trades": "5",
     "profit_points": "20",
@@ -24,6 +27,9 @@ DEFAULT_SETTINGS = {
     "time_exit": "10",
     "cooldown": "5",
     "chart_interval": "3 min",
+    "bias_mode": "Auto",
+    "manual_bias": "Auto",
+    "allow_price_only_direction_when_futures_unavailable": "false",
     "trend_set": "Auto",
     "bullish_threshold": "16",
     "bearish_threshold": "-15",
@@ -75,6 +81,9 @@ DEFAULT_SETTINGS = {
 
 SETTING_LABELS = {
     "balance": "Balance",
+    "underlying_id": "Underlying",
+    "risk_mode": "Risk Mode",
+    "entry_logic": "Entry Logic",
     "lot_size": "Lots",
     "max_trades": "Max Trades",
     "profit_points": "Profit Points",
@@ -89,6 +98,9 @@ SETTING_LABELS = {
     "time_exit": "Time Exit",
     "cooldown": "Cooldown",
     "chart_interval": "Chart Interval",
+    "bias_mode": "Bias Mode",
+    "manual_bias": "Manual 30-min Bias",
+    "allow_price_only_direction_when_futures_unavailable": "Allow Price-only Direction If Futures Missing",
     "trend_set": "Trend Set",
     "bullish_threshold": "Bullish Threshold",
     "bearish_threshold": "Bearish Threshold",
@@ -100,16 +112,16 @@ SETTING_LABELS = {
     "bearish_reversal_condition": "Bearish Reversal Condition",
     "fast_ohlcv_entry_enabled": "Fast OHLCV Entry",
     "buy_limit_score_low": "Buy Limit Score Low",
-    "market_entry_score": "Market Entry Score",
+    "market_entry_score": "Limit Momentum Score",
     "aggressive_entry_score": "Aggressive Entry Score",
     "trigger_upper_wick_max": "Trigger Upper Wick Max",
     "hard_rejection_upper_wick_max": "Hard Rejection Wick Max",
     "aggressive_upper_wick_max": "Aggressive Wick Max",
     "minimum_body_percent": "Minimum Body %",
-    "market_entry_minimum_body_percent": "Market Body %",
+    "market_entry_minimum_body_percent": "Momentum Body %",
     "aggressive_minimum_body_percent": "Aggressive Body %",
     "minimum_close_position": "Minimum Close Position",
-    "market_entry_minimum_close_position": "Market Close Position",
+    "market_entry_minimum_close_position": "Momentum Close Position",
     "aggressive_minimum_close_position": "Aggressive Close Position",
     "volume_previous_multiplier": "Previous Volume Multiplier",
     "avg_volume_minimum_multiplier": "Avg Volume Minimum",
@@ -221,8 +233,23 @@ def parse_runtime_setting_value(key, value):
         return normalise_interval(value)
     if key == "trend_set":
         return normalise_trend_set(value)
+    if key == "manual_bias":
+        return normalise_trend_set(value)
     if key == "order_product":
         return normalise_order_product(value)
+    if key == "underlying_id":
+        text = str(value or "NIFTY").strip().upper()
+        return text if text in {"NIFTY", "SENSEX"} else "NIFTY"
+    if key == "risk_mode":
+        text = str(value or "Balanced").strip().upper()
+        if text in {"CONSERVATIVE", "BALANCED", "AGGRESSIVE"}:
+            return text.title()
+        return "Balanced"
+    if key == "entry_logic":
+        return "FAST_OHLCV"
+    if key == "bias_mode":
+        text = str(value or "Auto").strip().upper()
+        return "Manual" if text == "MANUAL" else "Auto"
     if key in {
         "fast_ohlcv_entry_enabled",
         "enable_chop_filter",
@@ -230,6 +257,7 @@ def parse_runtime_setting_value(key, value):
         "one_entry_attempt_per_candle",
         "trailing_sl_enabled",
         "live_option_market_entry_as_limit_enabled",
+        "allow_price_only_direction_when_futures_unavailable",
     }:
         return str(value).strip().lower() in ("1", "true", "yes", "on", "enabled")
     if key in {
